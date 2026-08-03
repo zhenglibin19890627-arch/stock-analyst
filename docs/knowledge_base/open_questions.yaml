@@ -1,0 +1,46 @@
+# v5.0 遗留待决问题
+# 格式：人类可读 YAML，待决策后更新status为resolved
+# 更新时间：2026-07-18
+
+meta:
+  version: "5.0-revised"
+  last_updated: "2026-07-18"
+
+open_questions:
+  - id: D01
+    question: "news_sentiment中性填充值具体为多少？"
+    current_handling: "降级策略描述为'中性值填充'，实际填充留给引擎层"
+    suggested_value: 0.0
+    decision_timing: "评分引擎开发时确认"
+    status: open
+
+  - id: D02
+    question: "main_net_inflow中性填充值具体为多少？"
+    current_handling: "同D01，留给引擎层"
+    suggested_value: "0.0万元"
+    decision_timing: "评分引擎开发时确认"
+    status: open
+
+  - id: D03
+    question: "AnalysisResult.sentiment_score 与 DataQuality.news 命名不一致"
+    current_handling: "沿用契约原设计，sentiment_score对应消息面得分"
+    decision_timing: "评分引擎开发时统一"
+    status: open
+
+  - id: D04
+    question: "港股→人民币汇率源：v5.0固定0.92，何时切换为实时汇率？"
+    current_handling: "仅注释标注，适配器层负责"
+    decision_timing: "v6.0版本规划时"
+    status: deferred
+
+  - id: D05
+    question: "AnalysisResult.rating是否需约束为五档Literal枚举？"
+    current_handling: "自由str，未约束"
+    decision_timing: "评分引擎实现时"
+    status: open
+
+  - id: D06
+    question: "data_quality是否需要加权完整度（按子项权重加权而非简单计数）？"
+    current_handling: "未实现加权完整度，仅简单字段计数"
+    decision_timing: "评分引擎需按子项权重加权时扩展"
+    status: deferred

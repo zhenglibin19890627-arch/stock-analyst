@@ -1,0 +1,51 @@
+# v5.0 数据契约决策记录
+# 格式：人类可读 YAML，适合 Git diff 和手动审阅
+# 更新时间：2026-07-18
+
+meta:
+  version: "5.0-revised"
+  last_updated: "2026-07-18"
+  source: "v5_implementation_report_revised_20260717.md"
+
+decisions:
+  - id: Q01
+    topic: 汇率处理策略
+    status: decided
+    decision: "v5.0使用固定汇率0.92（港币→人民币），由适配器层负责转换"
+    location: "data_contract.py L8-9, L42-43"
+
+  - id: Q02
+    topic: DataQuality news/capital拆分
+    status: decided
+    decision: "news含2字段(news_sentiment/holder_increase)，capital含3字段(main_net_inflow/north_net_buy/margin_balance_chg)，四维独立计算"
+    location: "data_contract.py L193-194, L200-206, L227-237"
+
+  - id: Q03
+    topic: DEGRADATION_RULES统一表述
+    status: decided
+    decision: "26条规则统一使用'维度内子权重调整'表述，分三类：权重归零型(5)、权重降低型(16)、默认值填充型(3)"
+    location: "data_contract.py L139-170, L45-57"
+
+  - id: Q04
+    topic: volume_ratio默认值定性
+    status: decided
+    decision: "缺失时填充1.0，标注为'分析适配默认值，非数据修复'，原始数据仍None可追溯"
+    location: "data_contract.py L246-247"
+
+  - id: Q05
+    topic: MockDataProvider缺失率参数化
+    status: decided
+    decision: "_gen_partial增加missing_rate: float=0.3，支持0.0-1.0范围，超出自动clamp"
+    location: "mock_data_provider.py L85, L133, L264-269"
+
+  - id: Q06
+    topic: boundary exhaustive模式
+    status: decided
+    decision: "_gen_boundary增加mode参数，exhaustive模式逐字段×逐极端值生成56条List[StockData]"
+    location: "mock_data_provider.py L46-73, L84, L125-130, L195-258"
+
+  - id: BUGFIX-01
+    topic: Pydantic v2 ClassVar修复
+    status: decided
+    decision: "DEGRADATION_RULES改为ClassVar[Dict[str,str]]标注，解决Pydantic v2误判为model field的问题"
+    location: "data_contract.py L20(import), L139(标注)"

@@ -1,0 +1,93 @@
+{
+  "_说明": "四维分析引擎权重配置文件 — 修改后无需重启服务，下次分析自动生效",
+  "_更新时间": "2026-07-27 (O2-E回滚)",
+  "a_stock": {
+    "weights": {
+      "kline": 0.2507,
+      "fundamental": 0.2005,
+      "capital_flow": 0.3985,
+      "news": 0.1504
+    },
+    "_备注": "07-27 O2-E回滚：PM裁定权重调整与股票池数据特征反向，恢复07-22原值；O2-A+/O2-B子项分提升保留"
+  },
+  "hk_stock": {
+    "weights": {
+      "kline": 0.2945,
+      "fundamental": 0.36,
+      "capital_flow": 0.249,
+      "news": 0.0965
+    },
+    "_备注": "港股四维均衡配置，消息面10%%；港股数据源不稳定时归一化自动重分配"
+  },
+  "rating_mapping": {
+    "强烈推荐买入": {
+      "min": 80,
+      "max": 100,
+      "label": "强烈推荐买入"
+    },
+    "推荐买入": {
+      "min": 65,
+      "max": 79,
+      "label": "推荐买入"
+    },
+    "持有观望": {
+      "min": 50,
+      "max": 69,
+      "label": "持有观望"
+    },
+    "建议减仓": {
+      "min": 30,
+      "max": 49,
+      "label": "建议减仓"
+    },
+    "强烈建议卖出": {
+      "min": 0,
+      "max": 29,
+      "label": "强烈建议卖出"
+    }
+  },
+  "industry_overrides": {
+    "半导体": {
+      "kline": 0.2,
+      "fundamental": 0.3,
+      "capital_flow": 0.35,
+      "news": 0.15
+    },
+    "计算机设备": {
+      "kline": 0.2,
+      "fundamental": 0.25,
+      "capital_flow": 0.35,
+      "news": 0.2
+    },
+    "通信设备": {
+      "kline": 0.22,
+      "fundamental": 0.23,
+      "capital_flow": 0.35,
+      "news": 0.2
+    },
+    "酿酒行业": {
+      "kline": 0.25,
+      "fundamental": 0.3,
+      "capital_flow": 0.3,
+      "news": 0.15
+    },
+    "家电行业": {
+      "kline": 0.25,
+      "fundamental": 0.3,
+      "capital_flow": 0.3,
+      "news": 0.15
+    },
+    "医药制造": {
+      "kline": 0.25,
+      "fundamental": 0.28,
+      "capital_flow": 0.3,
+      "news": 0.17
+    },
+    "医疗服务": {
+      "kline": 0.25,
+      "fundamental": 0.28,
+      "capital_flow": 0.3,
+      "news": 0.17
+    }
+  }
+}

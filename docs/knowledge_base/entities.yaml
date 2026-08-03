@@ -1,0 +1,78 @@
+# v5.0 关键实体与属性
+# 格式：人类可读 YAML，适合快速查阅
+# 更新时间：2026-07-18
+
+meta:
+  version: "5.0-revised"
+  last_updated: "2026-07-18"
+
+entities:
+  StockData:
+    type: "Pydantic v2 BaseModel"
+    file: "modules/data_contract.py"
+    lines: "L35-298"
+    required_fields:
+      - code: "str, 标准化代码(600519.SH/00700.HK)"
+      - market: "Literal[A, HK]"
+      - trade_date: "str, YYYYMMDD 8位数字"
+      - close: "float, gt=0, 统一人民币计价"
+    optional_fields_count: 26
+    config: "ConfigDict(extra='allow')"
+    classvar: "DEGRADATION_RULES: ClassVar[Dict[str,str]], 26条降级规则"
+
+  DataQuality:
+    type: "Pydantic v2 BaseModel"
+    file: "modules/data_contract.py"
+    lines: "L24-32"
+    dimensions:
+      technical: "12字段, round(present/12, 2)"
+      fundamental: "9字段, round(present/9, 2)"
+      news: "2字段(news_sentiment/holder_increase), round(present/2, 2)"
+      capital: "3字段(main_net_inflow/north_net_buy/margin_balance_chg), round(present/3, 2)"
+
+  AnalysisResult:
+    type: "Pydantic v2 BaseModel"
+    file: "modules/data_contract.py"
+    lines: "L301-329"
+    key_fields:
+      total_score: "float 0-100"
+      rating: "str（暂未约束为五档Literal）"
+      technical_score: "Optional float 0-100"
+      fundamental_score: "Optional float 0-100"
+      sentiment_score: "Optional float 0-100（命名与DataQuality.news不一致，D03待统一）"
+      capital_score: "Optional float 0-100"
+      operation_suggestion: "str, 引擎动态生成"
+      data_warnings: "list[str]"
+      degradations: "Dict[str,str]"
+
+  MockDataProvider:
+    type: "普通类"
+    file: "modules/mock_data_provider.py"
+    lines: "L27-276"
+    scenarios:
+      normal: "26字段全有合理值，无额外参数"
+      boundary_random: "每字段随机选一个极端值，返回单条StockData"
+      boundary_exhaustive: "逐字段×逐极端值，56条List[StockData]"
+      partial: "参数化missing_rate(0.0-1.0)，随机置None"
+    key_attributes:
+      BOUNDARY_EXTREMES: "26字段×N极端值表，合计56个测试用例"
+      OPTIONAL_FIELDS: "26个非必填字段列表"
+      generate_params: "[scenario, code, market, trade_date, close, seed, boundary_mode, missing_rate]"
+
+  test_result:
+    total: 103
+    passed: 103
+    failed: 0
+    categories:
+      StockData_model: 22
+      DataQuality_model: 6
+      AnalysisResult_model: 5
+      degradation_rules_Q03: 8
+      compute_data_quality_Q02: 10
+      to_analysis_dict: 6
+      MockDataProvider_basic: 10
+      Q05_missing_rate: 6
+      Q06_exhaustive: 9
+      decoupling_check: 7
+      Q01_exchange_rate_note: 3
+      Q04_note_check: 1

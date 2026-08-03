@@ -1,0 +1,13 @@
+# Python 字节码与缓存
+__pycache__/
+*.pyc
+
+# 数据库文件
+*.db
+
+# 日志文件（含按日期轮转的日志）
+logs/*.log
+logs/*.log.*
+
+# Qoder 工具目录
+.qoder/
