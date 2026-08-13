@@ -24,6 +24,16 @@ import sys
 os.environ['NO_PROXY'] = '*'
 os.environ['no_proxy'] = '*'
 
+# pythonw（无控制台）启动时 sys.stdout/sys.stderr 为 None：
+# 第三方库（如 akshare 的 tqdm 进度条）写入 stderr 会抛
+# 'NoneType' object has no attribute 'write'，导致同花顺批量资金流采集
+# 主接口崩溃（主接口失败→重试→备选→回退EM，同花顺净额辅助数据全程缺失）。
+# 兜底重定向到 devnull，让依赖标准流的库正常工作。
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+
 # 确保能找到项目内的模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
