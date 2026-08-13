@@ -729,17 +729,10 @@ def generate_daily_report(target_date=None, force=False, report_type='daily'):
         fallback_count = 0
         reuse_count = 0
 
-        # === 018: 循环前批量预取A股同花顺辅助指标（不阻断东财逐只采集） ===
-        a_symbols = [s['symbol'] for s in stocks if s['market'] == 'a_stock']
-        if a_symbols:
-            try:
-                batch_result = fetch_capital_flow_batch(a_symbols)
-                logger.info(f'[日报] 资金面批量预取: {batch_result}')
-            except Exception as e:
-                logger.warning(f'[日报] 资金面批量预取失败(不阻断): {e}')
-
         # === 012-B: 批次超时 + 进度追踪 ===
-        batch_start = time.time()
+        # 初始进度提前写入（在资金面批量预取之前）：预取阶段可能耗时较长
+        # （同花顺接口异常时回退 EM 逐只采集 + 重试），若等预取结束才写进度文件，
+        # 前端进度条会长时间无反馈，误以为"生成卡死/失败"
         total = len(stocks)
         started_at_str = datetime.now(_CN_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
@@ -754,6 +747,47 @@ def generate_daily_report(target_date=None, force=False, report_type='daily'):
                 'status': 'running',
                 'started_at': started_at_str,
                 'last_update': '',
+                'finished_at': None,
+            }
+        )
+
+        # === 018: 循环前批量预取A股同花顺辅助指标（不阻断东财逐只采集） ===
+        a_symbols = [s['symbol'] for s in stocks if s['market'] == 'a_stock']
+        if a_symbols:
+            _update_progress_file(
+                {
+                    'date': target_date,
+                    'total': total,
+                    'current': 0,
+                    'current_symbol': f'共{len(a_symbols)}只',
+                    'current_name': '',
+                    'stage': '资金面批量预取中',
+                    'status': 'running',
+                    'started_at': started_at_str,
+                    'last_update': datetime.now(_CN_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+                    'finished_at': None,
+                }
+            )
+            try:
+                batch_result = fetch_capital_flow_batch(a_symbols)
+                logger.info(f'[日报] 资金面批量预取: {batch_result}')
+            except Exception as e:
+                logger.warning(f'[日报] 资金面批量预取失败(不阻断): {e}')
+
+        # 预取结束，进入逐只处理阶段（批次超时从此刻起算，预取耗时不计入）
+        batch_start = time.time()
+
+        _update_progress_file(
+            {
+                'date': target_date,
+                'total': total,
+                'current': 0,
+                'current_symbol': '',
+                'current_name': '',
+                'stage': '开始处理',
+                'status': 'running',
+                'started_at': started_at_str,
+                'last_update': datetime.now(_CN_TZ).strftime('%Y-%m-%d %H:%M:%S'),
                 'finished_at': None,
             }
         )
