@@ -957,14 +957,16 @@ def _migrate_to_unified_groups(cursor):
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='portfolio_groups'")
     has_portfolio_groups = cursor.fetchone() is not None
 
-    # 检查是否已迁移（通过备份表存在性判断）
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='_backup_stock_groups'"
-    )
-    already_migrated = cursor.fetchone() is not None
+    # 检查是否已迁移：以旧表数据量为准（不再依赖 _backup_* 标记表的存在性，
+    # 迁移残留的 _backup_* 备份表可安全清理而不会触发重复迁移）。
+    # 旧表均为空 = 从未使用旧结构，或已完成迁移（CREATE TABLE 每次启动会重建空表）。
+    cursor.execute('SELECT COUNT(*) FROM stock_groups')
+    stock_groups_count = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM portfolio_groups')
+    portfolio_groups_count = cursor.fetchone()[0]
 
-    if already_migrated or (not has_stock_groups and not has_portfolio_groups):
-        return  # 无需迁移
+    if stock_groups_count == 0 and portfolio_groups_count == 0:
+        return  # 旧表无数据，无需迁移
 
     print('[迁移] 开始迁移分组数据到统一 groups 表...')
 
@@ -1021,13 +1023,21 @@ def _migrate_to_unified_groups(cursor):
             cursor.execute('UPDATE holdings SET group_id=? WHERE group_id=?', (new_id, old_id))
         print(f'[迁移] holdings.group_id 映射完成 ({len(id_map_portfolio)} 个分组)')
 
-    # ---- 5. 备份旧表 ----
-    if has_stock_groups:
-        cursor.execute('ALTER TABLE stock_groups RENAME TO _backup_stock_groups')
-        print('[迁移] stock_groups 已备份为 _backup_stock_groups')
-    if has_portfolio_groups:
-        cursor.execute('ALTER TABLE portfolio_groups RENAME TO _backup_portfolio_groups')
-        print('[迁移] portfolio_groups 已备份为 _backup_portfolio_groups')
+    # ---- 5. 备份旧表（仅迁移有数据的旧表；目标备份名已存在时跳过，避免 ALTER 冲突）----
+    if has_stock_groups and stock_groups_count > 0:
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='_backup_stock_groups'"
+        )
+        if cursor.fetchone() is None:
+            cursor.execute('ALTER TABLE stock_groups RENAME TO _backup_stock_groups')
+            print('[迁移] stock_groups 已备份为 _backup_stock_groups')
+    if has_portfolio_groups and portfolio_groups_count > 0:
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='_backup_portfolio_groups'"
+        )
+        if cursor.fetchone() is None:
+            cursor.execute('ALTER TABLE portfolio_groups RENAME TO _backup_portfolio_groups')
+            print('[迁移] portfolio_groups 已备份为 _backup_portfolio_groups')
 
     print('[迁移] 分组迁移完成。')
 
