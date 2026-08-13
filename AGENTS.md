@@ -83,7 +83,7 @@ python app.py
 # 标准验证命令（在项目根目录运行）
 python -m pytest tests/
 ruff check .
-mypy stock_analyst/
+mypy app.py config.py modules
 ```
 
 > **测试目录说明**：项目根目录下已建立独立 `tests/` 目录，作为标准单元测试入口，包含：

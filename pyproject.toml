@@ -1,0 +1,82 @@
+# ============================================================
+# Python 质量门禁配置（Stock Analyst 项目内版本）
+# 自 2026-08-13 独立成库后生效：工具在项目根目录执行时读取本文件，
+# 不再依赖父目录的旧工作区级配置。
+# 工具：ruff（lint + format）、mypy（类型检查）
+#
+# 常用命令（在项目根目录执行）：
+#   ruff check .            # 静态检查
+#   ruff check . --fix      # 自动修复
+#   ruff format .           # 代码格式化
+#   ruff format --check .   # 格式校验（CI 用）
+# ============================================================
+
+[project]
+name = "stock-analyst"
+version = "1.1.0"
+requires-python = ">=3.12"
+
+# -------------------- Ruff：全局设置 --------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# 排除非源码目录（报告/日志/截图/文档均为非 .py 产物，避免误读编码报错）
+extend-exclude = [
+    "reports",
+    "logs",
+    "screenshots",
+    "docs",
+]
+
+# -------------------- Ruff：Lint 规则 --------------------
+[tool.ruff.lint]
+# 基础规则集（均可自动修复或为真问题，适合既有代码库）：
+#   E   pycodestyle 错误（语法/空格等）
+#   W   pycodestyle 警告
+#   F   pyflakes（未用导入/变量、f-string 占位符缺失等 bug 类）
+#   I   isort 导入排序
+#   UP  pyupgrade（语法现代化，如移除冗余编码声明）
+select = ["E", "W", "F", "I", "UP"]
+ignore = [
+    "E501",   # 行长由 ruff format 统一管理，不在 lint 中强制
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试/对比脚本放宽未用导入与未用变量
+"**/test_*.py" = ["F401", "F841"]
+# 以下文件含 sys.path 注入 / 第三方库延迟导入等必要模式，
+# 其模块级导入无法置于文件顶部，豁免 E402：
+"modules/data_collector.py" = ["E402"]
+"scripts/*.py" = ["E402"]
+"tests/conftest.py" = ["E402"]
+"test_us11_consistency.py" = ["E402"]
+
+# -------------------- Ruff：Format 格式化 --------------------
+[tool.ruff.format]
+quote-style = "single"      # 与现有代码风格一致（单引号为主）
+indent-style = "space"
+line-ending = "auto"
+docstring-code-format = false
+
+# -------------------- Mypy：类型检查（基础配置） --------------------
+# 现阶段为“基础配置”：现有代码尚未补全类型注解，故采用宽松策略，
+# 仅启用第三方库缺失 stub 忽略与冗余 cast 提示，不强制 disallow_untyped_defs。
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = false
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+
+# 核心检查范围（入口 + 全局配置 + 业务模块）
+files = [
+    "app.py",
+    "config.py",
+    "modules",
+]
+
+[[tool.mypy.overrides]]
+# 第三方数据源库无类型 stub，统一忽略
+module = ["akshare.*", "pandas.*", "numpy.*"]
+ignore_missing_imports = true
