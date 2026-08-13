@@ -137,16 +137,29 @@ def _save_raw_sentiment(stock_id, news_items):
             url = item.get('url', '')
             sentiment = item.get('sentiment', 0.0)
 
+            title_key = title[:500]
+            # 防重复：同股同标题已存在则跳过。
+            # 东财个股新闻接口常连续多天返回相同新闻列表，
+            # 且表无唯一约束（title 为 TEXT 不适合建索引），
+            # 历史上曾因纯 INSERT 造成全库 87% 冗余（9960 行仅 1259 条不同新闻），
+            # 2026-08-13 已清理并在此加查重防新增。
+            cursor.execute(
+                'SELECT 1 FROM raw_sentiment WHERE stock_id=? AND title=? LIMIT 1',
+                (stock_id, title_key),
+            )
+            if cursor.fetchone():
+                continue
+
             # 写入 raw_sentiment（info_type='news'）
             cursor.execute(
                 """
-                INSERT OR REPLACE INTO raw_sentiment
+                INSERT INTO raw_sentiment
                 (stock_id, info_type, title, content, sentiment_score, info_date, source)
                 VALUES (?, 'news', ?, ?, ?, ?, ?)
             """,
                 (
                     stock_id,
-                    title[:500],
+                    title_key,
                     content[:1000],
                     round(sentiment, 4),
                     date_str[:10] if date_str else None,
