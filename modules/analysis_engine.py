@@ -3,6 +3,17 @@
 基于K线技术面、基本面、资金面（消息面暂不可用）三个维度，
 通过量化因子打分，输出0-100综合评级。
 
+⚠️ LEGACY 状态（2026-08-13 标注）：
+  本模块为 v4 旧版评分引擎，灰度切换（config_engine_switch.json）已完成 all_v5，
+  但【不可删除】，原因：
+    1. modules/advisor.py 直接 import 本模块的 analyze_stock 作为 v5 失败时的回退路径
+    2. modules/engine_switcher.py 熔断机制依赖 legacy 回退（v5 连续失败自动降级）
+    3. app.py 启动自检用 validate_rating_config；/api/stocks/<id>/news 用 _dedup_news
+  清理条件（满足后可在独立 PR 中移除）：
+    - advisor.py 中 v5 fallback 路径改为由 engine_switcher 统一管理（不再直接 import 本模块）
+    - _dedup_news / validate_rating_config 迁移到共享模块
+  在此之前请勿修改本模块核心评分逻辑。
+
 核心功能：
 1. 分维度评分（技术面/基本面/资金面/消息面）
 2. 权重自适应归一化（数据缺失时自动重分配权重）

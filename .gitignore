@@ -2,17 +2,26 @@
 __pycache__/
 *.pyc
 
+# 测试/静态分析缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 # 数据库文件
 *.db
 *.db-shm
 *.db-wal
 
 # 日志文件（含按日期轮转的日志）
-logs/*.log
-logs/*.log.*
+logs/
 
 # 破坏性操作前自动生成的数据库备份
 backups/
 
-# Qoder 工具目录
+# 运行/环境工具目录
 .qoder/
+.reasonix/
+.reasonix_tmp/
+
+# 一次性诊断/生成脚本残留
+_tmp_*.py

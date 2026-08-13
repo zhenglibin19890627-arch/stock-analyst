@@ -1,5 +1,22 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-13] 代码结构治理（app.py 拆分 / 脚本归档 / 路由测试）
+
+### 结构调整（本次改造）
+- **app.py 按业务域拆分为 blueprints/ 蓝图包**（4094 行 → 约 130 行入口）
+  - 新增 9 个业务蓝图：watchlist（自选股/分组/采集）/ analysis（分析/评级/v5）/ portfolio（持仓/流水/成本）/ report（日报）/ system（健康/引擎）/ backtest（回测/优化）/ export（导出）/ index_ratings（指数）/ alerts（预警）
+  - 共享展示层工具函数（_fmt_* / _derive_obos_signal / _resolve_report_type 等 9 个）迁至 blueprints/_utils.py
+  - 函数体零改动，仅装饰器 @app.route → @bp.route；102 函数 / 77 路由与拆分前逐一对齐
+- **scripts/ 诊断脚本归档**：12 个 diag_*.py（东财反爬/数据源排障等历史一次性脚本）移入 scripts/archive/diag/
+- **新增 tests/test_routes.py 路由层冒烟测试**：16 个用例，覆盖全部 9 个蓝图的核心端点（隔离临时库，不触网）
+- **analysis_engine.py 标注 LEGACY 状态**：灰度已完成 all_v5，但作为 advisor 回退路径与 engine_switcher 熔断依赖暂不可删，docstring 注明清理条件
+- **.gitignore 完善**：补充 .pytest_cache/ .mypy_cache/ .reasonix/ 等，清除误提交的 31 个 .reasonix 环境文件
+
+### 验证
+- `python -m pytest tests/`：392 passed（原 376 + 新增 16），1 skipped
+- `ruff check .`：通过
+- 真实启动冒烟：/api/health、首页、db-stats、ratings、engine/status、stocks 全部 200
+
 ## [2026-07-29] 009 价格建议增强（全栈开发）
 
 ### 009: 价格建议增强模块（glm5.2）
