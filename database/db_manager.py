@@ -869,6 +869,28 @@ def init_database():
         )
     """)
 
+    # 业绩预告（东财 stock_yjyg_em，A股；业绩预告是财报前的先行指标）
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS raw_forecast (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stock_id INTEGER NOT NULL,
+            symbol TEXT,                     -- 股票代码（冗余，便于排查）
+            report_period TEXT,              -- 报告期（如 20260630）
+            indicator TEXT,                  -- 预测指标（净利润/营业收入/扣非净利润）
+            change_desc TEXT,                -- 业绩变动描述（原文）
+            forecast_value REAL,             -- 预测数值（元，区间中值）
+            change_pct REAL,                 -- 业绩变动幅度（%）
+            change_reason TEXT,              -- 业绩变动原因
+            forecast_type TEXT,              -- 预告类型（预增/略增/扭亏/预减/略减/续盈等）
+            last_year_value REAL,            -- 上年同期值（元）
+            announce_date TEXT,              -- 公告日期
+            data_source TEXT DEFAULT 'akshare_em',
+            fetched_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+            UNIQUE(stock_id, report_period, indicator),
+            FOREIGN KEY (stock_id) REFERENCES stocks(id)
+        )
+    """)
+
     # 索引：未读预警列表（高频查询）
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_alert_history_unread

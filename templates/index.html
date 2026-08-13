@@ -2584,7 +2584,8 @@
             fetch(`/api/stocks/${id}/orderbook`).then(r => r.json()),
             fetch(`/api/stocks/${id}/valuation`).then(r => r.json()),
             fetch(`/api/stocks/${id}/restricted-release`).then(r => r.json()),
-        ]).then(([kline, fund, capital, status, news, orderbook, valuation, restricted]) => {
+            fetch(`/api/stocks/${id}/forecast`).then(r => r.json()),
+        ]).then(([kline, fund, capital, status, news, orderbook, valuation, restricted, forecast]) => {
             // 采集状态卡片（显示在自选股列表下方、数据卡片上方）
             let html = '<div class="card"><div class="card-title">📋 采集状态记录</div>';
             if (status.success && status.data.length > 0) {
@@ -2649,6 +2650,34 @@
                 html += '</tbody></table>';
             } else {
                 html += '<div class="alert alert-warning">暂无基本面数据，请先点击"采集数据"</div>';
+            }
+
+            // 业绩预告（东财，A股；业绩预告是财报前的先行指标）
+            const fcTypes = {
+                '预增': {color: '#c62828', label: '预增↑'}, '略增': {color: '#e65100', label: '略增'},
+                '扭亏': {color: '#c62828', label: '扭亏↑'}, '续盈': {color: '#2e7d32', label: '续盈'},
+                '预减': {color: '#1565c0', label: '预减↓'}, '略减': {color: '#1565c0', label: '略减'},
+                '首亏': {color: '#1565c0', label: '首亏↓'}, '续亏': {color: '#1565c0', label: '续亏'},
+            };
+            html += '<h4 style="margin: 24px 0 8px;">📢 业绩预告<span style="font-size:12px;color:#999;font-weight:normal;">　来源：东财业绩预告（akshare）</span></h4>';
+            if (forecast.success && forecast.count > 0) {
+                html += '<table><thead><tr><th>报告期</th><th>指标</th><th>预告类型</th><th>预测数值</th><th>变动幅度</th><th>上年同期</th><th>公告日期</th></tr></thead><tbody>';
+                forecast.data.forEach(f => {
+                    const t = fcTypes[f.forecast_type] || {color: '#666', label: f.forecast_type || '—'};
+                    const typeTag = '<span style="color:' + t.color + ';font-weight:600;">' + t.label + '</span>';
+                    const pctColor = (f.change_pct ?? 0) > 0 ? '#c62828' : (f.change_pct ?? 0) < 0 ? '#1565c0' : '#666';
+                    html += '<tr><td>' + (f.report_period || '—') + '</td>' +
+                        '<td>' + (f.indicator || '—') + '</td>' +
+                        '<td>' + typeTag + '</td>' +
+                        '<td>' + (f.forecast_value_fmt || '—') + '</td>' +
+                        '<td style="color:' + pctColor + ';font-weight:600;">' + (f.change_pct_fmt || '—') + '</td>' +
+                        '<td>' + (f.last_year_value_fmt || '—') + '</td>' +
+                        '<td>' + (f.announce_date || '—') + '</td></tr>';
+                    html += '<tr><td colspan="7" style="color:#666;font-size:12px;background:#fafafa;">' + (f.change_desc || '') + '</td></tr>';
+                });
+                html += '</tbody></table>';
+            } else {
+                html += '<div class="alert alert-info">最近三个报告期暂无业绩预告</div>';
             }
 
             // 资金面数据

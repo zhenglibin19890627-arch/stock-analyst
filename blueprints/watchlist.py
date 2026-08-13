@@ -10,6 +10,7 @@ from blueprints._utils import (
     _derive_obos_signal,
     _fmt_num,
     _fmt_pct,
+    _fmt_wan,
     _get_market_by_stock_id,
 )
 
@@ -559,6 +560,7 @@ def api_collect_data(stock_id):
             'kline': 'K线(技术面)',
             'fundamental': '基本面',
             'capital': '资金面',
+            'forecast': '业绩预告',
             'sentiment': '消息面',
         }
         summary[dim_names.get(dim, dim)] = {'status': status, 'message': msg}
@@ -626,6 +628,33 @@ def api_get_fundamental(stock_id):
         for f in num_fields:
             key = f + '_fmt'
             row[key] = _fmt_num(row.get(f))
+
+    return jsonify({'success': True, 'data': rows, 'count': len(rows)})
+
+
+@bp.route('/api/stocks/<int:stock_id>/forecast', methods=['GET'])
+def api_get_forecast(stock_id):
+    """查看采集到的业绩预告数据"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT report_period, indicator, change_desc, forecast_value, change_pct,
+               change_reason, forecast_type, last_year_value, announce_date,
+               data_source, fetched_at
+        FROM raw_forecast WHERE stock_id = ?
+        ORDER BY report_period DESC, announce_date DESC
+    """,
+        (stock_id,),
+    )
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+
+    # 金额换算为亿元/万元展示（DB 存元）
+    for row in rows:
+        row['forecast_value_fmt'] = _fmt_wan(row.get('forecast_value'))
+        row['last_year_value_fmt'] = _fmt_wan(row.get('last_year_value'))
+        row['change_pct_fmt'] = _fmt_pct(row.get('change_pct'))
 
     return jsonify({'success': True, 'data': rows, 'count': len(rows)})
 

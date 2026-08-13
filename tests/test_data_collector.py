@@ -417,3 +417,91 @@ class TestStockDataContractMapping:
         data = provider.generate('partial', code='600519.SH', market='A', seed=3, missing_rate=0.5)
         dq = data.compute_data_quality()
         assert dq.technical < 1.0 or dq.fundamental < 1.0
+
+
+# ============================================================
+# 业绩预告采集 collect_forecast（mock 数据源 + 隔离临时库）
+# ============================================================
+
+
+class TestForecastCollection:
+    """业绩预告：报告期候选、数值转换、写入与防重、港股跳过"""
+
+    def test_forecast_report_periods(self):
+        """候选报告期应为 [今年0630, 今年0331, 去年1231]"""
+        ps = dc._forecast_report_periods()
+        assert len(ps) == 3
+        assert ps[0].endswith('0630')
+        assert ps[1].endswith('0331')
+        assert ps[2].endswith('1231')
+
+    def test_safe_num(self):
+        """安全数值转换：None/NaN/非数值 → None，其余转 float"""
+        assert dc._safe_num(None) is None
+        assert dc._safe_num(float('nan')) is None
+        assert dc._safe_num('abc') is None
+        assert dc._safe_num('1.5') == 1.5
+        assert dc._safe_num(3) == 3.0
+
+    def test_collect_forecast_writes_and_dedup(self, tmp_path, monkeypatch):
+        """写入命中预告行，重复采集不产生重复（UNIQUE + INSERT OR REPLACE）"""
+        import pandas as pd
+
+        from database import db_manager
+
+        db_file = tmp_path / 'fc_test.db'
+        monkeypatch.setattr(db_manager, 'DB_PATH', str(db_file))
+        monkeypatch.setattr(db_manager, 'BACKUP_DIR', str(tmp_path / 'backups'))
+        db_manager.init_database()
+        conn = db_manager.get_connection()
+        conn.execute("INSERT INTO stocks (symbol, market, name) VALUES ('002458', 'a_stock', '益生股份')")
+        conn.commit()
+        conn.close()
+
+        df = pd.DataFrame(
+            {
+                '股票代码': [2458, 2458],
+                '预测指标': ['归属于上市公司股东的净利润', '营业收入'],
+                '业绩变动': ['预计盈利2.85亿', '预计营收10.9亿'],
+                '预测数值': [2.85e8, 1.09e9],
+                '业绩变动幅度': [4530.31, 40.52],
+                '业绩变动原因': ['原因A', '原因B'],
+                '预告类型': ['预增', '略增'],
+                '上年同期值': [None, 7.76e8],
+                '公告日期': ['2026-07-01', '2026-07-01'],
+                '_code6': ['002458', '002458'],
+            }
+        )
+        monkeypatch.setattr(
+            dc, '_get_forecast_df_for_period', lambda p: df if p == '20260630' else None
+        )
+
+        status, msg = dc.collect_forecast(1, '002458', 'a_stock')
+        assert status == 'success'
+        assert '2' in msg
+
+        # 重复采集：防重后行数不变
+        dc.collect_forecast(1, '002458', 'a_stock')
+        conn = db_manager.get_connection()
+        n = conn.execute('SELECT COUNT(*) FROM raw_forecast').fetchone()[0]
+        assert n == 2
+        # 数值正确入库（元）
+        v = conn.execute('SELECT forecast_value FROM raw_forecast WHERE indicator=?', ('营业收入',)).fetchone()[0]
+        assert v == 1.09e9
+        # data_status 写入
+        st = conn.execute("SELECT status FROM data_status WHERE dimension='forecast'").fetchone()[0]
+        assert st == 'success'
+        conn.close()
+
+    def test_collect_forecast_hk_skipped(self, tmp_path, monkeypatch):
+        """港股跳过（无东财业绩预告），状态写 skipped"""
+        from database import db_manager
+
+        db_file = tmp_path / 'fc_hk.db'
+        monkeypatch.setattr(db_manager, 'DB_PATH', str(db_file))
+        monkeypatch.setattr(db_manager, 'BACKUP_DIR', str(tmp_path / 'backups'))
+        db_manager.init_database()
+
+        status, msg = dc.collect_forecast(1, 'HK3690', 'hk_stock')
+        assert status == 'skipped'
+        assert '港股' in msg

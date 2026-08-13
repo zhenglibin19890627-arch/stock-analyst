@@ -1009,6 +1009,124 @@ def _extract_indicator_rows(df, max_periods=4):
     return rows
 
 
+# ============================================================
+# 业绩预告采集（东财 stock_yjyg_em，A股）
+# ============================================================
+# 全市场预告 DataFrame 缓存：按报告期 key，1 小时 TTL，
+# 避免批量场景每只股票重复下载全市场 4800+ 行数据
+_FORECAST_CACHE = {'data': {}, 'ts': 0.0}
+_FORECAST_CACHE_TTL = 3600
+
+
+def _forecast_report_periods():
+    """候选报告期列表（新→旧）：今年中报、今年一季报、去年年报"""
+    y = datetime.now(_CN_TZ).year
+    return [f'{y}0630', f'{y}0331', f'{y - 1}1231']
+
+
+def _get_forecast_df_for_period(period):
+    """拉取指定报告期的全市场业绩预告（带 1 小时内存缓存），返回 DataFrame 或 None"""
+    global _FORECAST_CACHE
+    now_ts = time.time()
+    cached = _FORECAST_CACHE['data'].get(period)
+    if cached is not None and (now_ts - _FORECAST_CACHE['ts']) < _FORECAST_CACHE_TTL:
+        return cached
+    try:
+        import akshare as ak
+
+        logger.info(f'[业绩预告] 请求 stock_yjyg_em(date={period})')
+        df = ak.stock_yjyg_em(date=period)
+        if df is None or df.empty:
+            logger.warning(f'[业绩预告] 报告期 {period} 返回空数据')
+            return None
+        df['_code6'] = df['股票代码'].astype(str).str.zfill(6)
+        _FORECAST_CACHE['data'][period] = df
+        _FORECAST_CACHE['ts'] = now_ts
+        return df
+    except Exception as e:
+        logger.warning(f'[业绩预告] 报告期 {period} 获取失败: {e}')
+        return None
+
+
+def collect_forecast(stock_id, symbol, market='a_stock'):
+    """采集单只股票业绩预告（东财），写入 raw_forecast。
+
+    港股无东财业绩预告数据，跳过。
+    按报告期（今年中报→一季报→去年年报）逐期尝试，写入全部命中的预告行。
+    返回 (status, message)。
+    """
+    if market != 'a_stock':
+        save_data_status(stock_id, 'forecast', 'skipped', '港股无东财业绩预告数据')
+        return 'skipped', '港股无东财业绩预告数据'
+
+    try:
+        written = 0
+        used_periods = []
+        for period in _forecast_report_periods():
+            df = _get_forecast_df_for_period(period)
+            if df is None or df.empty:
+                continue
+            stock_rows = df[df['_code6'] == symbol]
+            if stock_rows.empty:
+                continue
+            used_periods.append(period)
+            conn = get_connection()
+            cursor = conn.cursor()
+            for _, row in stock_rows.iterrows():
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO raw_forecast
+                        (stock_id, symbol, report_period, indicator, change_desc,
+                         forecast_value, change_pct, change_reason, forecast_type,
+                         last_year_value, announce_date, data_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'akshare_em')
+                """,
+                    (
+                        stock_id,
+                        symbol,
+                        period,
+                        str(row.get('预测指标') or ''),
+                        str(row.get('业绩变动') or '')[:1000],
+                        _safe_num(row.get('预测数值')),
+                        _safe_num(row.get('业绩变动幅度')),
+                        str(row.get('业绩变动原因') or '')[:1500],
+                        str(row.get('预告类型') or ''),
+                        _safe_num(row.get('上年同期值')),
+                        str(row.get('公告日期') or '')[:10],
+                    ),
+                )
+                written += 1
+            conn.commit()
+            conn.close()
+
+        if written > 0:
+            msg = f'业绩预告已入库 {written} 条（报告期: {", ".join(used_periods)}）'
+            save_data_status(stock_id, 'forecast', 'success', msg)
+            return 'success', msg
+        msg = f'最近三个报告期暂无业绩预告（{", ".join(_forecast_report_periods())}）'
+        save_data_status(stock_id, 'forecast', 'success', msg)
+        return 'success', msg
+    except Exception as e:
+        logger.warning(f'[{symbol}] 业绩预告采集失败: {e}')
+        save_data_status(stock_id, 'forecast', 'failed', str(e))
+        return 'failed', str(e)
+
+
+def _safe_num(v):
+    """安全数值转换：None/NaN/非数值 → None"""
+    try:
+        import math
+
+        if v is None:
+            return None
+        f = float(v)
+        if math.isnan(f):
+            return None
+        return f
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_a_fundamental(symbol, force_full=False):
     """采集A股基本面数据：财务指标 + PE/PB估值
     011增量：80天财报TTL + 24h PE/PB TTL，双门控独立。
@@ -4283,6 +4401,21 @@ def collect_stock_data(symbol, market, force_full=False):
             type(e).__name__,
             str(e),
             dimension='restricted_release',
+            traceback_str=traceback.format_exc(),
+        )
+
+    # 业绩预告（A股；港股跳过）
+    try:
+        results['forecast'] = collect_forecast(stock_id, symbol, market)
+    except Exception as e:
+        results['forecast'] = ('failed', f'业绩预告采集异常: {e}')
+        logger.warning(f'[{symbol}] 业绩预告采集失败: {e}')
+        _log_error_to_db(
+            stock_id,
+            'data_collector',
+            type(e).__name__,
+            str(e),
+            dimension='forecast',
             traceback_str=traceback.format_exc(),
         )
 
