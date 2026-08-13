@@ -1,7 +1,8 @@
 """指数数据与评级 API 蓝图(自 app.py 拆分,函数体零改动)。"""
 
-from database.db_manager import get_connection
 from flask import Blueprint, jsonify
+
+from database.db_manager import get_connection
 
 bp = Blueprint('index_ratings', __name__)
 

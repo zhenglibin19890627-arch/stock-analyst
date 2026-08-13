@@ -24,7 +24,6 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db_manager import backup_database, get_connection
-
 from modules.scoring_engine import normalize_rating
 
 logger = logging.getLogger(__name__)

@@ -10,6 +10,7 @@ scoring_engine.py 聚焦单元测试
 """
 
 import pytest
+
 from modules.data_contract import StockData
 from modules.scoring_engine import (
     CAPITAL_SUBITEMS,

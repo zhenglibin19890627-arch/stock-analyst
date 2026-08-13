@@ -1,7 +1,8 @@
 """评级回测/价格回测/自动优化 API 蓝图(自 app.py 拆分,函数体零改动)。"""
 
-from database.db_manager import get_connection
 from flask import Blueprint, jsonify, request
+
+from database.db_manager import get_connection
 
 bp = Blueprint('backtest', __name__)
 

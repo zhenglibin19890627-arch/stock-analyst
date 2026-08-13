@@ -37,6 +37,8 @@ if sys.stderr is None:
 # 确保能找到项目内的模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from flask import Flask, render_template
+
 from blueprints import ALL_BLUEPRINTS
 from config import (
     FLASK_DEBUG,
@@ -44,7 +46,6 @@ from config import (
     FLASK_PORT,
 )
 from database.db_manager import init_database
-from flask import Flask, render_template
 
 app = Flask(__name__)
 

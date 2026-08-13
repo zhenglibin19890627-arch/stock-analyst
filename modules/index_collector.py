@@ -276,7 +276,6 @@ def score_index(index_info: dict) -> dict:
         评级结果字典
     """
     from database.db_manager import get_connection
-
     from modules.data_contract import StockData
     from modules.scoring_engine import analyze
 

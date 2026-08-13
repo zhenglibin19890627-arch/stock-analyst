@@ -20,7 +20,6 @@ from datetime import timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db_manager import get_connection
-
 from modules.data_contract import StockData
 
 logger = logging.getLogger(__name__)

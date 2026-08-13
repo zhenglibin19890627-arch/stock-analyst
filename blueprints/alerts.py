@@ -1,7 +1,8 @@
 """智能预警规则与扫描 API 蓝图(自 app.py 拆分,函数体零改动)。"""
 
-from database.db_manager import get_connection
 from flask import Blueprint, jsonify, request
+
+from database.db_manager import get_connection
 
 bp = Blueprint('alerts', __name__)
 

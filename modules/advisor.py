@@ -18,7 +18,6 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db_manager import get_connection
-
 from modules import scoring_engine
 from modules.analysis_engine import analyze_stock
 from modules.engine_switcher import record_v5_failure, record_v5_success, should_use_v5

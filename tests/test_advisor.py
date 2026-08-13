@@ -15,6 +15,7 @@ advisor.py 聚焦单元测试
 """
 
 import pytest
+
 from modules.advisor import (
     DIM_NAMES,
     _build_detail_text,

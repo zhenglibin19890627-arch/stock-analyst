@@ -385,7 +385,6 @@ def export_watchlist() -> io.BytesIO:
 def export_backtest(market: str = 'a_stock') -> io.BytesIO:
     """生成回测报告 Excel"""
     from database.db_manager import get_connection
-
     from modules.backtest_engine import BacktestEngine
 
     engine = BacktestEngine()

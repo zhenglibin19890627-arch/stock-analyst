@@ -2,6 +2,9 @@
 
 import json
 
+from flask import Blueprint, jsonify, request
+
+from blueprints._utils import _derive_obos_signal, _latest_report_join_sql
 from config import (
     COST_ADJUSTMENT_COOLDOWN_HOURS,
     COST_ADJUSTMENT_DEVIATION_THRESHOLD,
@@ -10,9 +13,6 @@ from config import (
     TRADE_T1_LOCK_ENABLED,
 )
 from database.db_manager import get_connection
-from flask import Blueprint, jsonify, request
-
-from blueprints._utils import _derive_obos_signal, _latest_report_join_sql
 
 bp = Blueprint('portfolio', __name__)
 

@@ -13,6 +13,7 @@
 from datetime import datetime, timedelta
 
 import pytest
+
 from database import db_manager
 from modules.daily_report import _build_data_freshness, _days_between
 
@@ -120,7 +121,7 @@ class TestDataFreshness:
 
         r = _build_data_freshness(1)
         assert r['has_issue'] is True
-        assert any('估算兜底' in l for l in r['lines'])
+        assert any('估算兜底' in line for line in r['lines'])
 
     def test_capital_sina_fallback_flag(self, db):
         """资金面新浪顶替 → 有 issue"""
@@ -131,7 +132,7 @@ class TestDataFreshness:
 
         r = _build_data_freshness(1)
         assert r['has_issue'] is True
-        assert any('新浪顶替' in l for l in r['lines'])
+        assert any('新浪顶替' in line for line in r['lines'])
 
     def test_kline_stale_flag(self, db):
         """K线滞后 5 天 → ⚠️"""
@@ -142,7 +143,7 @@ class TestDataFreshness:
 
         r = _build_data_freshness(1)
         assert r['has_issue'] is True
-        assert any('K线' in l and '⚠️' in l for l in r['lines'])
+        assert any('K线' in line and '⚠️' in line for line in r['lines'])
 
     def test_news_stale_flag(self, db):
         """新闻滞后 10 天 → ⚠️"""
@@ -153,13 +154,13 @@ class TestDataFreshness:
 
         r = _build_data_freshness(1)
         assert r['has_issue'] is True
-        assert any('消息面' in l and '⚠️' in l for l in r['lines'])
+        assert any('消息面' in line and '⚠️' in line for line in r['lines'])
 
     def test_all_missing(self, db):
         """全部维度缺失 → ⚠️"""
         r = _build_data_freshness(1)
         assert r['has_issue'] is True
-        assert any('缺失' in l for l in r['lines'])
+        assert any('缺失' in line for line in r['lines'])
 
     def test_forecast_present(self, db):
         """业绩预告有数据 → 行说明条数与报告期"""
@@ -176,4 +177,4 @@ class TestDataFreshness:
         conn.close()
 
         r = _build_data_freshness(1)
-        assert any('业绩预告' in l and '20260630' in l for l in r['lines'])
+        assert any('业绩预告' in line and '20260630' in line for line in r['lines'])

@@ -1,7 +1,5 @@
 """自选股/分组/个股数据/采集/批量分析 API 蓝图(自 app.py 拆分,函数体零改动)。"""
 
-from config import MAX_WATCHLIST_SIZE
-from database.db_manager import get_connection, init_database
 from flask import Blueprint, jsonify, request
 
 from blueprints._utils import (
@@ -13,6 +11,8 @@ from blueprints._utils import (
     _fmt_wan,
     _get_market_by_stock_id,
 )
+from config import MAX_WATCHLIST_SIZE
+from database.db_manager import get_connection, init_database
 
 bp = Blueprint('watchlist', __name__)
 

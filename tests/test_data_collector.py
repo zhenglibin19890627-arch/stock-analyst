@@ -23,6 +23,7 @@ from datetime import timedelta as _td
 
 import numpy as np
 import pytest
+
 from modules import data_collector as dc
 from modules.data_contract import StockData
 from modules.mock_data_provider import MockDataProvider

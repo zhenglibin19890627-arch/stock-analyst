@@ -3,9 +3,10 @@
 import json
 import os
 
+from flask import Blueprint, jsonify, request
+
 from config import FLASK_PORT
 from database.db_manager import get_connection
-from flask import Blueprint, jsonify, request
 
 bp = Blueprint('system', __name__)
 

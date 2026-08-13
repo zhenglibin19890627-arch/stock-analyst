@@ -1,9 +1,9 @@
 """四维分析/评级/建议/v5 评分演示 API 蓝图(自 app.py 拆分,函数体零改动)。"""
 
-from database.db_manager import get_connection
 from flask import Blueprint, jsonify, request
 
 from blueprints._utils import _derive_obos_signal, _resolve_report_type
+from database.db_manager import get_connection
 
 bp = Blueprint('analysis', __name__)
 

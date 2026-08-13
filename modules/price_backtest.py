@@ -24,7 +24,6 @@ from database.db_manager import (
     backup_database,
     get_connection,
 )
-
 from modules.data_adapter import _calc_bollinger, _calc_ma
 
 logger = logging.getLogger(__name__)
