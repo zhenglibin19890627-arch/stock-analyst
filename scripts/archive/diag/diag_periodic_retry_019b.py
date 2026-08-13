@@ -1,7 +1,7 @@
 """019B 恢复验证：周期性重试（15s间隔）采集贵州茅台，验证"等待窗口期即可恢复"。
 只读（不写库），仅验证数据可取回。"""
-import sys
 import time
+
 import requests
 
 s = requests.Session()

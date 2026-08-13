@@ -19,7 +19,11 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from database.db_manager import _ensure_price_backtest_columns, backup_database, get_connection
+from database.db_manager import (
+    _ensure_price_backtest_columns,
+    backup_database,
+    get_connection,
+)
 
 from modules.data_adapter import _calc_bollinger, _calc_ma
 
@@ -183,12 +187,10 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr):
 
     # 约束2: 买入上限不超过 close × 1.05
     max_high = close * 1.05
-    if buy_high > max_high:
-        buy_high = max_high
+    buy_high = min(buy_high, max_high)
 
     # 确保下限不超过上限
-    if buy_low > buy_high:
-        buy_low = buy_high
+    buy_low = min(buy_low, buy_high)
 
     # ---- 目标价 ----
     if boll_upper and ma60:
@@ -201,8 +203,7 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr):
         target_price = close * 1.10
 
     min_target = close * 1.05
-    if target_price < min_target:
-        target_price = min_target
+    target_price = max(target_price, min_target)
 
     # ---- 止损价 ----
     if atr and atr > 0:
@@ -242,8 +243,7 @@ def _gen_with_position(close, cost_price, rating, ma60=None, boll_upper=None, at
     # ---- 止损价 ----
     stop_loss = cost_price * (1 - stop_loss_pct)
     min_stop = close * 0.90
-    if stop_loss < min_stop:
-        stop_loss = min_stop
+    stop_loss = max(stop_loss, min_stop)
 
     # ---- 补仓价位（网格补仓位，与 price_advisor._build_grid 同公式）----
     add_price = None

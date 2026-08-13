@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 019T T3 存量补算脚本：backtest_results 基准/alpha 列幂等补算（评审开放项 C：全量 820 行）
 
@@ -13,7 +12,6 @@
 """
 import argparse
 import io
-import os
 import sys
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')

@@ -24,7 +24,7 @@ def api_analyze_stock(stock_id):
                 result['position_advice'] = result['price_advice']['action_suggestion']
         return jsonify(result)
     except Exception as e:
-        return jsonify({'success': False, 'message': f'分析失败: {str(e)}'}), 500
+        return jsonify({'success': False, 'message': f'分析失败: {e!s}'}), 500
 
 
 @bp.route('/api/stocks/<int:stock_id>/refresh-full', methods=['POST'])
@@ -62,7 +62,7 @@ def api_refresh_full(stock_id):
 
         return jsonify(result)
     except Exception as e:
-        return jsonify({'success': False, 'message': f'全量刷新失败: {str(e)}'}), 500
+        return jsonify({'success': False, 'message': f'全量刷新失败: {e!s}'}), 500
 
 
 @bp.route('/api/stocks/<int:stock_id>/analysis', methods=['GET'])
@@ -331,7 +331,7 @@ def api_advise_stock(stock_id):
             result['generated_at'] = datetime.now(_CN_TZ).isoformat()
         return jsonify(result)
     except Exception as e:
-        return jsonify({'success': False, 'message': f'建议生成失败: {str(e)}'}), 500
+        return jsonify({'success': False, 'message': f'建议生成失败: {e!s}'}), 500
 
 
 @bp.route('/api/stocks/<int:stock_id>/ratings', methods=['GET'])

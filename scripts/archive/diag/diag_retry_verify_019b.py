@@ -1,6 +1,7 @@
 """019B 验证恢复方案：用 _http_get_em 增加重试（max_retries=3）采集贵州茅台 push2his。
 验证"增加重试即可恢复"假设。只读（不写库）。"""
 import sys
+
 sys.path.insert(0, r'c:\Users\zlb19\Desktop\Qoder cn\stock_analyst')
 from modules.data_collector import _http_get_em
 

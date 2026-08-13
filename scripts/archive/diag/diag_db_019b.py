@@ -1,5 +1,6 @@
 """019B 诊断：查询 data_status 与 raw_capital_flow 现状。只读，不改数据。"""
 import sys
+
 sys.path.insert(0, r'c:\Users\zlb19\Desktop\Qoder cn\stock_analyst')
 from database.db_manager import get_connection
 

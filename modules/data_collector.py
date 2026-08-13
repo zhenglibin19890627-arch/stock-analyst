@@ -355,11 +355,9 @@ def _normalize_hk_symbol(symbol):
     'HK3690' → '03690', '00700' → '00700', '3690' → '03690'
     """
     s = symbol.strip().upper()
-    if s.startswith('HK'):
-        s = s[2:]
+    s = s.removeprefix('HK')
     # 去除可能的.HK后缀
-    if s.endswith('.HK'):
-        s = s[:-3]
+    s = s.removesuffix('.HK')
     # 补全为5位
     s = s.zfill(5)
     return s
@@ -2483,7 +2481,6 @@ def fetch_capital_flow_batch(a_stock_symbols):
         row = rows.iloc[0]
         # 净额为中文金额格式（如"-6.78亿"/"3.19亿"），解析后单位为元，÷1e4 转万元
         main_net_yuan = _parse_cn_amount(row.get('净额'))
-        turnover_yuan = _parse_cn_amount(row.get('成交额'))
 
         if main_net_yuan is None:
             fail_count += 1
@@ -4013,7 +4010,7 @@ def fetch_sentiment(symbol, market, force_full=False):
         logger.info(f'[{market_name} {symbol}] 消息面采集完成: {status}')
         return status, msg
     except Exception as e:
-        error_msg = f'{market_name} {symbol} 消息面采集异常: {str(e)}'
+        error_msg = f'{market_name} {symbol} 消息面采集异常: {e!s}'
         logger.error(error_msg, exc_info=True)
         save_data_status(stock_id, 'sentiment', 'failed', error_msg)
         return 'failed', error_msg

@@ -1,5 +1,6 @@
 """019B 诊断：查询宁德时代(300750) 成功采集记录及 raw_capital_flow 历史 main_net_inflow 分布。只读。"""
 import sys
+
 sys.path.insert(0, r'c:\Users\zlb19\Desktop\Qoder cn\stock_analyst')
 from database.db_manager import get_connection
 

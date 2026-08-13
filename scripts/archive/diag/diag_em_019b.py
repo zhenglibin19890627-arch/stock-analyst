@@ -1,9 +1,9 @@
 """019B 诊断脚本：直接测试东方财富 push2his 资金流向接口。
 绕过项目内封装，直接 requests 请求，确认接口本身是否可用。
 """
+import random
 import sys
 import time
-import random
 import urllib.request as _urlreq
 
 import requests

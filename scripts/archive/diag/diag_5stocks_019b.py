@@ -1,6 +1,6 @@
 """019B 诊断：对5只股票各重试多次，确认间歇性封禁模式。只读。"""
-import sys
 import time
+
 import requests
 
 s = requests.Session()

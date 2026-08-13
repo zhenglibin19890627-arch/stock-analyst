@@ -29,7 +29,12 @@ from datetime import datetime, timedelta, timezone
 
 # 确保能找到项目根目录的 config 模块
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import RATING_THRESHOLDS, WEIGHTS_A_STOCK, WEIGHTS_CONFIG_FILE, WEIGHTS_HK_STOCK
+from config import (
+    RATING_THRESHOLDS,
+    WEIGHTS_A_STOCK,
+    WEIGHTS_CONFIG_FILE,
+    WEIGHTS_HK_STOCK,
+)
 from database.db_manager import get_connection
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

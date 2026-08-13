@@ -536,7 +536,7 @@ def _recalculate_holding(cursor, stock_id):
                     total_cost = avg_cost * total_qty
         elif t['trade_type'] == 'dividend':
             # 分红：金额直接计入已实现盈亏
-            realized_pnl += amount if amount > 0 else 0
+            realized_pnl += max(0, amount)
 
     # 判断状态
     status = 'cleared' if total_qty <= 0 else 'active'

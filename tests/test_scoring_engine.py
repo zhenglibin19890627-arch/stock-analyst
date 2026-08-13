@@ -10,15 +10,12 @@ scoring_engine.py 聚焦单元测试
 """
 
 import pytest
-from modules import scoring_engine as se
 from modules.data_contract import StockData
 from modules.scoring_engine import (
     CAPITAL_SUBITEMS,
     DEFAULT_VOLUME_RATIO,
-    FUNDAMENTAL_SUBITEMS,
     NEUTRAL_INFLOW,
     NEUTRAL_SENTIMENT,
-    NEWS_SUBITEMS,
     RATING_THRESHOLDS,
     REDUCE_RATIO,
     TECHNICAL_SUBITEMS,

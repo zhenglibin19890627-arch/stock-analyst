@@ -13,7 +13,6 @@ backfill_scheduler 单元测试（P：数据完整性驱动的持续补采调度
 from datetime import datetime, timedelta
 
 import pytest
-
 from database import db_manager
 from database.db_manager import get_connection, init_database
 from modules import backfill_scheduler as bs
@@ -134,7 +133,7 @@ class TestTickBackoff:
 
     def test_no_gaps_goes_idle(self, db, monkeypatch):
         """无缺口 → 低频巡检间隔。"""
-        monkeypatch.setattr(bs, '_get_stocks_with_gaps', lambda: {})
+        monkeypatch.setattr(bs, '_get_stocks_with_gaps', dict)
         interval = self._run_tick(monkeypatch, [])
         assert interval == bs.IDLE_INTERVAL_MIN
 

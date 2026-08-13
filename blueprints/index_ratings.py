@@ -30,7 +30,7 @@ def api_index_ratings():
             }
         )
     except Exception as e:
-        return jsonify({'success': False, 'error': f'指数评级获取失败: {str(e)}'}), 500
+        return jsonify({'success': False, 'error': f'指数评级获取失败: {e!s}'}), 500
 
 
 @bp.route('/api/index-ratings/refresh', methods=['POST'])
@@ -52,7 +52,7 @@ def api_index_ratings_refresh():
             }
         )
     except Exception as e:
-        return jsonify({'success': False, 'error': f'指数刷新失败: {str(e)}'}), 500
+        return jsonify({'success': False, 'error': f'指数刷新失败: {e!s}'}), 500
 
 
 # ============================================================

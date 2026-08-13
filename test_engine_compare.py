@@ -15,7 +15,6 @@ P1 验收脚本：新旧引擎并行对比
 - 降级机制正常触发
 """
 
-import json
 import logging
 import os
 import sys

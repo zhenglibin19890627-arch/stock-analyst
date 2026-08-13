@@ -15,11 +15,14 @@ advisor.py 聚焦单元测试
 """
 
 import pytest
-
-from modules import advisor
-from modules.advisor import DIM_NAMES, _build_detail_text, _build_position_advice
-from modules.advisor import _describe_dimension, _detect_risks, _determine_action
-
+from modules.advisor import (
+    DIM_NAMES,
+    _build_detail_text,
+    _build_position_advice,
+    _describe_dimension,
+    _detect_risks,
+    _determine_action,
+)
 
 # ============================================================
 # 一、操作建议矩阵 _determine_action

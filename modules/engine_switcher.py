@@ -337,8 +337,7 @@ def _clear_circuit_breaker(stock_id: int):
     """解除熔断：清除内存状态 + 从 config blacklist 移除"""
     symbol = _get_stock_symbol(stock_id)
 
-    if stock_id in _circuit_breaker_cache:
-        del _circuit_breaker_cache[stock_id]
+    _circuit_breaker_cache.pop(stock_id, None)
 
     # 从 config blacklist 移除
     config = _load_config()

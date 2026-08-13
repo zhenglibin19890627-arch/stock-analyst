@@ -1,9 +1,11 @@
-# -*- coding: utf-8 -*-
 """
 019Y 立项前探针：mootdx + baostock 接口可用性实测
 只读探针，不 import 任何项目模块，不动生产代码
 """
-import sys, time, traceback
+import sys
+import time
+import traceback
+
 
 def section(title):
     print("\n" + "=" * 60)

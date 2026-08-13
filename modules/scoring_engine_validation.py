@@ -125,7 +125,7 @@ def validate_exhaustive():
                 result = analyze(data)
             except Exception as e:
                 print(
-                    f'  {case_counter:>3} | BV-{case_counter:>2} | {field_name:<20} | {str(extreme_val):<16} | {"ERR":>6} | {"ERR":>6} | {"ERR":>6} | {"ERR":>6} | {"ERR":>6} | {"ERR":^4} | {"CRASH":^8} | {"N/A":^6}'
+                    f'  {case_counter:>3} | BV-{case_counter:>2} | {field_name:<20} | {extreme_val!s:<16} | {"ERR":>6} | {"ERR":>6} | {"ERR":>6} | {"ERR":>6} | {"ERR":>6} | {"ERR":^4} | {"CRASH":^8} | {"N/A":^6}'
                 )
                 fail_details.append(f'  用例#{case_counter} {field_name}={extreme_val} 异常: {e}')
                 all_pass = False

@@ -24,7 +24,7 @@ def api_export_daily_report():
             download_name=filename,
         )
     except Exception as e:
-        return jsonify({'success': False, 'error': f'导出失败: {str(e)}'}), 500
+        return jsonify({'success': False, 'error': f'导出失败: {e!s}'}), 500
 
 
 @bp.route('/api/export/watchlist')
@@ -47,7 +47,7 @@ def api_export_watchlist():
             download_name=filename,
         )
     except Exception as e:
-        return jsonify({'success': False, 'error': f'导出失败: {str(e)}'}), 500
+        return jsonify({'success': False, 'error': f'导出失败: {e!s}'}), 500
 
 
 @bp.route('/api/export/backtest')
@@ -72,7 +72,7 @@ def api_export_backtest():
             download_name=filename,
         )
     except Exception as e:
-        return jsonify({'success': False, 'error': f'导出失败: {str(e)}'}), 500
+        return jsonify({'success': False, 'error': f'导出失败: {e!s}'}), 500
 
 
 # ============================================================

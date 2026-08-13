@@ -324,7 +324,7 @@ def collect_news(stock_id, symbol, market):
             return 'failed', f'{symbol} 消息面聚合失败'
 
     except Exception as e:
-        error_msg = f'{market_name} {symbol} 消息面采集异常: {str(e)}'
+        error_msg = f'{market_name} {symbol} 消息面采集异常: {e!s}'
         logger.error(error_msg, exc_info=True)
         _save_error_log(stock_id, 'exception', str(e))
         return 'failed', error_msg

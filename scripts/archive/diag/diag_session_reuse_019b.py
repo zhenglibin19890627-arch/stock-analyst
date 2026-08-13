@@ -1,6 +1,6 @@
 """019B 验证：复用单一 Session 多次重试采集贵州茅台，验证连接复用假设。只读。"""
-import sys
 import time
+
 import requests
 
 s = requests.Session()

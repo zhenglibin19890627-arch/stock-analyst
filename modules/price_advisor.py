@@ -738,11 +738,9 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr, cap
 
     # 约束2: 买入上限不超过 close * 1.05
     max_high = close * 1.05
-    if buy_high > max_high:
-        buy_high = max_high
+    buy_high = min(buy_high, max_high)
 
-    if buy_low > buy_high:
-        buy_low = buy_high
+    buy_low = min(buy_low, buy_high)
 
     # ---- 目标价 ----
     if boll_upper and ma60:
@@ -755,8 +753,7 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr, cap
         target_price = close * 1.10
 
     min_target = close * 1.05
-    if target_price < min_target:
-        target_price = min_target
+    target_price = max(target_price, min_target)
 
     # ---- 止损价 ----
     if atr and atr > 0:
@@ -824,8 +821,7 @@ def _gen_with_position(close, cost_price, rating, ma60, boll_upper, atr, capital
     # ---- 止损价 ----
     stop_loss = cost_price * (1 - stop_loss_pct)
     min_stop = close * 0.90
-    if stop_loss < min_stop:
-        stop_loss = min_stop
+    stop_loss = max(stop_loss, min_stop)
 
     # ---- 009新增：操作建议状态机 ----
     state, state_name, action_suggestion = _determine_action_by_state(

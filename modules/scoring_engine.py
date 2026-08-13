@@ -756,7 +756,7 @@ def score_holder(data: StockData) -> tuple[float, dict]:
     if holder:
         return 82.0, {'holder_increase': 'True(增持，利好)'}
     else:
-        return 35.0, {'holder_increase': 'False(未增持/减持)'}  # noqa: E501
+        return 35.0, {'holder_increase': 'False(未增持/减持)'}
 
 
 # --- 资金面子项评分 ---

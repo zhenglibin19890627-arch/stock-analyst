@@ -50,7 +50,7 @@ def api_daily_report_generate():
             }
         )
     except Exception as e:
-        return jsonify({'success': False, 'message': f'报告生成失败: {str(e)}'}), 500
+        return jsonify({'success': False, 'message': f'报告生成失败: {e!s}'}), 500
 
 
 @bp.route('/api/daily-report/generate-intraday', methods=['POST'])
@@ -76,7 +76,7 @@ def api_daily_report_generate_intraday():
             }
         )
     except Exception as e:
-        return jsonify({'success': False, 'message': f'盘中快报生成失败: {str(e)}'}), 500
+        return jsonify({'success': False, 'message': f'盘中快报生成失败: {e!s}'}), 500
 
 
 @bp.route('/api/daily-report/latest')

@@ -1,6 +1,6 @@
 """019B 诊断：对宁德时代重复测试东财接口，判断封禁是否间歇性。只读。"""
-import sys
 import time
+
 import requests
 
 s = requests.Session()

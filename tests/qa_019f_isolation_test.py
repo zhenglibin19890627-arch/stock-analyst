@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
 """
 QA 019F 独立验收测试脚本 — 评分纯净隔离 + inspect.stack 保护块
 独立于开发自验，不导入开发测试逻辑。
 """
+import os
 import sqlite3
 import sys
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,8 +12,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from modules import analysis_engine
-from modules import data_adapter
+from modules import analysis_engine, data_adapter  # noqa: E402  # sys.path 注入后再导入
 
 
 def _make_test_db(rows):
@@ -221,8 +219,7 @@ class TestFilterExpressionConsistency(unittest.TestCase):
 
 
 # 补充 import（unittest.mock 在文件顶部未显式导入模块路径时需要）
-import unittest.mock
-
+import unittest.mock  # noqa: E402
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

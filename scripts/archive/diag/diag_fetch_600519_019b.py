@@ -2,6 +2,7 @@
 只读核心逻辑：调用采集函数（会写库，属正常采集行为）。"""
 import sys
 import time
+
 sys.path.insert(0, r'c:\Users\zlb19\Desktop\Qoder cn\stock_analyst')
 from modules.data_collector import fetch_capital_flow
 
