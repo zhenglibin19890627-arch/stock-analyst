@@ -10,9 +10,10 @@ def api_daily_report_progress():
     import json as _json
     import os as _os
 
-    progress_path = _os.path.join(
-        _os.path.dirname(_os.path.abspath(__file__)), 'logs', 'report_progress.json'
-    )
+    # 进度文件由 modules/daily_report.py 写入，路径以该模块为准（单一来源，防漂移）
+    from modules.daily_report import _REPORT_PROGRESS_PATH
+
+    progress_path = _REPORT_PROGRESS_PATH
     if not _os.path.exists(progress_path):
         return jsonify({'success': True, 'progress': None})
     try:

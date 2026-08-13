@@ -54,7 +54,7 @@ def api_health():
 
 
 _ROLLBACK_AUDIT_LOG = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), 'logs', 'rollback_audit.log'
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs', 'rollback_audit.log'
 )
 
 

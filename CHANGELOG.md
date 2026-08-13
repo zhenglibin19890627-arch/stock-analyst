@@ -1,5 +1,22 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-13] 盘中快报生成动效 + 蓝图路径回归修复
+
+### 前端动效（盘中快报 / 每日报告 生成过程可视化）
+- **templates/index.html**：
+  - 新增步骤时间线动效（准备 → 采集数据 → 分析评分 → 写入报告 → 完成），当前阶段脉冲高亮、已完成打 ✓、失败显示 ✕
+  - 流光渐变进度条 + 旋转 spinner + 实时百分比/第几只/当前股票/当前阶段
+  - `generateIntradayReport()` 接入 `/api/daily-report/progress` 轮询（1.5s），替换原静态"请稍候"占位
+  - `renderProgressUI` 升级为通用动效面板，按场景显示标题（每日报告 / 盘中快报）
+
+### 回归修复（app.py 拆分为蓝图引入的 __file__ 路径偏移）
+- `blueprints/report.py`：进度文件读取路径改为复用 `daily_report._REPORT_PROGRESS_PATH`（单一来源，原路径指向 blueprints/logs/ 读不到数据）
+- `blueprints/system.py`：`_ROLLBACK_AUDIT_LOG` 路径补一级 dirname，回落到 `logs/rollback_audit.log`
+
+### 验证
+- `python -m pytest tests/`：392 passed，1 skipped
+- 真实启动：`/api/daily-report/progress` 正确返回进度 JSON；页面包含动效代码；内联 JS `node --check` 通过
+
 ## [2026-08-13] 代码结构治理（app.py 拆分 / 脚本归档 / 路由测试）
 
 ### 结构调整（本次改造）
