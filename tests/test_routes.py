@@ -14,9 +14,8 @@
 
 import json
 
-import pytest
-
 import app as app_module
+import pytest
 from database import db_manager
 
 

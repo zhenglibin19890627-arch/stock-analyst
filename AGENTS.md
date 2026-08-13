@@ -36,7 +36,8 @@
 
 | 入口 | 路径 | 说明 |
 |------|------|------|
-| **Flask 主应用** | `app.py` | 所有页面路由与 API 端点（约 3600 行）。启动后监听 `127.0.0.1:5000`。 |
+| **Flask 主应用** | `app.py` | 应用入口（约 130 行）：环境初始化、蓝图注册、首页路由、启动逻辑。启动后监听 `127.0.0.1:5000`。 |
+| **路由蓝图** | `blueprints/` | API 路由按业务域拆分（自 2026-08-13）：`watchlist`（自选股/分组/采集）、`analysis`（分析/评级/v5）、`portfolio`（持仓/流水/成本）、`report`（日报）、`system`（健康/引擎）、`backtest`（回测/优化）、`export`（导出）、`index_ratings`（指数）、`alerts`（预警）；共享展示层工具在 `_utils.py`。 |
 | **全局配置** | `config.py` | 路径、采集参数、评分权重、评级档位、风控阈值、Flask 配置。 |
 | **权重热加载** | `config_weights.json` | 评分权重，运行时可修改无需重启。 |
 | **引擎切换** | `config_engine_switch.json` | 新旧引擎灰度切换控制。 |
@@ -87,6 +88,7 @@ mypy stock_analyst/
 
 > **测试目录说明**：项目根目录下已建立独立 `tests/` 目录，作为标准单元测试入口，包含：
 > - `tests/test_scoring_engine.py` — 评分引擎（scoring_engine）单元测试，覆盖子项评分函数、权重应用与降级机制、评级映射及端到端 analyze()
+> - `tests/test_routes.py` — 路由层冒烟测试（隔离临时库，不触网），覆盖全部 9 个蓝图的核心端点
 > - `tests/conftest.py` — pytest 公共配置，通过 MockDataProvider 生成纯内存数据隔离数据库与网络，并自动把项目根目录注入 sys.path
 >
 > 补充验证脚本（位于项目根目录，自带 sys.path 注入，需在项目根执行）：
