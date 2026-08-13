@@ -6,6 +6,7 @@ from config import (
     COST_ADJUSTMENT_COOLDOWN_HOURS,
     COST_ADJUSTMENT_DEVIATION_THRESHOLD,
     PRICE_CACHE_TTL_HOURS,
+    TRADE_AMOUNT_VERIFY_THRESHOLD,
     TRADE_T1_LOCK_ENABLED,
 )
 from database.db_manager import get_connection
@@ -708,8 +709,10 @@ def api_update_trade(trade_id):
     try:
         conn.execute('BEGIN IMMEDIATE')
 
-        # 操作限制检查（已清算 / T+1锁定）
-        allowed, err_msg, status_code = _check_trade_edit_restriction(cursor, trade_id, 'edit')
+        # 操作限制检查（已清算 / T+1锁定 / 大额二次验证）
+        allowed, err_msg, status_code = _check_trade_edit_restriction(
+            cursor, trade_id, 'edit', force_confirm=data.get('force_confirm', False)
+        )
         if not allowed:
             conn.rollback()
             conn.close()
@@ -784,14 +787,19 @@ def api_update_trade(trade_id):
 
 @bp.route('/api/portfolio/trades/<int:trade_id>', methods=['DELETE'])
 def api_delete_trade(trade_id):
-    """删除交易流水（触发持仓重算，事务保护）"""
+    """删除交易流水（触发持仓重算，事务保护）。
+    Body 可包含：force_confirm(bool) —— 单笔超 5 万流水删除需二次验证
+    """
+    data = request.get_json(silent=True) or {}
     conn = get_connection()
     cursor = conn.cursor()
     try:
         conn.execute('BEGIN IMMEDIATE')
 
-        # 操作限制检查（已清算 / T+1锁定）
-        allowed, err_msg, status_code = _check_trade_edit_restriction(cursor, trade_id, 'delete')
+        # 操作限制检查（已清算 / T+1锁定 / 大额二次验证）
+        allowed, err_msg, status_code = _check_trade_edit_restriction(
+            cursor, trade_id, 'delete', force_confirm=data.get('force_confirm', False)
+        )
         if not allowed:
             conn.rollback()
             conn.close()
@@ -824,12 +832,13 @@ def api_delete_trade(trade_id):
 # ============================================================
 
 
-def _check_trade_edit_restriction(cursor, trade_id, operation='edit'):
+def _check_trade_edit_restriction(cursor, trade_id, operation='edit', force_confirm=False):
     """检查流水编辑/删除限制，返回 (allowed, error_msg, status_code)。
     限制规则：
     1. 已清算（持仓数量=0）的股票，禁止编辑/删除其历史流水
     2. T+1锁定：当日提交的流水次日才允许修改
-    3. 单笔流水金额超过阈值时需二次验证（前端处理，后端返回提示）
+    3. 单笔流水金额超过 TRADE_AMOUNT_VERIFY_THRESHOLD 时需二次验证
+       （force_confirm=true 放行，与成本调整二次确认模式一致）
     """
     cursor.execute('SELECT * FROM trade_records WHERE id=?', (trade_id,))
     trade = cursor.fetchone()
@@ -865,6 +874,17 @@ def _check_trade_edit_restriction(cursor, trade_id, operation='edit'):
                     )
             except (ValueError, TypeError):
                 pass
+
+    # 3. 单笔大额流水二次验证（force_confirm 放行）
+    amount = trade['amount'] or 0
+    if amount > TRADE_AMOUNT_VERIFY_THRESHOLD:
+        if not force_confirm:
+            return (
+                False,
+                f'单笔流水金额 {amount:,.0f} 元超过 {TRADE_AMOUNT_VERIFY_THRESHOLD:,.0f} 元阈值，'
+                '需二次验证（force_confirm=true 确认后放行）',
+                403,
+            )
 
     return True, None, 200
 

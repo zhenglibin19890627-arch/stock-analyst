@@ -248,26 +248,65 @@ class TestTradeT1Lock:
 
 
 # ============================================================
-# 3. 5 万二次验证 —— 后端当前未实现（占位测试）
+# 3. 5 万二次验证 —— 大额流水编辑/删除需 force_confirm=true 放行
 # ============================================================
 
 
-@pytest.mark.skip(
-    reason=(
-        '后端未实现 TRADE_AMOUNT_VERIFY_THRESHOLD 强制校验：'
-        '_check_trade_edit_restriction 仅有注释、前端亦无对应交互（2026-08-12 确认）。'
-        '实现后移除 skip 启用本测试。'
-    )
-)
 class TestTradeAmountVerify:
-    def test_large_amount_edit_requires_verify(self, client, db):
-        """单笔流水金额 > 50000 元时，编辑应触发二次验证（当前后端会直接放行，故 skip）。"""
+    """单笔流水金额 > 50000 元时，编辑/删除需二次验证（force_confirm=true 放行）。"""
+
+    def _insert_large_trade(self, db, amount=AMOUNT_VERIFY_THRESHOLD + 10000):
+        """插入一条两天前的大额流水，返回 trade_id。"""
         two_days_ago = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S')
         conn = get_connection()
-        _insert_trade(conn, 1, 1, two_days_ago, amount=AMOUNT_VERIFY_THRESHOLD + 10000)
+        _insert_trade(conn, 1, 1, two_days_ago, amount=amount)
+        trade_id = _last_trade_id(conn)
+        conn.close()
+        return trade_id
+
+    def test_large_amount_edit_blocked_without_force(self, client, db):
+        """超 5 万流水编辑：未确认时被拒（403 需二次验证）。"""
+        trade_id = self._insert_large_trade(db)
+
+        resp = client.put(f'/api/portfolio/trades/{trade_id}', json={'notes': '改备注'})
+        assert resp.status_code == 403
+        assert '二次验证' in resp.get_json()['message']
+
+    def test_large_amount_edit_ok_with_force_confirm(self, client, db):
+        """超 5 万流水编辑：force_confirm=true 放行（200）。"""
+        trade_id = self._insert_large_trade(db)
+
+        resp = client.put(
+            f'/api/portfolio/trades/{trade_id}',
+            json={'notes': '改备注', 'force_confirm': True},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()['success'] is True
+
+    def test_large_amount_delete_blocked_without_force(self, client, db):
+        """超 5 万流水删除：未确认时被拒（403 需二次验证）。"""
+        trade_id = self._insert_large_trade(db)
+
+        resp = client.delete(f'/api/portfolio/trades/{trade_id}')
+        assert resp.status_code == 403
+        assert '二次验证' in resp.get_json()['message']
+
+    def test_large_amount_delete_ok_with_force_confirm(self, client, db):
+        """超 5 万流水删除：force_confirm=true 放行（200）。"""
+        trade_id = self._insert_large_trade(db)
+
+        resp = client.delete(f'/api/portfolio/trades/{trade_id}', json={'force_confirm': True})
+        assert resp.status_code == 200
+        assert resp.get_json()['success'] is True
+
+    def test_small_amount_edit_ok_without_force(self, client, db):
+        """低于阈值（默认 1000 元）的流水：无需确认直接可编辑（200）。"""
+        two_days_ago = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S')
+        conn = get_connection()
+        _insert_trade(conn, 1, 1, two_days_ago, amount=1000.0)
         trade_id = _last_trade_id(conn)
         conn.close()
 
         resp = client.put(f'/api/portfolio/trades/{trade_id}', json={'notes': '改备注'})
-        assert resp.status_code == 403  # 期望：需二次验证被拒
-        assert '二次验证' in resp.get_json()['message']
+        assert resp.status_code == 200
+        assert resp.get_json()['success'] is True

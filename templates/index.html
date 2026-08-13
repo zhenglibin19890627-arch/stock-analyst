@@ -4024,7 +4024,29 @@
                         (p.realized_pnl ? ' · 已实现盈亏 ' + (p.realized_pnl > 0 ? '+' : '') + Math.abs(p.realized_pnl).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : ''));
                 }
             } else if (data._status === 403) {
-                alert('⛔ 操作被限制：' + (data.message || '此流水不允许修改'));
+                if (data.message && data.message.indexOf('二次验证') >= 0) {
+                    // 大额流水二次验证：用户确认后带 force_confirm=true 重试
+                    if (confirm('该流水金额较大，需二次验证。确认继续修改吗？')) {
+                        fetch('/api/portfolio/trades/' + _editingTradeId, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ trade_type: tradeType, price: price, quantity: qty, trade_date: tradeDate, notes: notes, force_confirm: true })
+                        })
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) {
+                            if (d.success) {
+                                cancelEditTrade();
+                                loadTrades(currentTradeStockId);
+                                loadHoldings();
+                                loadPortfolioGroups();
+                            } else {
+                                alert('修改失败：' + (d.message || '未知错误'));
+                            }
+                        });
+                    }
+                } else {
+                    alert('⛔ 操作被限制：' + (data.message || '此流水不允许修改'));
+                }
             } else {
                 alert('修改失败：' + (data.message || '未知错误'));
             }
@@ -4066,7 +4088,28 @@
                         _showToast('持仓已重算：数量 ' + p.quantity + ' · 状态 ' + (p.status === 'cleared' ? '已清仓' : '持仓中'));
                     }
                 } else if (data._status === 403) {
-                    alert('⛔ 操作被限制：' + (data.message || '此流水不允许删除'));
+                    if (data.message && data.message.indexOf('二次验证') >= 0) {
+                        // 大额流水二次验证：用户确认后带 force_confirm=true 重试
+                        if (confirm('该流水金额较大，需二次验证。确认继续删除吗？')) {
+                            fetch('/api/portfolio/trades/' + tradeId, {
+                                method: 'DELETE',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ force_confirm: true })
+                            })
+                            .then(function(r) { return r.json(); })
+                            .then(function(d) {
+                                if (d.success) {
+                                    loadTrades(currentTradeStockId);
+                                    loadHoldings();
+                                    loadPortfolioGroups();
+                                } else {
+                                    alert('删除失败：' + (d.message || '未知错误'));
+                                }
+                            });
+                        }
+                    } else {
+                        alert('⛔ 操作被限制：' + (data.message || '此流水不允许删除'));
+                    }
                 } else {
                     alert('删除失败：' + (data.message || '未知错误'));
                 }
