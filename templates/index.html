@@ -127,6 +127,20 @@
         .status-partial { color: #e65100; font-weight: 600; }
         .status-failed { color: #c62828; font-weight: 600; }
 
+        /* 数据卡片收起/展开 */
+        .fold-title {
+            cursor: pointer;
+            user-select: none;
+            transition: color 0.15s;
+            padding: 4px 6px;
+            margin-left: -6px;
+            border-radius: 6px;
+        }
+        .fold-title:hover { color: #1a73e8; background: #f0f4ff; }
+        .fold-title::before { content: '▾ '; color: #1a73e8; }
+        .fold-title.fold-closed::before { content: '▸ '; }
+        .fold-body { overflow: hidden; }
+
         /* 数据采集结果 */
         .collect-result {
             background: #f8f9fa;
@@ -1248,38 +1262,6 @@
     </div>
 </div>
 
-<!-- 评级列表 -->
-<div class="card">
-    <div class="card-title">📊 评级列表 <span style="font-size:13px;color:#888;font-weight:normal;">（批量分析后自动刷新）</span></div>
-    <div class="alert alert-info" style="font-size:13px;line-height:1.6;">
-        ℹ️ <strong>引擎对齐提示</strong>：评级列表已与评分概览(v5)对齐。如仍有差异请刷新页面。
-    </div>
-    <div class="form-row" style="margin-bottom:12px;">
-        <label style="min-width:auto;font-size:13px;">排序</label>
-        <select id="ratingSortBy" style="min-width:auto;" onchange="loadRatings()">
-            <option value="rating_time">评级时间</option>
-            <option value="total_score">综合评分</option>
-        </select>
-        <select id="ratingOrder" style="min-width:auto;" onchange="loadRatings()">
-            <option value="desc">降序</option>
-            <option value="asc">升序</option>
-        </select>
-        <label style="min-width:auto;font-size:13px;">筛选评级</label>
-        <select id="ratingFilter" style="min-width:auto;" onchange="loadRatings()">
-            <option value="">全部</option>
-            <option value="强烈推荐买入">强烈推荐买入</option>
-            <option value="推荐买入">推荐买入</option>
-            <option value="持有观望">持有观望</option>
-            <option value="建议减仓">建议减仓</option>
-            <option value="强烈建议卖出">强烈建议卖出</option>
-        </select>
-        <button class="btn btn-success btn-sm" onclick="loadRatings()">刷新列表</button>
-    </div>
-    <div id="ratingsList">
-        <div class="empty">暂无评级记录，请先执行批量分析</div>
-    </div>
-</div>
-
 <!-- 数据采集结果展示区 -->
 <div id="collectArea"></div>
 
@@ -1769,7 +1751,7 @@
     // ========== v4.0 Hash 路由系统 ==========
     var ROUTES = {
         '#holdings':    { view: 'view-holdings',    label: '持仓管理', init: function() { loadPortfolioGroups(); } },
-        '#watchlist':   { view: 'view-watchlist',   label: '自选股',   init: function() { loadStocks(); loadRatings(); } },
+        '#watchlist':   { view: 'view-watchlist',   label: '自选股',   init: function() { loadStocks(); } },
         '#trades':      { view: 'view-trades',      label: '交易流水', init: function() { loadAllTrades(); } },
         '#adjustments': { view: 'view-adjustments', label: '成本修正', init: function() { loadAllAdjustments(); } },
         '#report':      { view: 'view-report',      label: '分析报告', init: function() { /* 由 viewReport() 驱动 */ } },
@@ -2434,9 +2416,8 @@
                     '<span style="font-size:14px;">综合评分：<strong>' + data.total_score.toFixed(1) + '</strong> | 评级：<strong>' + data.rating + '</strong></span><br>' +
                     '<button class="btn btn-success btn-sm" style="margin-top:8px;" onclick="viewReport(' + id + ')">📊 查看完整报告</button>' +
                     '</div>';
-                // 刷新列表与评级
+                // 刷新列表
                 loadStocks();
-                loadRatings();
             })
             .catch(function(err) {
                 clearTimeout(timeoutId);
@@ -2604,7 +2585,25 @@
             fetch(`/api/stocks/${id}/valuation`).then(r => r.json()),
             fetch(`/api/stocks/${id}/restricted-release`).then(r => r.json()),
         ]).then(([kline, fund, capital, status, news, orderbook, valuation, restricted]) => {
-            let html = '<div class="card"><div class="card-title">数据详情</div>';
+            // 采集状态卡片（显示在自选股列表下方、数据卡片上方）
+            let html = '<div class="card"><div class="card-title">📋 采集状态记录</div>';
+            if (status.success && status.data.length > 0) {
+                html += '<table><thead><tr><th>维度</th><th>状态</th><th>说明</th><th>时间</th></tr></thead><tbody>';
+                status.data.forEach(d => {
+                    // 019E Task 4.2：增加 estimated 分支（复用 status-partial CSS 类）
+                    // 019K Task 4：增加 fallback 分支（THS 顶替，复用 status-partial CSS 类）
+                    const sc = d.status === 'success' ? 'status-success' : (d.status === 'partial' || d.status === 'estimated' || d.status === 'fallback') ? 'status-partial' : 'status-failed';
+                    const st = d.status === 'success' ? '✅成功' : d.status === 'partial' ? '⚠️部分' : d.status === 'estimated' ? '⚠️估算' : d.status === 'fallback' ? '⚠️顶替' : '❌失败';
+                    const dimNames = { kline: 'K线', fundamental: '基本面', capital: '资金面', sentiment: '消息面' };
+                    html += `<tr><td>${dimNames[d.dimension] || d.dimension}</td><td class="${sc}">${st}</td><td>${d.message || '—'}</td><td>${d.fetched_at}</td></tr>`;
+                });
+                html += '</tbody></table>';
+            } else {
+                html += '<div class="alert alert-info">暂无采集状态记录</div>';
+            }
+            html += '</div>';
+
+            html += '<div class="card"><div class="card-title">数据详情</div>';
 
             // K线数据
             // 019Y T1：存在 mootdx 降级行时动态标注来源
@@ -2799,27 +2798,49 @@
                 html += '<div class="alert alert-warning">暂无消息面数据，请先执行消息面采集</div>';
             }
 
-            // 采集状态
-            html += '<h4 style="margin: 24px 0 8px;">采集状态记录</h4>';
-            if (status.success && status.data.length > 0) {
-                html += '<table><thead><tr><th>维度</th><th>状态</th><th>说明</th><th>时间</th></tr></thead><tbody>';
-                status.data.forEach(d => {
-                    // 019E Task 4.2：增加 estimated 分支（复用 status-partial CSS 类）
-                    // 019K Task 4：增加 fallback 分支（THS 顶替，复用 status-partial CSS 类）
-                    const sc = d.status === 'success' ? 'status-success' : (d.status === 'partial' || d.status === 'estimated' || d.status === 'fallback') ? 'status-partial' : 'status-failed';
-                    const st = d.status === 'success' ? '✅成功' : d.status === 'partial' ? '⚠️部分' : d.status === 'estimated' ? '⚠️估算' : d.status === 'fallback' ? '⚠️顶替' : '❌失败';
-                    const dimNames = { kline: 'K线', fundamental: '基本面', capital: '资金面', sentiment: '消息面' };
-                    html += `<tr><td>${dimNames[d.dimension] || d.dimension}</td><td class="${sc}">${st}</td><td>${d.message || '—'}</td><td>${d.fetched_at}</td></tr>`;
-                });
-                html += '</tbody></table>';
-            } else {
-                html += '<div class="alert alert-info">暂无采集状态记录</div>';
-            }
-
             html += '</div>';
             area.innerHTML = html;
+            enableFoldSections(area);
             area.scrollIntoView({ behavior: 'smooth' });
         });
+    }
+
+    // ========== 数据卡片收起/展开 ==========
+    function enableFoldSections(container) {
+        // 把"数据详情"卡片内的 h4 区块包装为可折叠 section：
+        // 每个 h4 标题 + 其后续内容（直到下一个 h4）组成一个折叠区，点击标题切换收起/展开。
+        // 默认收起：页面聚焦采集状态与概览，需要看具体数据时再展开。
+        var cards = container.querySelectorAll('.card');
+        for (var ci = 0; ci < cards.length; ci++) {
+            var h4s = Array.prototype.slice.call(cards[ci].querySelectorAll('h4'));
+            if (!h4s.length) continue;
+            h4s.forEach(function(h) {
+                var wrapper = document.createElement('div');
+                wrapper.className = 'fold-section';
+                var body = document.createElement('div');
+                body.className = 'fold-body';
+                // 收集 h4 之后（直到下一个 h4）的所有兄弟节点移入 body
+                var next = h.nextElementSibling;
+                while (next && next.tagName !== 'H4') {
+                    var following = next.nextElementSibling;
+                    body.appendChild(next);
+                    next = following;
+                }
+                h.parentNode.insertBefore(wrapper, h);
+                wrapper.appendChild(h);
+                wrapper.appendChild(body);
+                h.classList.add('fold-title');
+                h.style.cursor = 'pointer';
+                // 默认收起
+                body.style.display = 'none';
+                h.classList.add('fold-closed');
+                h.onclick = function() {
+                    var closed = body.style.display === 'none';
+                    body.style.display = closed ? '' : 'none';
+                    h.classList.toggle('fold-closed', !closed);
+                };
+            });
+        }
     }
 
     // ========== 全选/批量分析 ==========
@@ -2943,7 +2964,6 @@
             };
             setTimeout(function() {
                 renderBatchResults(batchData, elapsed);
-                loadRatings();
             }, 600);
         }
 
@@ -2986,45 +3006,6 @@
             'A': 'action-buy', 'B+': 'action-buy', 'B': 'action-hold', 'C': 'action-reduce', 'D': 'action-sell'
         };
         return map[rating] || 'action-watch';
-    }
-
-    // ========== 评级列表 ==========
-    function loadRatings() {
-        var sortBy = document.getElementById('ratingSortBy').value;
-        var order = document.getElementById('ratingOrder').value;
-        var filter = document.getElementById('ratingFilter').value;
-        var url = '/api/ratings?sort_by=' + sortBy + '&order=' + order;
-        if (filter) url += '&rating=' + encodeURIComponent(filter);
-
-        fetch(url)
-            .then(function(r) { return safeJson(r); })
-            .then(function(data) {
-                if (data.success && data.ratings.length > 0) {
-                    var html = '<table><thead><tr>' +
-                        '<th>代码</th><th>名称</th><th>市场</th><th>评级</th><th>综合评分</th>' +
-                        '<th>操作建议</th><th>评级时间</th><th>时效</th></tr></thead><tbody>';
-                    data.ratings.forEach(function(r) {
-                        var marketTag = r.market === 'a_stock' ? '<span class="tag tag-a">A股</span>' : '<span class="tag tag-hk">港股</span>';
-                        var ratingBadge = '<span class="action-badge ' + ratingActionClass(r.rating) + '" style="padding:2px 8px;font-size:12px;" title="' + getRatingTitle(r.rating) + '">' + r.rating + '</span>';
-                        var staleTag = r.data_stale ? '<span style="color:#e65100;">⚠️ 滞后</span>' : '<span style="color:#27ae60;">正常</span>';
-                        html += '<tr>' +
-                            '<td><strong>' + r.symbol + '</strong></td>' +
-                            '<td>' + (r.name || '—') + obosBadge(r.obos_signal) + '</td>' +
-                            '<td>' + marketTag + '</td>' +
-                            '<td>' + ratingBadge + '</td>' +
-                            '<td><strong>' + r.total_score.toFixed(1) + '</strong></td>' +
-                            '<td style="font-size:12px;">' + (r.operation_suggestion || '—') + '</td>' +
-                            '<td style="font-size:12px;color:#666;">' + (r.rating_time || r.created_at || '—') + '</td>' +
-                            '<td>' + staleTag + '</td>' +
-                            '</tr>';
-                    });
-                    html += '</tbody></table>';
-                    document.getElementById('ratingsList').innerHTML = html;
-                } else {
-                    document.getElementById('ratingsList').innerHTML = '<div class="empty">暂无评级记录，请先执行批量分析</div>';
-                }
-            })
-            .catch(function(err) { console.error('loadRatings error:', err); });
     }
 
     // ========== 数据库统计 ==========
