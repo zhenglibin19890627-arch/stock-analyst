@@ -571,6 +571,109 @@ def _update_progress_stage(symbol: str, stage: str, current: int = None):
         pass  # 进度写入失败不阻塞业务
 
 
+def _days_between(d1, d2):
+    """两个 YYYY-MM-DD 字符串的自然日差（d2 - d1），解析失败返回 None"""
+    try:
+        a = datetime.strptime(str(d1)[:10], '%Y-%m-%d')
+        b = datetime.strptime(str(d2)[:10], '%Y-%m-%d')
+        return (b - a).days
+    except (ValueError, TypeError):
+        return None
+
+
+def _build_data_freshness(stock_id):
+    """报告生成前的数据完整度检查：各维度数据新鲜度与来源。
+
+    返回 dict：
+      {'lines': [str, ...],      # 逐维度的完整度说明行（含 ⚠️ 标记）
+       'has_issue': bool}        # 是否存在滞后/替代源等需要注意的问题
+    """
+    today = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
+    lines: list = []
+    has_issue = False
+    conn = get_connection()
+
+    # 1. K线（技术面）
+    row = conn.execute(
+        'SELECT MAX(trade_date) d FROM raw_kline WHERE stock_id=?', (stock_id,)
+    ).fetchone()
+    if row and row['d']:
+        lag = _days_between(row['d'], today)
+        flag = ' ⚠️' if (lag is not None and lag > 3) else ''
+        if flag:
+            has_issue = True
+        lines.append(f"K线：至 {row['d']}（滞后{lag}天{flag}）")
+    else:
+        lines.append('K线：缺失 ⚠️')
+        has_issue = True
+
+    # 2. 基本面（财报期为自然滞后，只展示报告期）
+    row = conn.execute(
+        'SELECT MAX(report_date) d FROM raw_fundamental WHERE stock_id=?', (stock_id,)
+    ).fetchone()
+    lines.append(f"基本面：最新财报期 {row['d'] if (row and row['d']) else '缺失'}")
+    if not (row and row['d']):
+        has_issue = True
+
+    # 3. 资金面（来源：东财真实 / 新浪顶替 / 估算兜底）
+    row = conn.execute(
+        'SELECT trade_date d, capital_source s, is_estimated e '
+        'FROM raw_capital_flow WHERE stock_id=? ORDER BY trade_date DESC LIMIT 1',
+        (stock_id,),
+    ).fetchone()
+    if row:
+        if row['s'] == 'sina_main':
+            src, issue = '新浪顶替(主力口径)', True
+        elif row['e'] == 1:
+            src, issue = '估算兜底(不参评)', True
+        elif row['s'] == 'ths_total':
+            src, issue = '同花顺顶替', True
+        else:
+            src, issue = '东财真实', False
+        lag = _days_between(row['d'], today)
+        flag = ' ⚠️' if (issue or (lag is not None and lag > 2)) else ''
+        if flag:
+            has_issue = True
+        lines.append(f"资金面：至 {row['d']}（来源：{src}，滞后{lag}天{flag}）")
+    else:
+        lines.append('资金面：缺失 ⚠️')
+        has_issue = True
+
+    # 4. 消息面（情绪聚合 + 新闻原文新鲜度）
+    sent_row = conn.execute(
+        'SELECT MAX(news_date) d FROM news_sentiment WHERE stock_id=?', (stock_id,)
+    ).fetchone()
+    news_row = conn.execute(
+        "SELECT MAX(info_date) d FROM raw_sentiment WHERE stock_id=? AND info_type='news'",
+        (stock_id,),
+    ).fetchone()
+    if news_row and news_row['d']:
+        lag = _days_between(news_row['d'], today)
+        flag = ' ⚠️' if (lag is not None and lag > 7) else ''
+        if flag:
+            has_issue = True
+        lines.append(f"消息面：最新新闻 {news_row['d']}（滞后{lag}天{flag}）")
+    elif sent_row and sent_row['d']:
+        lines.append(f"消息面：情绪至 {sent_row['d']}（无新闻原文）⚠️")
+        has_issue = True
+    else:
+        lines.append('消息面：缺失 ⚠️')
+        has_issue = True
+
+    # 5. 业绩预告
+    fc = conn.execute(
+        'SELECT COUNT(*) n, MAX(report_period) p FROM raw_forecast WHERE stock_id=?',
+        (stock_id,),
+    ).fetchone()
+    if fc and fc['n']:
+        lines.append(f"业绩预告：{fc['n']} 条（最新报告期 {fc['p']}）")
+    else:
+        lines.append('业绩预告：最近三期暂无')
+
+    conn.close()
+    return {'lines': lines, 'has_issue': has_issue}
+
+
 def _process_single_stock(stock, target_date, force, report_type='daily'):
     """012-B: 单只股票处理（供 ThreadPoolExecutor 调用）
 
@@ -625,6 +728,10 @@ def _process_single_stock(stock, target_date, force, report_type='daily'):
     # 012-B 增强：线程内更新进度 stage（采集阶段），前端进度条可显示"当前在干什么"
     _update_progress_stage(symbol, '采集数据中')
     collect_stock_data(symbol, market)
+    _update_progress_stage(symbol, '数据检查中')
+    # 数据完整度检查：报告生成前检查各维度数据新鲜度/来源，
+    # 检查结果随报告输出（data_warnings + markdown），让报告说明数据完整度情况
+    freshness = _build_data_freshness(stock_id)
     _update_progress_stage(symbol, '分析评分中')
     # 统一调用 advisor.generate_advice()，由 engine_switcher 自动分流
     advice = generate_advice(stock_id, report_date=target_date)
@@ -660,8 +767,15 @@ def _process_single_stock(stock, target_date, force, report_type='daily'):
     # 构建关键因子
     key_factors = _build_key_factors(advice)
 
-    # 构建单只 Markdown
+    # 构建单只 Markdown（末尾追加数据完整度小节）
     md_content = _build_markdown_single(advice, prev_score)
+    md_content += '\n\n## 数据完整度\n\n'
+    for line in freshness['lines']:
+        md_content += f'- {line}\n'
+
+    # 数据提示合并：引擎降级提示 + 数据完整度说明
+    data_warnings = list(advice.get('data_warnings', []) or [])
+    data_warnings.extend(f'数据完整度：{line}' for line in freshness['lines'])
 
     # 写入数据库
     _save_report(
@@ -676,7 +790,7 @@ def _process_single_stock(stock, target_date, force, report_type='daily'):
         prev_score=prev_score,
         score_change=score_change,
         key_factors=key_factors,
-        data_warnings=advice.get('data_warnings', []),
+        data_warnings=data_warnings,
         markdown_content=md_content,
         price_advice=price_advice,
         report_type=report_type,
@@ -693,6 +807,7 @@ def _process_single_stock(stock, target_date, force, report_type='daily'):
         'score_change': score_change,
         'reused': False,
         'is_fallback': is_fallback,
+        'freshness': freshness,
     }
 
 
@@ -1089,6 +1204,19 @@ def _build_markdown_summary(report_date, results):
             arrow = '↑' if change > 0 else ('↓' if change < 0 else '→')
             change_str = f'{arrow} {abs(change):.1f}'
         md += f'| {r["name"]} | {r["symbol"]} | {engine_tag} | {r["score"]:.1f} | {r["rating"]} | {change_str} |\n'
+
+    # 数据完整度概览（报告生成前的数据检查结果）
+    issue_stocks = [r for r in ok_results if r.get('freshness', {}).get('has_issue')]
+    md += '\n### 数据完整度概览\n\n'
+    if issue_stocks:
+        for r in issue_stocks:
+            md += f'- **{r["name"]}**（{r["symbol"]}）⚠️\n'
+            for line in r['freshness']['lines']:
+                if '⚠️' in line:
+                    md += f'  - {line}\n'
+    else:
+        md += '全部股票数据完整，无滞后或替代源问题\n'
+    md += '\n'
 
     if failed_results:
         md += f'\n> ⚠️ {len(failed_results)} 只股票生成失败\n'

@@ -4756,13 +4756,14 @@
             html += '</div>';
         }
 
-        // 数据警告（v5引擎降级提示）
+        // 数据警告（引擎降级提示 + 数据完整度说明）
         if (adviseData.data_warnings && adviseData.data_warnings.length > 0) {
             html += '<div class="advice-section">';
-            html += '<div class="advice-section-title" style="color:#f39c12;">数据降级提示</div>';
+            html += '<div class="advice-section-title" style="color:#f39c12;">📋 数据完整度与提示</div>';
             html += '<ul class="risk-list">';
             adviseData.data_warnings.forEach(function(w) {
-                html += '<li style="color:#e65100;">' + w + '</li>';
+                var warn = /数据完整度：/.test(w);
+                html += '<li style="color:' + (warn ? '#5d6d7e' : '#e65100') + ';">' + w + '</li>';
             });
             html += '</ul>';
             html += '</div>';
@@ -5061,6 +5062,7 @@
         html += '<th style="padding:8px;border-bottom:2px solid #ddd;">总分</th>';
         html += '<th style="padding:8px;border-bottom:2px solid #ddd;">评级</th>';
         html += '<th style="padding:8px;border-bottom:2px solid #ddd;">较昨日</th>';
+        html += '<th style="padding:8px;border-bottom:2px solid #ddd;" title="数据完整度：报告生成前对各维度数据新鲜度/来源的检查结果">数据</th>';
         html += '<th style="padding:8px;border-bottom:2px solid #ddd;">生成于</th>';
         html += '</tr></thead><tbody>';
 
@@ -5068,7 +5070,7 @@
             if (r.status !== 'ok') {
                 html += '<tr style="border-bottom:1px solid #eee;background:#fff5f5;">';
                 html += '<td style="padding:8px;"><strong>' + (r.stock_name || '') + '</strong><br><span style="color:#888;font-size:12px;">' + r.stock_code + '</span></td>';
-                html += '<td colspan="5" style="padding:8px;color:#e74c3c;">❌ 生成失败：' + (r.error_msg || '').substring(0, 50) + '</td>';
+                html += '<td colspan="6" style="padding:8px;color:#e74c3c;">❌ 生成失败：' + (r.error_msg || '').substring(0, 50) + '</td>';
                 html += '</tr>';
                 return;
             }
@@ -5081,12 +5083,20 @@
                 var color = r.score_change > 0 ? '#27ae60' : (r.score_change < 0 ? '#e74c3c' : '#888');
                 changeStr = '<span style="color:' + color + ';">' + arrow + ' ' + Math.abs(r.score_change).toFixed(1) + '</span>';
             }
+            // 数据完整度：从 data_warnings（JSON 字符串）判断是否存在 ⚠️ 项
+            var dwList = [];
+            try { dwList = JSON.parse(r.data_warnings || '[]'); } catch (e) { dwList = []; }
+            var dataIssues = dwList.filter(function(w) { return /⚠️/.test(w); });
+            var dataTag = dataIssues.length > 0
+                ? '<span style="color:#e65100;font-weight:600;cursor:help;" title="' + dataIssues.map(function(w){return w.replace(/"/g,'&quot;');}).join('\n') + '">⚠️</span>'
+                : '<span style="color:#27ae60;cursor:help;" title="数据完整，无滞后/替代源问题">✓</span>';
             html += '<tr style="border-bottom:1px solid #eee;cursor:pointer;" onclick="viewReport(' + r.stock_id + ')" title="点击查看详细报告">';
             html += '<td style="padding:8px;"><strong>' + (r.stock_name || '') + '</strong><br><span style="color:#888;font-size:12px;">' + r.stock_code + '</span></td>';
             html += '<td style="padding:8px;">' + engineTag + '</td>';
             html += '<td style="padding:8px;font-size:16px;font-weight:700;color:' + _scoreColor(r.total_score || 0) + ';">' + (r.total_score || 0).toFixed(1) + '</td>';
             html += '<td style="padding:8px;"><span class="rating-badge ' + getRatingClass(r.rating) + '" title="' + getRatingTitle(r.rating) + '">' + (r.rating || '—') + '</span></td>';
             html += '<td style="padding:8px;">' + changeStr + '</td>';
+            html += '<td style="padding:8px;text-align:center;">' + dataTag + '</td>';
             html += '<td style="padding:8px;color:#888;font-size:12px;">' + _fmtGenTime(r.generated_at) + '</td>';
             html += '</tr>';
         });
