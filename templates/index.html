@@ -477,7 +477,7 @@
             top: 48px;
             right: 0;
             width: 380px;
-            max-height: 480px;
+            max-height: 540px;
             background: #fff;
             border: 1px solid #e0e0e0;
             border-radius: 10px;
@@ -971,11 +971,59 @@
         </button>
         <div class="alert-dropdown" id="alertDropdown">
             <div class="alert-dropdown-header">
-                <span>📋 智能预警</span>
+                <span id="alertDropdownTitle">📋 智能预警</span>
                 <button class="mark-all-btn" onclick="markAllAlertsRead(event)">全部已读</button>
             </div>
+            <!-- 未读通知列表 -->
             <div class="alert-list" id="alertList">
                 <div class="alert-empty">暂无未读预警</div>
+            </div>
+            <!-- 预警规则列表（管理模式） -->
+            <div class="alert-list" id="alertRulesList" style="display:none;">
+            </div>
+            <!-- U5(#7): 底部操作栏 -->
+            <div style="display:flex;gap:8px;padding:10px 16px;border-top:1px solid #eee;background:#fafbfc;">
+                <button class="btn btn-primary btn-sm" style="flex:1;" onclick="openAlertRuleModal(event)">➕ 添加预警规则</button>
+                <button class="btn btn-sm" id="alertManageBtn" style="background:#f0f0f0;border:1px solid #ddd;" onclick="toggleAlertRulesView(event)">⚙ 管理规则</button>
+            </div>
+        </div>
+
+        <!-- U5(#7): 添加预警规则弹窗 -->
+        <div id="alertRuleModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:2000;align-items:center;justify-content:center;">
+            <div style="background:#fff;border-radius:12px;padding:24px;width:440px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.2);">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+                    <h3 style="margin:0;font-size:18px;">➕ 添加预警规则</h3>
+                    <button onclick="closeAlertRuleModal()" style="border:none;background:none;font-size:22px;cursor:pointer;color:#999;line-height:1;">✕</button>
+                </div>
+                <div style="margin-bottom:16px;">
+                    <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:#555;">预警类型</label>
+                    <select id="alertRuleType" style="width:100%;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:14px;" onchange="onAlertRuleTypeChange()">
+                        <option value="rating_change">评级变动（评级发生升降级时提醒）</option>
+                        <option value="score_below">评分跌破（总分跌破阈值时提醒）</option>
+                        <option value="capital_outflow">资金流出（主力资金大幅流出时提醒）</option>
+                    </select>
+                </div>
+                <div id="alertThresholdWrap" style="margin-bottom:16px;">
+                    <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:#555;" id="alertThresholdLabel">阈值</label>
+                    <input type="number" id="alertThresholdInput" style="width:100%;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:14px;" placeholder="如 60">
+                    <p style="font-size:12px;color:#888;margin-top:4px;" id="alertThresholdHint"></p>
+                </div>
+                <div style="margin-bottom:16px;">
+                    <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:#555;">适用范围</label>
+                    <select id="alertRuleScope" style="width:100%;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:14px;" onchange="onAlertScopeChange()">
+                        <option value="global">全部股票（全局）</option>
+                        <option value="stock">指定个股</option>
+                    </select>
+                </div>
+                <div id="alertStockSelectWrap" style="display:none;margin-bottom:16px;">
+                    <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:#555;">选择股票</label>
+                    <select id="alertStockSelect" style="width:100%;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:14px;"></select>
+                </div>
+                <div id="alertRuleError" style="display:none;margin-bottom:12px;padding:8px 12px;background:#fff3e0;border:1px solid #ffcc02;border-radius:6px;font-size:13px;color:#e65100;"></div>
+                <div style="display:flex;gap:12px;justify-content:flex-end;">
+                    <button onclick="closeAlertRuleModal()" style="padding:8px 20px;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:14px;background:#f8f9fa;">取消</button>
+                    <button onclick="submitAlertRule()" style="padding:8px 20px;border:none;border-radius:6px;cursor:pointer;font-size:14px;background:#1a73e8;color:#fff;font-weight:600;">确认添加</button>
+                </div>
             </div>
         </div>
     </div>
@@ -1114,6 +1162,11 @@
         <button class="btn-export" onclick="exportDailyExcel()">📥 导出Excel</button>
         <button class="btn-export" onclick="window.print()">🖨️ 导出PDF</button>
     </div>
+    <!-- U2(#6): 今日报告 vs 盘中快报 功能说明（持久显示，不受动态内容替换影响） -->
+    <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px;padding:10px 16px;background:#f8fbff;border:1px solid #e3edf7;border-radius:8px;font-size:13px;color:#555;">
+        <div><span style="font-weight:600;color:#1a73e8;">🚀 生成今日报告</span>：盘后汇总，生成当日完整分析报告（含评分变动、降级提示）</div>
+        <div><span style="font-weight:600;color:#f39c12;">📊 盘中快报</span>：盘中实时刷新评分，快速查看当日盘中变化（不覆盖盘后日报）</div>
+    </div>
     <div id="dailyContent">
         <div class="report-empty">
             <p style="font-size:18px;margin-bottom:12px;">📅 每日分析报告</p>
@@ -1204,6 +1257,15 @@
 
 <!-- P2 看板专用样式 -->
 <style>
+/* 回测报告表格：统一行列边框线（评级有效性报告卡片内所有表格） */
+.bt-report-table {
+    border-collapse: collapse;
+    width: 100%;
+}
+.bt-report-table th,
+.bt-report-table td {
+    border: 1px solid #e0e0e0;
+}
 .dash-card {
     background: #fff;
     border-radius: 10px;
@@ -1920,15 +1982,19 @@
                             '<td>' + priceDisplay + '</td>' +
                             '<td>' + upnlDisplay + '</td>' +
                             '<td style="font-size:12px;">' + timeDisplay + '</td>' +
-                            '<td>' +
-                                '<button class="btn btn-sm" style="background:#6c757d;color:white;" onclick="openStockEditModal(' + s.id + ',\'' + s.symbol + '\',\'' + (s.name||'').replace(/'/g,' ') + '\',' + (s.group_id||'null') + ')">编辑</button>' +
-                                '<button class="btn btn-success btn-sm" onclick="collectData(' + s.id + ', \'' + s.symbol + '\', \'' + s.market + '\')">采集数据</button>' +
-                                '<button class="btn btn-primary btn-sm" style="background:#6c5ce7;" onclick="analyzeStock(' + s.id + ', \'' + s.symbol + '\')">四维分析</button>' +
-                                '<button class="btn btn-primary btn-sm" style="background:#e17055;" onclick="generateAdvice(' + s.id + ', \'' + s.symbol + '\')">生成评级</button>' +
-                                '<button class="btn btn-sm" style="background:#2ecc71;color:white;" onclick="viewReport(' + s.id + ')">📊 查看报告</button>' +
-                                '<button class="btn btn-primary btn-sm" onclick="viewData(' + s.id + ')">查看数据</button>' +
-                                '<button class="btn btn-sm" style="background:#f39c12;color:white;" onclick="addStockToHoldings(' + s.id + ',\'' + s.symbol + '\',\'' + (s.name||'').replace(/'/g,' ') + '\',\'' + s.market + '\')">加入持仓</button>' +
-                                '<button class="btn btn-danger btn-sm" onclick="deleteStock(' + s.id + ')">删除</button>' +
+                            '<td style="white-space:nowrap;">' +
+                                '<button class="btn btn-primary btn-sm" style="background:#8e44ad;" onclick="oneClickAnalyze(' + s.id + ', \'' + s.symbol + '\', \'' + s.market + '\')">⚡ 一键分析</button> ' +
+                                '<button class="btn btn-sm" style="background:#2ecc71;color:white;" onclick="viewReport(' + s.id + ')">📊 报告</button> ' +
+                                '<div style="position:relative;display:inline-block;">' +
+                                    '<button class="btn btn-sm" style="background:#f0f0f0;border:1px solid #ccc;" onclick="toggleStockMore(' + s.id + ', event)">⋯ 更多</button>' +
+                                    '<div id="stockMore' + s.id + '" class="stock-more-menu" style="display:none;position:absolute;right:0;top:100%;z-index:100;background:#fff;border:1px solid #ddd;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.15);min-width:130px;padding:4px 0;">' +
+                                        '<a href="javascript:void(0)" onclick="event.stopPropagation();viewData(' + s.id + ')" style="display:block;padding:6px 16px;font-size:13px;color:#333;text-decoration:none;">📋 查看数据</a>' +
+                                        '<a href="javascript:void(0)" onclick="event.stopPropagation();addStockToHoldings(' + s.id + ',\'' + s.symbol + '\',\'' + (s.name||'').replace(/'/g,' ') + '\',\'' + s.market + '\')" style="display:block;padding:6px 16px;font-size:13px;color:#333;text-decoration:none;">💰 加入持仓</a>' +
+                                        '<a href="javascript:void(0)" onclick="event.stopPropagation();openStockEditModal(' + s.id + ',\'' + s.symbol + '\',\'' + (s.name||'').replace(/'/g,' ') + '\',' + (s.group_id||'null') + ')" style="display:block;padding:6px 16px;font-size:13px;color:#333;text-decoration:none;">✏️ 编辑</a>' +
+                                        '<a href="javascript:void(0)" onclick="event.stopPropagation();deleteStock(' + s.id + ')" style="display:block;padding:6px 16px;font-size:13px;color:#e74c3c;text-decoration:none;">🗑 删除</a>' +
+                                    '</div>' +
+                                '</div>' +
+                                (s.latest_price == null ? '<div style="margin-top:4px;font-size:11px;color:#f39c12;">💡 首次使用请先点「⚡ 一键分析」</div>' : '') +
                             '</td>' +
                         '</tr>';
                     });
@@ -2007,11 +2073,15 @@
                         '<div class="card-title">数据采集结果：' + data.symbol + '（' + (data.market === 'a_stock' ? 'A股' : '港股') + '）</div>';
 
                     for (const [dim, info] of Object.entries(data.results)) {
+                        // 019E Task 4.2：增加 estimated 分支（复用 status-partial CSS 类）
+                        // 019K Task 4：增加 fallback 分支（THS 顶替，复用 status-partial CSS 类）
                         const statusClass = info.status === 'success' ? 'status-success'
-                            : info.status === 'partial' ? 'status-partial'
+                            : (info.status === 'partial' || info.status === 'estimated' || info.status === 'fallback') ? 'status-partial'
                             : 'status-failed';
                         const statusText = info.status === 'success' ? '✅ 成功'
                             : info.status === 'partial' ? '⚠️ 部分成功'
+                            : info.status === 'estimated' ? '⚠️ 估算'
+                            : info.status === 'fallback' ? '⚠️ 顶替'
                             : '❌ 失败';
                         html += '<div class="dim-result">' +
                             '<span><strong>' + dim + '</strong></span>' +
@@ -2162,6 +2232,97 @@
             });
     }
 
+    // ========== U6(#3): 一键分析（采集→分析→评级）==========
+    function oneClickAnalyze(id, symbol, market) {
+        var area = document.getElementById('collectArea');
+        area.innerHTML = '<div class="card">' +
+            '<div class="card-title">⚡ 一键分析 — ' + symbol + '</div>' +
+            '<div style="margin:16px 0;">' +
+            '<div style="display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">' +
+                '<span id="oca-step1" style="font-size:14px;color:#1a73e8;font-weight:600;">⏳ 第1步：采集数据...</span>' +
+                '<span id="oca-step2" style="font-size:14px;color:#999;">②四维分析</span>' +
+                '<span id="oca-step3" style="font-size:14px;color:#999;">③生成评级</span>' +
+            '</div>' +
+            '<div style="width:100%;height:8px;background:#e0e0e0;border-radius:4px;overflow:hidden;">' +
+                '<div id="oca-progress" style="width:10%;height:100%;background:linear-gradient(90deg,#8e44ad,#9b59b6);border-radius:4px;transition:width 0.4s ease;"></div>' +
+            '</div>' +
+            '<div id="oca-detail" style="margin-top:12px;font-size:13px;color:#555;">正在采集中，请稍候（可能需要10-30秒）...</div>' +
+            '</div></div>';
+        area.scrollIntoView({ behavior: 'smooth' });
+
+        var controller = new AbortController();
+        var timeoutId = setTimeout(function() { controller.abort(); }, 300000);
+
+        // Step 1: 采集数据
+        fetch('/api/collect/' + id, { method: 'POST', signal: controller.signal })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!data.success) throw new Error(data.message || '采集失败');
+                document.getElementById('oca-step1').innerHTML = '✅ 第1步：采集数据完成';
+                document.getElementById('oca-step1').style.color = '#27ae60';
+                document.getElementById('oca-step2').innerHTML = '⏳ 第2步：四维分析中...';
+                document.getElementById('oca-step2').style.color = '#1a73e8';
+                document.getElementById('oca-progress').style.width = '40%';
+                document.getElementById('oca-detail').textContent = '采集完成，正在计算四维评分...';
+                // Step 2: 四维分析
+                return fetch('/api/stocks/' + id + '/analyze', { method: 'POST' });
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!data.success) throw new Error(data.message || '分析失败');
+                document.getElementById('oca-step2').innerHTML = '✅ 第2步：四维分析完成';
+                document.getElementById('oca-step2').style.color = '#27ae60';
+                document.getElementById('oca-step3').innerHTML = '⏳ 第3步：生成评级中...';
+                document.getElementById('oca-step3').style.color = '#1a73e8';
+                document.getElementById('oca-progress').style.width = '75%';
+                document.getElementById('oca-detail').textContent = '分析完成（总分 ' + data.total_score.toFixed(1) + '），正在生成评级建议...';
+                // Step 3: 生成评级
+                return fetch('/api/stocks/' + id + '/advise', { method: 'POST' });
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                clearTimeout(timeoutId);
+                if (!data.success) throw new Error(data.message || '评级生成失败');
+                document.getElementById('oca-step3').innerHTML = '✅ 第3步：评级生成完成';
+                document.getElementById('oca-step3').style.color = '#27ae60';
+                document.getElementById('oca-progress').style.width = '100%';
+                document.getElementById('oca-detail').innerHTML =
+                    '<div style="padding:12px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:6px;margin-top:8px;">' +
+                    '<strong style="font-size:16px;color:#27ae60;">✅ 一键分析完成！</strong><br>' +
+                    '<span style="font-size:14px;">综合评分：<strong>' + data.total_score.toFixed(1) + '</strong> | 评级：<strong>' + data.rating + '</strong></span><br>' +
+                    '<button class="btn btn-success btn-sm" style="margin-top:8px;" onclick="viewReport(' + id + ')">📊 查看完整报告</button>' +
+                    '</div>';
+                // 刷新列表与评级
+                loadStocks();
+                loadRatings();
+            })
+            .catch(function(err) {
+                clearTimeout(timeoutId);
+                var msg = err.name === 'AbortError' ? '操作超时，请重试' : ('失败：' + err.message);
+                var detail = document.getElementById('oca-detail');
+                if (detail) {
+                    detail.innerHTML = '<div style="padding:12px;background:#ffebee;border:1px solid #ef9a9a;border-radius:6px;color:#c62828;">❌ ' + msg + '</div>';
+                } else {
+                    area.innerHTML = '<div class="card"><div class="alert alert-error">⚡ 一键分析 ' + symbol + ' 失败：' + msg + '</div></div>';
+                }
+            });
+    }
+
+    // U6(#3): 更多操作下拉菜单
+    function toggleStockMore(stockId, e) {
+        if (e) e.stopPropagation();
+        document.querySelectorAll('.stock-more-menu').forEach(function(m) {
+            if (m.id !== 'stockMore' + stockId) m.style.display = 'none';
+        });
+        var menu = document.getElementById('stockMore' + stockId);
+        if (menu) {
+            menu.style.display = (menu.style.display === 'none') ? '' : 'none';
+        }
+    }
+    document.addEventListener('click', function() {
+        document.querySelectorAll('.stock-more-menu').forEach(function(m) { m.style.display = 'none'; });
+    });
+
     function renderAdviceResult(data) {
         const dims = data.dimensions || {};
         const dimNames = {
@@ -2297,28 +2458,52 @@
             fetch(`/api/stocks/${id}/capital`).then(r => r.json()),
             fetch(`/api/stocks/${id}/status`).then(r => r.json()),
             fetch(`/api/stocks/${id}/news`).then(r => r.json()),
-        ]).then(([kline, fund, capital, status, news]) => {
+            fetch(`/api/stocks/${id}/orderbook`).then(r => r.json()),
+            fetch(`/api/stocks/${id}/valuation`).then(r => r.json()),
+            fetch(`/api/stocks/${id}/restricted-release`).then(r => r.json()),
+        ]).then(([kline, fund, capital, status, news, orderbook, valuation, restricted]) => {
             let html = '<div class="card"><div class="card-title">数据详情</div>';
 
             // K线数据
-            html += '<h4 style="margin: 16px 0 8px;">K线数据（最近20条）</h4>';
+            // 019Y T1：存在 mootdx 降级行时动态标注来源
+            const hasMootdxKline = kline.success && kline.data && kline.data.some(d => d.data_source === 'mootdx');
+            const klineSourceLabel = hasMootdxKline ? '来源：腾讯财经（前复权）＋mootdx（备用源）' : '来源：腾讯财经（前复权）';
+            html += '<h4 style="margin: 16px 0 8px;">K线数据（最近20条）<span style="font-size:12px;color:#999;font-weight:normal;">　' + klineSourceLabel + '</span></h4>';
             if (kline.success && kline.count > 0) {
                 html += '<table><thead><tr><th>日期</th><th>开盘</th><th>收盘</th><th>最高</th><th>最低</th><th>成交量</th><th>涨跌幅</th></tr></thead><tbody>';
                 kline.data.forEach(d => {
                     const color = d.pct_change && d.pct_change.startsWith('+') ? '#e74c3c' : '#27ae60';
-                    html += `<tr><td>${d.trade_date}</td><td>${d.open}</td><td>${d.close}</td><td>${d.high}</td><td>${d.low}</td><td>${d.volume}</td><td style="color:${color}">${d.pct_change || '-'}</td></tr>`;
+                    const srcTag = d.data_source === 'mootdx' ? '<sup style="color:#e67e22;font-size:11px">mootdx</sup>' : '';
+                    html += `<tr><td>${d.trade_date}${srcTag}</td><td>${d.open}</td><td>${d.close}</td><td>${d.high}</td><td>${d.low}</td><td>${d.volume}</td><td style="color:${color}">${d.pct_change || '-'}</td></tr>`;
                 });
                 html += '</tbody></table>';
+                html += '<div style="font-size:12px;color:#999;margin-top:4px;">数据来源：腾讯财经日K线接口（前复权），与同花顺/通达信等APP显示可能因复权方式不同而有差异</div>';
             } else {
                 html += '<div class="alert alert-warning">暂无K线数据，请先点击"采集数据"</div>';
             }
 
             // 基本面数据
-            html += '<h4 style="margin: 24px 0 8px;">基本面数据</h4>';
+            // 019P：静态来源文案改动态（A-3 三通道·前端通道，019K L2484-2490 同型）
+            // 按 data_source 去重生成表头来源文案；行级 <sup> 标注混合来源行；估值来源表头注明腾讯
+            const fundSources = new Set((fund.data || []).map(d => d.data_source).filter(Boolean));
+            const fundSrcParts = [];
+            if (fundSources.has('sina_abstract')) fundSrcParts.push('新浪关键指标(abstract)');
+            if (fundSources.has('sina_analysis_indicator')) fundSrcParts.push('新浪指标(analysis_indicator降级)');
+            if (fundSources.has('em_hk')) fundSrcParts.push('港股东方财富(EM)');
+            const fundSourceLabel = (fundSrcParts.length ? '来源：' + fundSrcParts.join('、') : '来源：未标注') + '；估值：腾讯行情';
+            const fundMixed = fundSrcParts.length > 1;
+            html += '<h4 style="margin: 24px 0 8px;">基本面数据<span style="font-size:12px;color:#999;font-weight:normal;">　' + fundSourceLabel + '</span></h4>';
             if (fund.success && fund.count > 0) {
                 html += '<table><thead><tr><th>财报日期</th><th>ROE(%)</th><th>PE</th><th>PB</th><th>毛利率(%)</th><th>净利率(%)</th><th>负债率(%)</th><th>营收增长(%)</th></tr></thead><tbody>';
                 fund.data.forEach(d => {
-                    html += `<tr><td>${d.report_date || '—'}</td><td>${d.roe ?? '—'}</td><td>${d.pe_ratio ?? '—'}</td><td>${d.pb_ratio ?? '—'}</td><td>${d.gross_margin ?? '—'}</td><td>${d.net_margin ?? '—'}</td><td>${d.debt_ratio ?? '—'}</td><td>${d.revenue_growth ?? '—'}</td></tr>`;
+                    // 019P：混合来源时行级标注（多源并存时显示，单源不显示避免噪音）
+                    let srcSup = '';
+                    if (fundMixed) {
+                        if (d.data_source === 'sina_abstract') srcSup = '<sup style="color:#1a73e8;font-size:11px">新浪</sup>';
+                        else if (d.data_source === 'sina_analysis_indicator') srcSup = '<sup style="color:#e67e22;font-size:11px">新浪降级</sup>';
+                        else if (d.data_source === 'em_hk') srcSup = '<sup style="color:#1a73e8;font-size:11px">东财</sup>';
+                    }
+                    html += `<tr><td>${d.report_date || '—'}${srcSup}</td><td>${d.roe ?? '—'}</td><td>${d.pe_ratio ?? '—'}</td><td>${d.pb_ratio ?? '—'}</td><td>${d.gross_margin ?? '—'}</td><td>${d.net_margin ?? '—'}</td><td>${d.debt_ratio ?? '—'}</td><td>${d.revenue_growth ?? '—'}</td></tr>`;
                 });
                 html += '</tbody></table>';
             } else {
@@ -2326,20 +2511,110 @@
             }
 
             // 资金面数据
-            html += '<h4 style="margin: 24px 0 8px;">资金面数据（最近10条）</h4>';
+            // 019E Task 4.1：动态表头——存在估算行时标注“含估算兜底数据”
+            // 019K Task 4：动态表头——存在 THS 顶替行时标注“同花顺顶替（全部资金口径）”
+            // 019S：ths_total 已无新增行（存量 27 行按方案 b 处置为估算语义），
+            // 该分支成无害死分支；保留展示逻辑仅为存量期诚实标注，勿删。
+            // 019Q Task 4：动态表头——存在新浪顶替行时标注“新浪顶替（主力口径）”
+            const hasEstimated = capital.success && capital.data && capital.data.some(d => d.is_estimated === 1);
+            const hasThsFallback = capital.success && capital.data && capital.data.some(d => d.capital_source === 'ths_total');
+            const hasSinaMain = capital.success && capital.data && capital.data.some(d => d.capital_source === 'sina_main');
+            const sourceNotes = [];
+            if (hasEstimated) sourceNotes.push('含估算兜底数据');
+            if (hasThsFallback) sourceNotes.push('同花顺顶替（全部资金口径）');
+            if (hasSinaMain) sourceNotes.push('新浪顶替（主力口径）');
+            const capitalSourceLabel = sourceNotes.length ? '来源：东方财富（' + sourceNotes.join('、') + '）' : '来源：东方财富';
+            html += '<h4 style="margin: 24px 0 8px;">资金面数据（最近10条）<span style="font-size:12px;color:#999;font-weight:normal;">　' + capitalSourceLabel + '</span></h4>';
             if (capital.success && capital.count > 0) {
-                html += '<table><thead><tr><th>日期</th><th>主力净流入</th><th>主力净流入占比</th><th>超大单</th><th>大单</th></tr></thead><tbody>';
+                html += '<table><thead><tr><th>日期</th><th>主力净流入</th><th>主力净流入占比</th><th>超大单</th><th>大单</th><th title="同花顺全部资金净流入（总主动买入-总主动卖出），辅助指标">同花顺净额<sup style="color:#999">辅</sup></th></tr></thead><tbody>';
                 capital.data.forEach(d => {
                     const color = d.main_net_inflow > 0 ? '#e74c3c' : '#27ae60';
-                    html += `<tr><td>${d.trade_date}</td><td style="color:${color}">${d.main_net_inflow ?? '—'}</td><td>${d.main_net_inflow_pct ?? '—'}%</td><td>${d.super_large_net ?? '—'}</td><td>${d.large_net ?? '—'}</td></tr>`;
+                    const thsColor = d.ths_net_inflow > 0 ? '#e74c3c' : d.ths_net_inflow < 0 ? '#27ae60' : '#999';
+                    // 019E Task 4.1：估算行追加标注（仅资金面表格，评分卡片不标注）
+                    // 019K Task 4：THS 顶替行追加“同花顺”标注（口径提示：全部资金净流入，非主力）
+                    // 019S：ths_total 已无新增行（存量 27 行按方案 b 处置），
+                    // 该分支为无害死分支，保留仅为存量期诚实标注，勿删。
+                    // 019Q Task 4：新浪顶替行追加“新浪”标注（口径提示：主力口径 r0+r1）
+                    const estTag = d.is_estimated === 1 ? '<sup style="color:#e67e22;font-size:11px">估算</sup>' : '';
+                    const thsTag = d.capital_source === 'ths_total' ? '<sup style="color:#1a73e8;font-size:11px">同花顺</sup>' : '';
+                    const sinaTag = d.capital_source === 'sina_main' ? '<sup style="color:#8e44ad;font-size:11px">新浪</sup>' : '';
+                    html += `<tr><td>${d.trade_date}</td><td style="color:${color}">${d.main_net_inflow ?? '—'}${estTag}${thsTag}${sinaTag}</td><td>${d.main_net_inflow_pct ?? '—'}%</td><td>${d.super_large_net ?? '—'}</td><td>${d.large_net ?? '—'}</td><td style="color:${thsColor}">${d.ths_net_inflow ?? '—'}</td></tr>`;
                 });
                 html += '</tbody></table>';
+                html += '<div style="font-size:12px;color:#999;margin-top:4px;">主力净流入来源：东方财富（超大单+大单）；同花顺净额为辅助指标（全部资金净流入），两者口径不同，可用于判断主力与散户行为背离</div>';
             } else {
                 html += '<div class="alert alert-warning">暂无资金面数据，请先点击"采集数据"</div>';
             }
 
+            // 019Y T1：五档盘口（mootdx 通达信实时行情，红涨绿跌）
+            html += '<h4 style="margin: 24px 0 8px;">五档盘口<span style="font-size:12px;color:#999;font-weight:normal;">　来源：mootdx（通达信实时行情）</span></h4>';
+            if (orderbook.success && orderbook.count > 0) {
+                const ob = orderbook.data[0];
+                html += '<table><thead><tr><th>卖5</th><th>卖4</th><th>卖3</th><th>卖2</th><th>卖1</th><th>最新价</th><th>买1</th><th>买2</th><th>买3</th><th>买4</th><th>买5</th></tr></thead><tbody>';
+                html += '<tr>';
+                for (let l = 5; l >= 1; l--) {
+                    const p = ob['ask' + l + '_price'], v = ob['ask' + l + '_vol'];
+                    html += `<td style="color:#27ae60;">${p ?? '—'}<br><span style="color:#999;font-size:11px;font-weight:normal;">${v ?? '—'}手</span></td>`;
+                }
+                const pctColor = (ob.pct_change ?? 0) >= 0 ? '#e74c3c' : '#27ae60';
+                html += `<td style="background:#fff3e0;font-weight:bold;color:${pctColor};">${ob.latest_price ?? '—'}<br><span style="color:#999;font-size:11px;font-weight:normal;">${ob.pct_change ?? '—'}%</span></td>`;
+                for (let l = 1; l <= 5; l++) {
+                    const p = ob['bid' + l + '_price'], v = ob['bid' + l + '_vol'];
+                    html += `<td style="color:#e74c3c;">${p ?? '—'}<br><span style="color:#999;font-size:11px;font-weight:normal;">${v ?? '—'}手</span></td>`;
+                }
+                html += '</tr></tbody></table>';
+                html += `<div style="font-size:12px;color:#999;margin-top:4px;">快照时间：${ob.quote_time || '—'}（${ob.trade_date || ''}）　数据来源：${ob.source || 'mootdx'}　量单位为手（1手=100股）</div>`;
+            } else {
+                html += '<div class="alert alert-warning">暂无五档盘口数据（mootdx，仅A股）</div>';
+            }
+
+            // 019Y T2：估值数据（akshare 主源 / baostock 备用源）
+            const valSources = new Set((valuation.data || []).map(d => d.source).filter(Boolean));
+            const valSrcParts = [];
+            if (valSources.has('akshare')) valSrcParts.push('akshare');
+            if (valSources.has('baostock')) valSrcParts.push('baostock');
+            const valSourceLabel = valSrcParts.length ? '来源：' + valSrcParts.join('、') : '来源：未标注';
+            html += '<h4 style="margin: 24px 0 8px;">估值数据（PE/PB/PS/PCF）<span style="font-size:12px;color:#999;font-weight:normal;">　' + valSourceLabel + '</span></h4>';
+            if (valuation.success && valuation.count > 0) {
+                html += '<table><thead><tr><th>日期</th><th>PE(TTM)</th><th>PE(静)</th><th>PB</th><th>PS(TTM)</th><th>PCF(TTM)</th><th>股息率</th><th>来源</th></tr></thead><tbody>';
+                valuation.data.forEach(d => {
+                    const vTag = d.source === 'baostock' ? '<sup style="color:#e67e22;font-size:11px">备用</sup>' : '';
+                    html += `<tr><td>${d.trade_date || '—'}</td><td>${d.pe_ttm ?? '—'}</td><td>${d.pe ?? '—'}</td><td>${d.pb_mrq ?? '—'}</td><td>${d.ps_ttm ?? '—'}</td><td>${d.pcf_ncf_ttm ?? '—'}</td><td>${d.dv_ttm ?? '—'}</td><td>${(d.source || '—')}${vTag}</td></tr>`;
+                });
+                html += '</tbody></table>';
+                html += '<div style="font-size:12px;color:#999;margin-top:4px;">PE=市盈率（股价÷每股收益），PB=市净率（股价÷每股净资产），PS=市销率（股价÷每股销售额），PCF=市现率（股价÷每股经营现金流）</div>';
+            } else {
+                html += '<div class="alert alert-warning">暂无估值数据，请先点击"采集数据"</div>';
+            }
+
+            // 019Y T2：限售解禁（风险因子，未来解禁高亮）
+            const nowD = new Date();
+            const todayStr = nowD.getFullYear() + '-' + String(nowD.getMonth() + 1).padStart(2, '0') + '-' + String(nowD.getDate()).padStart(2, '0');
+            const fmtBig = (v) => {
+                if (v === null || v === undefined || v === '') return '—';
+                const n = Number(v);
+                if (isNaN(n)) return '—';
+                if (Math.abs(n) >= 1e8) return (n / 1e8).toFixed(2) + '亿';
+                if (Math.abs(n) >= 1e4) return (n / 1e4).toFixed(2) + '万';
+                return String(n);
+            };
+            html += '<h4 style="margin: 24px 0 8px;">限售解禁（风险因子）<span style="font-size:12px;color:#999;font-weight:normal;">　来源：akshare（东方财富）</span></h4>';
+            if (restricted.success && restricted.count > 0) {
+                html += '<table><thead><tr><th>解禁日期</th><th>解禁类型</th><th>解禁数量</th><th>实际解禁数量</th><th>解禁市值</th><th>占总股本</th></tr></thead><tbody>';
+                restricted.data.forEach(d => {
+                    const isFuture = d.release_date >= todayStr;
+                    const dateTag = isFuture ? '<sup style="color:#e74c3c;font-size:11px">未解禁</sup>' : '';
+                    const ratio = d.release_ratio !== null && d.release_ratio !== undefined ? d.release_ratio + '%' : '—';
+                    html += `<tr><td>${d.release_date || '—'}${dateTag}</td><td>${d.release_type || '—'}</td><td>${fmtBig(d.release_shares)}</td><td>${fmtBig(d.actual_shares)}</td><td>${fmtBig(d.actual_mv)}</td><td>${ratio}</td></tr>`;
+                });
+                html += '</tbody></table>';
+                html += '<div style="font-size:12px;color:#999;margin-top:4px;">解禁属于事件级风险因子：大额解禁可能带来抛压，红色"未解禁"标注为尚未解禁的批次</div>';
+            } else {
+                html += '<div class="alert alert-warning">暂无限售解禁数据</div>';
+            }
+
             // 消息面原始数据（含可点击原文链接）
-            html += '<h4 style="margin: 24px 0 8px;">📰 消息面原始数据</h4>';
+            html += '<h4 style="margin: 24px 0 8px;">📰 消息面原始数据<span style="font-size:12px;color:#999;font-weight:normal;">　来源：东方财富新闻</span></h4>';
             if (news.success && news.news_count > 0) {
                 if (news.extreme_warning) {
                     html += '<div class="alert alert-warning">⚠️ 检测到极端情绪（avg_sentiment≥0.95），建议人工复核原文！</div>';
@@ -2387,8 +2662,10 @@
             if (status.success && status.data.length > 0) {
                 html += '<table><thead><tr><th>维度</th><th>状态</th><th>说明</th><th>时间</th></tr></thead><tbody>';
                 status.data.forEach(d => {
-                    const sc = d.status === 'success' ? 'status-success' : d.status === 'partial' ? 'status-partial' : 'status-failed';
-                    const st = d.status === 'success' ? '✅成功' : d.status === 'partial' ? '⚠️部分' : '❌失败';
+                    // 019E Task 4.2：增加 estimated 分支（复用 status-partial CSS 类）
+                    // 019K Task 4：增加 fallback 分支（THS 顶替，复用 status-partial CSS 类）
+                    const sc = d.status === 'success' ? 'status-success' : (d.status === 'partial' || d.status === 'estimated' || d.status === 'fallback') ? 'status-partial' : 'status-failed';
+                    const st = d.status === 'success' ? '✅成功' : d.status === 'partial' ? '⚠️部分' : d.status === 'estimated' ? '⚠️估算' : d.status === 'fallback' ? '⚠️顶替' : '❌失败';
                     const dimNames = { kline: 'K线', fundamental: '基本面', capital: '资金面', sentiment: '消息面' };
                     html += `<tr><td>${dimNames[d.dimension] || d.dimension}</td><td class="${sc}">${st}</td><td>${d.message || '—'}</td><td>${d.fetched_at}</td></tr>`;
                 });
@@ -2793,7 +3070,7 @@
                         var adjustedTag = h.is_cost_adjusted
                             ? ' <span style="font-size:10px;background:#6c5ce7;color:white;padding:1px 4px;border-radius:3px;">已修正</span>'
                             : '';
-                        var costDisplay = (h.cost_price || 0) + adjustedTag;
+                        var costDisplay = Number(h.cost_price || 0).toFixed(2) + adjustedTag;
                         // 最新价显示
                         var priceDisplay = '—';
                         if (h.latest_price != null) {
@@ -4041,7 +4318,7 @@
         if (adviseData.action_advice) {
             html += '<div class="action-advice">建议：' + adviseData.action_advice + '</div>';
         }
-        html += '<div class="rating-time">评级时间：' + (adviseData.rating_date || '—') + '</div>';
+        html += '<div class="rating-time">报告生成于：' + _fmtGenTime(adviseData.generated_at) + '</div>';
         if (adviseData.latest_close != null) {
             html += '<div class="rating-time">最新收盘：' + adviseData.latest_close.toFixed(2) +
                     '（' + (adviseData.latest_close_date || '') + '）</div>';
@@ -4065,14 +4342,19 @@
             var zeroCount = 0;
             var dqHtml = '数据完整度：';
             dqDims.forEach(function(d) {
-                var pct = Math.round((d.val || 0) * 100);
-                if (pct === 0) {
-                    dqHtml += '<span style="color:#e67e22;font-weight:600;">' + d.name + ' 0% ⚠️缺失</span> ';
-                    zeroCount++;
-                } else if (pct <= 30) {
-                    dqHtml += '<span style="color:#f39c12;">' + d.name + ' ' + pct + '% 偏低</span> ';
+                // U7(#5): val 为 null 时表示已采集但未统计完整度，不再误显 100% 或 0%
+                if (d.val === null || d.val === undefined) {
+                    dqHtml += '<span style="color:#999;">' + d.name + ' 已采集</span> ';
                 } else {
-                    dqHtml += d.name + ' ' + pct + '% ';
+                    var pct = Math.round(d.val * 100);
+                    if (pct === 0) {
+                        dqHtml += '<span style="color:#e67e22;font-weight:600;">' + d.name + ' 0% ⚠️缺失</span> ';
+                        zeroCount++;
+                    } else if (pct <= 30) {
+                        dqHtml += '<span style="color:#f39c12;">' + d.name + ' ' + pct + '% 偏低</span> ';
+                    } else {
+                        dqHtml += d.name + ' ' + pct + '% ';
+                    }
                 }
             });
             html += '<div class="rating-time" style="font-size:11px;color:#aaa;">' + dqHtml + '</div>';
@@ -4115,9 +4397,16 @@
         html += '<div class="card-title" style="font-size:16px;margin-bottom:16px;">📝 投资建议详情</div>';
 
         if (adviseData.advice_detail) {
+            // U7(#5): 综合文本（历史快照 markdown_content）中的「数据完整度」行
+            // 可能与顶部实时 data_quality（已修复口径）不一致，移除该行避免矛盾，
+            // 完整度统一以顶部权威展示为准。
+            var detailText = adviseData.advice_detail;
+            if (detailText) {
+                detailText = detailText.replace(/\n- \*\*数据完整度\*\*[^\n]*/g, '');
+            }
             html += '<div class="advice-section">';
             html += '<div class="advice-section-title">综合分析</div>';
-            html += '<div class="advice-detail-text">' + adviseData.advice_detail + '</div>';
+            html += '<div class="advice-detail-text">' + detailText + '</div>';
             html += '</div>';
         }
 
@@ -4303,15 +4592,24 @@
         var forceCheckbox = document.getElementById('dailyForceRefresh');
         var forceRefresh = forceCheckbox ? forceCheckbox.checked : false;
         if (btn) { btn.disabled = true; btn.textContent = '⏳ 生成中...'; }
-        container.innerHTML = '<div class="report-loading">正在生成每日报告，请稍候...</div>';
+        // 进度条：立即渲染 + 每 2 秒轮询进度接口
+        var pollTimer = setInterval(function() { pollReportProgress(container, pollTimer); }, 2000);
+        renderProgressUI(container, {total: 1, current: 0, stage: '准备中', current_symbol: '', current_name: ''});
 
         var bodyData = forceRefresh ? JSON.stringify({force: true}) : '{}';
         fetch('/api/daily-report/generate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: bodyData })
             .then(function(r) { return safeJson(r); })
             .then(function(data) {
                 if (data.success) {
+                    clearInterval(pollTimer);
                     renderDailyReport(data);
                 } else {
+                    // 防抖拒绝（任务已在后台运行）时保留进度显示
+                    if (data.message && data.message.indexOf('进行中') >= 0) {
+                        container.innerHTML = '<div class="report-loading" style="color:#1a73e8;">⏳ 已有报告正在后台生成，实时进度如下...</div>';
+                        return;
+                    }
+                    clearInterval(pollTimer);
                     container.innerHTML = '<div class="report-empty"><p style="color:#e74c3c;">生成失败：' + (data.message || '未知错误') + '</p></div>';
                 }
             })
@@ -4321,6 +4619,44 @@
             .finally(function() {
                 if (btn) { btn.disabled = false; btn.textContent = '🚀 生成今日报告'; }
             });
+    }
+
+    /** 轮询报告生成进度（进度条 + 当前正在做什么） */
+    function pollReportProgress(container, timer) {
+        fetch('/api/daily-report/progress')
+            .then(function(r) { return safeJson(r); })
+            .then(function(data) {
+                if (!data.success || !data.progress) return;
+                var p = data.progress;
+                if (p.status === 'done' || p.status === 'failed') {
+                    // POST 返回后会渲染最终报告，此处停轮询即可
+                    clearInterval(timer);
+                    return;
+                }
+                renderProgressUI(container, p);
+            })
+            .catch(function() { /* 进度查询失败静默，下一轮重试 */ });
+    }
+
+    /** 渲染进度条 UI（当前第几只 / 百分比 / 当前股票 / 当前阶段） */
+    function renderProgressUI(container, p) {
+        var total = p.total || 1;
+        var current = p.current || 0;
+        var pct = Math.min(100, Math.round(current / total * 100));
+        var stage = p.stage || '处理中';
+        var symbol = (p.current_symbol || '');
+        var name = (p.current_name || '');
+        var symbolText = symbol ? (symbol + (name ? ' ' + name : '')) : '';
+        container.innerHTML =
+            '<div style="background:#fff;border-radius:10px;padding:24px 20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);">' +
+            '<div style="font-size:14px;color:#333;margin-bottom:12px;">📊 正在生成每日报告，请稍候...</div>' +
+            '<div style="background:#e8f4fd;border-radius:8px;height:14px;overflow:hidden;margin-bottom:10px;">' +
+            '<div style="background:linear-gradient(90deg,#1a73e8,#4a9bf5);height:100%;width:' + pct + '%;transition:width .5s ease;"></div></div>' +
+            '<div style="font-size:13px;color:#666;">' + pct + '% &nbsp;·&nbsp; 已完成 ' + current + ' / ' + total + ' 只</div>' +
+            '<div style="font-size:13px;color:#888;margin-top:8px;">' +
+            (symbolText ? '正在处理：<strong style="color:#333;">' + symbolText + '</strong>' : '准备中') +
+            ' &nbsp;·&nbsp; <span style="color:#1a73e8;font-weight:600;">' + stage + '</span></div>' +
+            '</div>';
     }
 
     function generateIntradayReport() {
@@ -4396,6 +4732,9 @@
         html += '<div class="report-actions">';
         html += '<button class="report-back-btn" onclick="generateDailyReport()">🔄 重新生成</button>';
         html += '<span style="color:#888;font-size:13px;">报告日期：' + genResult.report_date + typeBadge + '</span>';
+        if (genResult.finished_at) {
+            html += '<span style="color:#888;font-size:13px;margin-left:15px;">生成时间：' + _fmtGenTime(genResult.finished_at) + '</span>';
+        }
         html += '</div>';
 
         // 汇总卡片标题也标注类型
@@ -4455,10 +4794,19 @@
         var container = document.getElementById('dailyContent');
         var html = '';
 
+        // 019D: 计算本批最大生成时间
+        var batchGenTime = '';
+        reports.forEach(function(r) {
+            if (r.generated_at && r.generated_at > batchGenTime) batchGenTime = r.generated_at;
+        });
+
         html += '<div class="report-actions">';
         html += '<button class="report-back-btn" onclick="generateDailyReport()">🚀 生成今日报告</button>';
         html += '<button class="report-back-btn" onclick="generateIntradayReport()" style="background:#f39c12;color:#fff;margin-left:10px;">📊 盘中快报</button>';
         html += '<span style="color:#888;font-size:13px;margin-left:15px;">最新报告日期：' + reportDate + '</span>';
+        if (batchGenTime) {
+            html += '<span style="color:#888;font-size:13px;margin-left:15px;">本批生成时间：' + _fmtGenTime(batchGenTime) + '</span>';
+        }
         html += '</div>';
 
         html += '<div class="card">';
@@ -4470,13 +4818,14 @@
         html += '<th style="padding:8px;border-bottom:2px solid #ddd;">总分</th>';
         html += '<th style="padding:8px;border-bottom:2px solid #ddd;">评级</th>';
         html += '<th style="padding:8px;border-bottom:2px solid #ddd;">较昨日</th>';
+        html += '<th style="padding:8px;border-bottom:2px solid #ddd;">生成于</th>';
         html += '</tr></thead><tbody>';
 
         reports.forEach(function(r) {
             if (r.status !== 'ok') {
                 html += '<tr style="border-bottom:1px solid #eee;background:#fff5f5;">';
                 html += '<td style="padding:8px;"><strong>' + (r.stock_name || '') + '</strong><br><span style="color:#888;font-size:12px;">' + r.stock_code + '</span></td>';
-                html += '<td colspan="4" style="padding:8px;color:#e74c3c;">❌ 生成失败：' + (r.error_msg || '').substring(0, 50) + '</td>';
+                html += '<td colspan="5" style="padding:8px;color:#e74c3c;">❌ 生成失败：' + (r.error_msg || '').substring(0, 50) + '</td>';
                 html += '</tr>';
                 return;
             }
@@ -4495,6 +4844,7 @@
             html += '<td style="padding:8px;font-size:16px;font-weight:700;color:' + _scoreColor(r.total_score || 0) + ';">' + (r.total_score || 0).toFixed(1) + '</td>';
             html += '<td style="padding:8px;"><span class="rating-badge ' + getRatingClass(r.rating) + '" title="' + getRatingTitle(r.rating) + '">' + (r.rating || '—') + '</span></td>';
             html += '<td style="padding:8px;">' + changeStr + '</td>';
+            html += '<td style="padding:8px;color:#888;font-size:12px;">' + _fmtGenTime(r.generated_at) + '</td>';
             html += '</tr>';
         });
 
@@ -4529,7 +4879,7 @@
                     container.innerHTML = '<div class="report-empty"><p style="color:#e74c3c;">加载失败</p></div>';
                     return;
                 }
-                _dashData = { summary: summary, stocks: scores.stocks || [], reportDate: scores.report_date, indices: (indexData && indexData.success) ? indexData.indices : null, indexUpdatedAt: (indexData && indexData.success) ? indexData.updated_at : null };
+                _dashData = { summary: summary, stocks: scores.stocks || [], reportDate: scores.report_date, reportDateMin: scores.report_date_min, generatedAt: scores.generated_at, indices: (indexData && indexData.success) ? indexData.indices : null, indexUpdatedAt: (indexData && indexData.success) ? indexData.updated_at : null };
                 renderDashboard(_dashData);
             })
             .catch(function(e) {
@@ -4548,7 +4898,14 @@
         html += '<h2 style="margin:0;font-size:20px;">📈 总览看板</h2>';
         html += '<div>';
         if (data.reportDate) {
-            html += '<span style="color:#888;font-size:13px;margin-right:12px;">报告日期：' + data.reportDate + '</span>';
+            var dateLabel = data.reportDate;
+            if (data.reportDateMin && data.reportDateMin !== data.reportDate) {
+                dateLabel = data.reportDateMin + ' ~ ' + data.reportDate;
+            }
+            html += '<span style="color:#888;font-size:13px;margin-right:12px;">报告日期：' + dateLabel + '</span>';
+        }
+        if (data.generatedAt) {
+            html += '<span style="color:#888;font-size:13px;margin-right:12px;">生成时间：' + _fmtGenTime(data.generatedAt) + '</span>';
         }
         html += '<button class="btn btn-primary btn-sm" onclick="loadDashboard()" style="margin-right:8px;">🔄 刷新</button>';
         html += '<button class="btn btn-success btn-sm" onclick="navigateTo(\'#daily\')">📅 每日报告</button>';
@@ -4606,7 +4963,9 @@
         html += '<th style="padding:10px;border-bottom:2px solid #ddd;">引擎</th>';
         html += '<th style="padding:10px;border-bottom:2px solid #ddd;" onclick="dashSort(\'score\')" title="四维加权总分（满分100）：技术面+基本面+资金面+消息面">评分 ↕</th>';
         html += '<th style="padding:10px;border-bottom:2px solid #ddd;">评级</th>';
-        html += '<th style="padding:10px;border-bottom:2px solid #ddd;" onclick="dashSort(\'change\')">较昨日 ↕</th>';
+        html += '<th style="padding:10px;border-bottom:2px solid #ddd;" onclick="dashSort(\'change\')">较上期 ↕</th>';
+        html += '<th style="padding:10px;border-bottom:2px solid #ddd;">生成时间</th>';
+        html += '<th style="padding:10px;border-bottom:2px solid #ddd;">报告日期</th>';
         html += '<th style="padding:10px;border-bottom:2px solid #ddd;">行业</th>';
         html += '<th style="padding:10px;border-bottom:2px solid #ddd;" onclick="dashSort(\'mv\')">市值 ↕</th>';
         html += '<th style="padding:10px;border-bottom:2px solid #ddd;">操作</th>';
@@ -4653,6 +5012,8 @@
             html += '<td style="padding:10px;font-size:16px;font-weight:700;color:' + _scoreColor(st.total_score || 0) + ';">' + scoreStr + '</td>';
             html += '<td style="padding:10px;"><span class="rating-badge ' + getRatingClass(st.rating) + '" title="' + getRatingTitle(st.rating) + '">' + (st.rating || '—') + '</span></td>';
             html += '<td style="padding:10px;">' + changeStr + '</td>';
+            html += '<td style="padding:10px;font-size:12px;color:#666;white-space:nowrap;">' + _fmtGenTime(st.generated_at) + '</td>';
+            html += '<td style="padding:10px;font-size:12px;color:#888;white-space:nowrap;">' + (st.report_date || '<span style="color:#ccc;">暂无</span>') + '</td>';
             html += '<td style="padding:10px;font-size:13px;">' + industryTag + '</td>';
             html += '<td style="padding:10px;">' + mvStr + '</td>';
             html += '<td style="padding:10px;"><button class="btn btn-sm" style="padding:4px 10px;font-size:12px;" onclick="viewReport(' + st.id + ')">📊 详情</button></td>';
@@ -4876,6 +5237,14 @@
         var factors = dimInfo.factors || {};
         var topFactors = _pickTopFactors(key, factors);
 
+        var dimLabelTips = {
+            'kline': '技术面：基于K线、均线、RSI、布林带等价格走势指标的分析',
+            'fundamental': '基本面：基于PE、PB、ROE、营收增长等财务指标的分析',
+            'capital_flow': '资金面：基于主力资金流向、融资余额等资金动向的分析',
+            'news': '消息面：基于新闻舆情、市场情绪等文本数据的分析'
+        };
+        var dimLabelTip = dimLabelTips[key] || '';
+
         var factorsHtml = '';
         if (topFactors.length === 0) {
             factorsHtml = '<span style="color:#bbb;font-size:12px;">暂无关键因子</span>';
@@ -4884,9 +5253,10 @@
                 var isNeg = _isNegativeIndicator(item.value, key);
                 var negClass = isNeg ? ' factor-row-negative' : '';
                 var negValClass = isNeg ? ' factor-val-negative' : '';
+                var titleAttr = item.tooltip ? ' title="' + item.tooltip + '" style="cursor:help;border-bottom:1px dotted #aaa;"' : '';
                 factorsHtml +=
                     '<div class="factor-row' + negClass + '">' +
-                    '<span class="factor-label">' + item.label + '</span>' +
+                    '<span class="factor-label"' + titleAttr + '>' + item.label + '</span>' +
                     '<span class="factor-val' + negValClass + '">' +
                     (isNeg ? '\ud83d\udd34 ' : '') + item.value +
                     '</span></div>';
@@ -4897,7 +5267,7 @@
             '<div class="dim-weight-corner">权重 ' + ((dimInfo.weight || 0) * 100).toFixed(0) + '%</div>' +
             '<div class="dim-top">' +
                 '<span class="dim-score-big" style="color:' + scoreColor + ';">' + score.toFixed(0) + '</span>' +
-                '<span class="dim-name">' + label + '</span>' +
+                '<span class="dim-name"' + (dimLabelTip ? ' title="' + dimLabelTip + '" style="cursor:help;border-bottom:1px dotted #ccc;"' : '') + '>' + label + '</span>' +
             '</div>' +
             '<div class="dim-mid">' +
                 '<span class="dim-status-badge ' + badgeClass + '">' + badgeIcon + ' ' + badgeText + '</span>' +
@@ -4912,12 +5282,13 @@
     function _pickTopFactors(dimKey, factors) {
         var priority = _factorPriority[dimKey] || [];
         var labels = _dimFactorLabels[dimKey] || {};
+        var tooltips = (_dimFactorTooltips[dimKey] || {});
         var result = [];
         for (var i = 0; i < priority.length && result.length < 3; i++) {
             var fk = priority[i];
             var fv = factors[fk];
             if (fv != null && fv !== '' && labels[fk]) {
-                result.push({ label: labels[fk], value: String(fv) });
+                result.push({ label: labels[fk], value: String(fv), tooltip: tooltips[fk] || '' });
             }
         }
         return result;
@@ -4959,7 +5330,8 @@
     /** 各维度关键因子优先级（从高到低，取前3） */
     var _factorPriority = {
         kline: ['ma_trend', 'rsi_status', 'recent_trend', 'volume', 'boll_position'],
-        fundamental: ['pe_ratio', 'roe', 'revenue_growth', 'pb_ratio', 'net_margin', 'debt_ratio'],
+        // 019P：fund_trend 首位（因子卡必显，监理"就一条不够"的可见性落地）
+        fundamental: ['fund_trend', 'pe_ratio', 'roe', 'revenue_growth', 'pb_ratio', 'net_margin', 'debt_ratio'],
         capital_flow: ['main_trend', 'consecutive', 'main_pct', 'super_large', 'main_avg_5d'],
         news: ['avg_sentiment', 'positive_ratio', 'news_count', 'top_news', 'news_activity', 'extreme_warning']
     };
@@ -4973,9 +5345,12 @@
             boll_upper: '布林上轨', boll_lower: '布林下轨', boll_mid: '布林中轨'
         },
         fundamental: {
+            // 019P：fund_trend 标签
+            fund_trend: '基本面趋势',
             pe_ratio: 'PE', pb_ratio: 'PB', roe: 'ROE',
             revenue_growth: '营收增长', net_margin: '净利率',
-            debt_ratio: '负债率', gross_margin: '毛利率'
+            debt_ratio: '负债率', gross_margin: '毛利率',
+            fund_trend_detail: '趋势明细'
         },
         capital_flow: {
             main_trend: '主力趋势', consecutive: '连续流入/流出',
@@ -4986,6 +5361,44 @@
             avg_sentiment: '平均情绪', news_activity: '新闻活跃度',
             positive_ratio: '正面占比', news_count: '新闻数量',
             top_news: '重要新闻', extreme_warning: '极端情绪预警'
+        }
+    };
+
+    /** U4(#4): 各维度关键因子通俗解释（鼠标悬浮提示） */
+    var _dimFactorTooltips = {
+        kline: {
+            ma_trend: '均线趋势：反映近期价格走向。多头排列（短>长）偏强，空头排列偏弱',
+            rsi_status: 'RSI=相对强弱指标，范围0-100。>70偏热（超买），<30偏冷（超卖）',
+            volume: '成交量：反映市场参与活跃度。放量上涨可信度更高',
+            recent_trend: '近期走势：短期内股价的涨跌方向',
+            boll_position: '布林带位置：反映价格在波动通道中的位置。贴近上轨偏强，贴近下轨偏弱'
+        },
+        fundamental: {
+            // 019P：fund_trend tooltip（口径双轨制说明）
+            fund_trend: '基本面趋势：对比最近8期财报（毛利率/净利率/负债率等较上期，ROE按同比），改善/恶化/平稳。仅展示，不影响评分',
+            pe_ratio: 'PE=市盈率，股价÷每股收益。一般越低越便宜，但需结合行业判断（银行/地产天然偏低）',
+            roe: 'ROE=净资产收益率，净利润÷净资产。越高代表公司盈利能力越强，>15%为优秀',
+            revenue_growth: '营收增长率：反映公司成长性。正值代表增长，负值代表萎缩',
+            pb_ratio: 'PB=市净率，股价÷每股净资产。越低可能越被低估，但需排除亏损股',
+            net_margin: '净利率：净利润÷营收。越高代表赚钱效率越好',
+            debt_ratio: '负债率：负债÷总资产。过高（>70%）可能有偿债风险',
+            gross_margin: '毛利率：反映产品竞争力。越高代表定价权越强',
+            fund_trend_detail: '趋势明细：单指标趋势串（ROE同比、毛利率环比等），口径：累计型ROE仅同比、增速看加快/放缓'
+        },
+        capital_flow: {
+            main_trend: '主力资金趋势：反映大资金整体是流入还是流出。净流入偏多，净流出偏空',
+            consecutive: '连续流入/流出天数：连续流入可能预示上涨动力，连续流出需警惕',
+            main_pct: '主力净占比：主力净买入额占总成交的比例。正值表示主力净买入',
+            super_large: '超大单净流入：机构级别大额资金动向。正值表示机构资金在买入',
+            main_avg_5d: '主力5日均：近5个交易日主力资金平均动向，过滤单日波动'
+        },
+        news: {
+            avg_sentiment: '平均情绪：新闻情绪的综合评分。正值偏正面，负值偏负面',
+            news_activity: '新闻活跃度：近期新闻数量和关注度。活跃度高说明市场关注度高',
+            positive_ratio: '正面占比：正面新闻在总数中的比例。越高说明舆论越乐观',
+            news_count: '新闻数量：近期相关新闻报道总数',
+            top_news: '重要新闻：近期最受关注的新闻摘要',
+            extreme_warning: '极端情绪预警：情绪过度乐观或悲观时触发，建议人工复核原文'
         }
     };
 
@@ -5159,6 +5572,16 @@
         return '#e74c3c';                     // 红色 - 较差
     }
 
+    /**
+     * 019D: 分钟级生成时间格式化辅助函数
+     * ISO(2026-08-03T14:23:45.678+08:00) → 2026-08-03 14:23
+     * 空格分隔(2026-08-03 14:23:45) → 2026-08-03 14:23
+     */
+    function _fmtGenTime(s) {
+        if (!s || typeof s !== 'string') return '—';
+        return s.slice(0, 16).replace('T', ' ');
+    }
+
     // ========== M8-BACKTEST-003 回测中心 ==========
 
     function switchBtTab(tab) {
@@ -5177,7 +5600,7 @@
         var el = document.getElementById('btMarketReportContent');
         if (!el) return;
         el.innerHTML = '<div class="report-empty"><p style="color:#888;">加载中...</p></div>';
-        fetch('/api/backtest/market-report?market=' + market + '&include_simulated=true')
+        fetch('/api/backtest/market-report?market=' + market)
             .then(function(r) { return safeJson(r); })
             .then(function(data) {
                 if (!data.success) { el.innerHTML = '<p style="color:red;">加载失败</p>'; return; }
@@ -5190,7 +5613,32 @@
                 var html = '';
                 html += '<div style="background:#fff;border-radius:10px;padding:20px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.1);">';
                 html += '<h3 style="margin:0 0 12px;">' + (market === 'a_stock' ? 'A股' : '港股') + ' 评级有效性报告</h3>';
-                html += '<p style="font-size:13px;color:#888;margin-bottom:16px;">' + rpt.sample_period_note + ' ' + warn + '</p>';
+                html += '<p style="font-size:13px;color:#888;margin-bottom:16px;">' + rpt.sample_period_note + ' <span style="color:#27ae60;">✓ 全部真实样本（已排除模拟回测）</span> ' + warn + '</p>';
+                // 客观解读评语
+                if (rpt.interpretation) {
+                    html += '<div style="background:linear-gradient(135deg,#fff8e1,#fffde7);border-left:4px solid #f9a825;border-radius:6px;padding:12px 16px;margin-bottom:16px;font-size:13px;line-height:1.8;color:#5d4037;">';
+                    html += '<div style="font-weight:700;margin-bottom:4px;">📋 客观解读</div>' + rpt.interpretation + '</div>';
+                }
+                // U3(#10): 一句话总结
+                var btSummaryParts = [];
+                var btAccRound = Math.round((rpt.accuracy || 0) * 100);
+                btSummaryParts.push('系统总体准确率 <strong style="color:' + (btAccRound >= 60 ? '#27ae60' : btAccRound >= 40 ? '#f39c12' : '#e74c3c') + ';">' + btAccRound + '%</strong>');
+                if (rpt.period_accuracy && rpt.period_accuracy['1d'] && rpt.period_accuracy['1d'].accuracy !== null) {
+                    btSummaryParts.push('T+1日准确率 <strong>' + Math.round(rpt.period_accuracy['1d'].accuracy * 100) + '%</strong>');
+                }
+                if (rpt.rating_stats) {
+                    var bestRating = null, bestAcc = -1;
+                    Object.keys(rpt.rating_stats).forEach(function(rating) {
+                        var rs = rpt.rating_stats[rating];
+                        if (rs.total >= 3 && rs.accuracy !== null && rs.accuracy > bestAcc) {
+                            bestAcc = rs.accuracy; bestRating = rating;
+                        }
+                    });
+                    if (bestRating) {
+                        btSummaryParts.push('「<strong>' + bestRating + '</strong>」命中率最高（' + Math.round(bestAcc * 100) + '%）');
+                    }
+                }
+                html += '<div style="background:linear-gradient(135deg,#e8f4fd,#f0f7ff);border-left:4px solid #1a73e8;border-radius:6px;padding:10px 16px;margin-bottom:16px;font-size:14px;color:#333;">💡 ' + btSummaryParts.join('，') + '</div>';
                 // 指标卡
                 html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:20px;">';
                 html += '<div style="text-align:center;padding:12px;background:#f8f9fa;border-radius:8px;"><div style="font-size:24px;font-weight:700;color:#1a73e8;">' + rpt.total + '</div><div style="font-size:12px;color:#666;">总回测数</div></div>';
@@ -5205,7 +5653,7 @@
                 // 周期准确率
                 if (rpt.period_accuracy) {
                     html += '<h4 style="margin:16px 0 8px;">周期准确率</h4>';
-                    html += '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="background:#f0f7ff;"><th style="padding:8px;text-align:left;">周期</th><th style="padding:8px;">判定数</th><th style="padding:8px;">正确</th><th style="padding:8px;" title="评级方向正确的比例（排除中性无法判定的记录）">准确率</th><th style="padding:8px;">平均收益</th></tr></thead><tbody>';
+                    html += '<table class="bt-report-table" style="font-size:13px;"><thead><tr style="background:#f0f7ff;"><th style="padding:8px;text-align:left;">周期</th><th style="padding:8px;text-align:center;">判定数</th><th style="padding:8px;text-align:center;">正确</th><th style="padding:8px;text-align:center;" title="评级方向正确的比例（排除中性无法判定的记录）">准确率</th><th style="padding:8px;text-align:center;">平均收益</th></tr></thead><tbody>';
                     var periodLabels = {'1d': 'T+1日', '1w': 'T+1周', '1m': 'T+1月'};
                     ['1d', '1w', '1m'].forEach(function(p) {
                         var pa = rpt.period_accuracy[p];
@@ -5219,11 +5667,12 @@
                 // 分级准确率
                 if (rpt.rating_stats) {
                     html += '<h4 style="margin:16px 0 8px;">分级准确率</h4>';
-                    html += '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="background:#f0f7ff;"><th style="padding:8px;text-align:left;">评级</th><th style="padding:8px;">总数</th><th style="padding:8px;">正确</th><th style="padding:8px;">错误</th><th style="padding:8px;" title="评级方向正确的比例（排除中性无法判定的记录）">准确率</th><th style="padding:8px;" title="评级发出后第1个交易日的股价涨跌幅">T+1均收益</th><th style="padding:8px;" title="评级发出后第5个交易日的股价涨跌幅">T+1周均收益</th><th style="padding:8px;" title="评级发出后第20个交易日的股价涨跌幅">T+1月均收益</th></tr></thead><tbody>';
+                    html += '<table class="bt-report-table" style="font-size:13px;"><thead><tr style="background:#f0f7ff;"><th style="padding:8px;text-align:left;">评级</th><th style="padding:8px;text-align:center;">总数</th><th style="padding:8px;text-align:center;">正确</th><th style="padding:8px;text-align:center;">错误</th><th style="padding:8px;text-align:center;" title="评级方向正确的比例（排除中性无法判定的记录）">准确率</th><th style="padding:8px;text-align:center;" title="评级有效期内的方向命中率：从评级日持有至下次评级变更的判定">动态准确率</th><th style="padding:8px;text-align:center;" title="评级发出后第1个交易日的股价涨跌幅">T+1均收益</th><th style="padding:8px;text-align:center;" title="评级发出后第5个交易日的股价涨跌幅">T+1周均收益</th><th style="padding:8px;text-align:center;" title="评级发出后第20个交易日的股价涨跌幅">T+1月均收益</th></tr></thead><tbody>';
                     var ratingOrder = ['强烈推荐买入', '推荐买入', '持有观望', '建议减仓', '强烈建议卖出'];
                     Object.keys(rpt.rating_stats).sort(function(a, b) { return ratingOrder.indexOf(a) - ratingOrder.indexOf(b); }).forEach(function(rating) {
                         var rs = rpt.rating_stats[rating];
                         var rsAcc = rs.accuracy !== null ? Math.round(rs.accuracy * 100) + '%' : '—';
+                        var rsDynAcc = rs.dyn_accuracy !== null ? Math.round(rs.dyn_accuracy * 100) + '%' : '—';
                         var rsAvg1d = rs.avg_return_1d !== null ? (rs.avg_return_1d > 0 ? '+' : '') + rs.avg_return_1d + '%' : '—';
                         var rsAvg1w = rs.avg_return_1w !== null ? (rs.avg_return_1w > 0 ? '+' : '') + rs.avg_return_1w + '%' : '—';
                         var rsAvg1m = rs.avg_return_1m !== null ? (rs.avg_return_1m > 0 ? '+' : '') + rs.avg_return_1m + '%' : '—';
@@ -5231,7 +5680,9 @@
                         var ret1dColor = rs.avg_return_1d !== null ? (rs.avg_return_1d > 0 ? '#e74c3c' : rs.avg_return_1d < 0 ? '#27ae60' : '#666') : '#999';
                         var ret1wColor = rs.avg_return_1w !== null ? (rs.avg_return_1w > 0 ? '#e74c3c' : rs.avg_return_1w < 0 ? '#27ae60' : '#666') : '#999';
                         var ret1mColor = rs.avg_return_1m !== null ? (rs.avg_return_1m > 0 ? '#e74c3c' : rs.avg_return_1m < 0 ? '#27ae60' : '#666') : '#999';
-                        html += '<tr style="border-bottom:1px solid #eee;"><td style="padding:8px;"><span class="rating-badge ' + getRatingClass(rating) + '" title="' + getRatingTitle(rating) + '">' + rating + '</span></td><td style="padding:8px;text-align:center;">' + rs.total + '</td><td style="padding:8px;text-align:center;">' + rs.correct + '</td><td style="padding:8px;text-align:center;">' + rs.wrong + '</td><td style="padding:8px;text-align:center;font-weight:700;">' + rsAcc + '</td><td style="padding:8px;text-align:center;color:' + ret1dColor + ';font-weight:600;">' + rsAvg1d + '</td><td style="padding:8px;text-align:center;color:' + ret1wColor + ';font-weight:600;">' + rsAvg1w + '</td><td style="padding:8px;text-align:center;color:' + ret1mColor + ';font-weight:600;">' + rsAvg1m + '</td></tr>';
+                        // 动态准确率着色：≥60% 绿 / 45-60% 橙 / <45% 红
+                        var dynColor = rs.dyn_accuracy !== null ? (rs.dyn_accuracy >= 0.6 ? '#27ae60' : rs.dyn_accuracy >= 0.45 ? '#f39c12' : '#e74c3c') : '#999';
+                        html += '<tr style="border-bottom:1px solid #eee;"><td style="padding:8px;"><span class="rating-badge ' + getRatingClass(rating) + '" title="' + getRatingTitle(rating) + '">' + rating + '</span></td><td style="padding:8px;text-align:center;">' + rs.total + '</td><td style="padding:8px;text-align:center;">' + rs.correct + '</td><td style="padding:8px;text-align:center;">' + rs.wrong + '</td><td style="padding:8px;text-align:center;font-weight:700;">' + rsAcc + '</td><td style="padding:8px;text-align:center;font-weight:700;color:' + dynColor + ';">' + rsDynAcc + '</td><td style="padding:8px;text-align:center;color:' + ret1dColor + ';font-weight:600;">' + rsAvg1d + '</td><td style="padding:8px;text-align:center;color:' + ret1wColor + ';font-weight:600;">' + rsAvg1w + '</td><td style="padding:8px;text-align:center;color:' + ret1mColor + ';font-weight:600;">' + rsAvg1m + '</td></tr>';
                     });
                     html += '</tbody></table>';
                 }
@@ -5277,7 +5728,7 @@
                 html += '</div>';
                 // T+5 vs T+20 对比表
                 html += '<h4 style="margin:16px 0 8px;">T+5 vs T+20 命中率对比</h4>';
-                html += '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="background:#f0f7ff;"><th style="padding:8px;text-align:left;">建议项</th><th style="padding:8px;">T+5 命中率</th><th style="padding:8px;">T+20 命中率</th><th style="padding:8px;">T+5 平均天数</th><th style="padding:8px;">T+20 平均天数</th></tr></thead><tbody>';
+                html += '<table class="bt-report-table" style="font-size:13px;"><thead><tr style="background:#f0f7ff;"><th style="padding:8px;text-align:left;">建议项</th><th style="padding:8px;text-align:center;">T+5 命中率</th><th style="padding:8px;text-align:center;">T+20 命中率</th><th style="padding:8px;text-align:center;">T+5 平均天数</th><th style="padding:8px;text-align:center;">T+20 平均天数</th></tr></thead><tbody>';
                 var items = [
                     {name: '买入区间', t5h: t5.buy_range, t20h: t20.buy_range, t5d: rpt.avg_days.t5.buy_range, t20d: rpt.avg_days.t20.buy_range},
                     {name: '目标价', t5h: t5.target, t20h: t20.target, t5d: rpt.avg_days.t5.target, t20d: rpt.avg_days.t20.target},
@@ -5291,14 +5742,26 @@
                     html += '<tr style="border-bottom:1px solid #eee;"><td style="padding:8px;">' + it.name + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(it.t5h) + '">' + pct(it.t5h) + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(it.t20h) + '">' + pct(it.t20h) + '</td><td style="padding:8px;text-align:center;">' + fmtDays(it.t5d) + '</td><td style="padding:8px;text-align:center;">' + fmtDays(it.t20d) + '</td></tr>';
                 });
                 html += '</tbody></table>';
-                // 分评级统计
+                // 分评级统计（无持仓/有持仓拆分，各组分母一致）
                 if (rpt.rating_stats) {
-                    html += '<h4 style="margin:16px 0 8px;">分评级命中率</h4>';
-                    html += '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="background:#f0f7ff;"><th style="padding:8px;text-align:left;">评级</th><th style="padding:8px;">样本数</th><th style="padding:8px;">买入区间(T20)</th><th style="padding:8px;">目标价(T20)</th><th style="padding:8px;">止损价(T20)</th></tr></thead><tbody>';
                     var ratingOrder = ['强烈推荐买入', '推荐买入', '持有观望', '建议减仓', '强烈建议卖出'];
-                    Object.keys(rpt.rating_stats).sort(function(a, b) { return ratingOrder.indexOf(a) - ratingOrder.indexOf(b); }).forEach(function(rating) {
+                    var ratingKeys = Object.keys(rpt.rating_stats).sort(function(a, b) { return ratingOrder.indexOf(a) - ratingOrder.indexOf(b); });
+                    html += '<p style="font-size:12px;color:#888;margin:12px 0 4px;">已按持仓状态拆分统计，各表内分母一致可横向比较。</p>';
+                    // 表1：无持仓样本（买入区间/目标价/止损价）
+                    html += '<h4 style="margin:16px 0 8px;">分评级命中率 — 无持仓样本 (T+20)</h4>';
+                    html += '<table class="bt-report-table" style="font-size:13px;"><thead><tr style="background:#f0f7ff;"><th style="padding:8px;text-align:left;">评级</th><th style="padding:8px;text-align:center;">样本数</th><th style="padding:8px;text-align:center;">买入区间</th><th style="padding:8px;text-align:center;">目标价</th><th style="padding:8px;text-align:center;">止损价</th></tr></thead><tbody>';
+                    ratingKeys.forEach(function(rating) {
                         var rs = rpt.rating_stats[rating];
-                        html += '<tr style="border-bottom:1px solid #eee;"><td style="padding:8px;"><span class="rating-badge ' + getRatingClass(rating) + '" title="' + getRatingTitle(rating) + '">' + rating + '</span></td><td style="padding:8px;text-align:center;">' + rs.total + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(rs.t20_buy_range) + '">' + pct(rs.t20_buy_range) + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(rs.t20_target) + '">' + pct(rs.t20_target) + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(rs.t20_stop_loss) + '">' + pct(rs.t20_stop_loss) + '</td></tr>';
+                        html += '<tr style="border-bottom:1px solid #eee;"><td style="padding:8px;"><span class="rating-badge ' + getRatingClass(rating) + '" title="' + getRatingTitle(rating) + '">' + rating + '</span></td><td style="padding:8px;text-align:center;">' + (rs.np_total || 0) + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(rs.np_t20_buy_range) + '">' + pct(rs.np_t20_buy_range) + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(rs.np_t20_target) + '">' + pct(rs.np_t20_target) + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(rs.np_t20_stop_loss) + '">' + pct(rs.np_t20_stop_loss) + '</td></tr>';
+                    });
+                    html += '</tbody></table>';
+                    // 表2：有持仓样本（补仓区间/持有区间/止盈价/止损价）
+                    html += '<h4 style="margin:16px 0 8px;">分评级命中率 — 有持仓样本 (T+20)</h4>';
+                    html += '<table class="bt-report-table" style="font-size:13px;"><thead><tr style="background:#f0f7ff;"><th style="padding:8px;text-align:left;">评级</th><th style="padding:8px;text-align:center;">样本数</th><th style="padding:8px;text-align:center;" title="股价回落到网格补仓位的概率（出现过加仓机会）">补仓区间</th><th style="padding:8px;text-align:center;" title="股价保持在止盈价与止损价之间、未触发任何边界（仅持有观望有持有语义）">持有区间</th><th style="padding:8px;text-align:center;">止盈价</th><th style="padding:8px;text-align:center;">止损价</th></tr></thead><tbody>';
+                    ratingKeys.forEach(function(rating) {
+                        var rs = rpt.rating_stats[rating];
+                        var holdVal = (rating === '持有观望') ? pct(rs.hp_t20_hold) : '—';
+                        html += '<tr style="border-bottom:1px solid #eee;"><td style="padding:8px;"><span class="rating-badge ' + getRatingClass(rating) + '" title="' + getRatingTitle(rating) + '">' + rating + '</span></td><td style="padding:8px;text-align:center;">' + (rs.hp_total || 0) + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(rs.hp_t20_add) + '">' + pct(rs.hp_t20_add) + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(rs.hp_t20_hold) + '">' + holdVal + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(rs.hp_t20_take_profit) + '">' + pct(rs.hp_t20_take_profit) + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(rs.hp_t20_stop_loss) + '">' + pct(rs.hp_t20_stop_loss) + '</td></tr>';
                     });
                     html += '</tbody></table>';
                 }
@@ -5686,6 +6149,206 @@
             })
             .catch(function(err) { console.warn('[预警] 全部已读失败', err); });
     }
+
+    // ========== U5(#7): 预警规则管理（对接现有 API，不新增后端路由） ==========
+    var _alertRuleTypeLabels = {
+        'rating_change': '评级变动',
+        'score_below': '评分跌破',
+        'capital_outflow': '资金流出'
+    };
+    var _alertRuleTypeHints = {
+        'rating_change': { label: '阈值', show: false, hint: '评级变动无需设置阈值，评级发生升降级时自动提醒' },
+        'score_below': { label: '跌破阈值（0-100）', show: true, hint: '当综合评分跌破此值时提醒，建议设 40-70' },
+        'capital_outflow': { label: '流出金额（万元）', show: true, hint: '当主力净流出超过此金额时提醒，建议设 500-5000' }
+    };
+    var _alertStocksCache = null;
+
+    function toggleAlertRulesView(e) {
+        if (e) e.stopPropagation();
+        var alertList = document.getElementById('alertList');
+        var rulesList = document.getElementById('alertRulesList');
+        var btn = document.getElementById('alertManageBtn');
+        var title = document.getElementById('alertDropdownTitle');
+        if (rulesList.style.display === 'none') {
+            // 切换到规则管理模式
+            alertList.style.display = 'none';
+            rulesList.style.display = '';
+            btn.textContent = '📬 返回通知';
+            title.textContent = '📋 预警规则管理';
+            loadAlertRules();
+        } else {
+            // 切换回未读通知模式
+            alertList.style.display = '';
+            rulesList.style.display = 'none';
+            btn.textContent = '⚙ 管理规则';
+            title.textContent = '📋 智能预警';
+            fetchUnreadAlerts();
+        }
+    }
+
+    function loadAlertRules() {
+        var list = document.getElementById('alertRulesList');
+        list.innerHTML = '<div class="alert-empty">加载中...</div>';
+        fetch('/api/alerts/rules')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!data.success) {
+                    list.innerHTML = '<div class="alert-empty">加载失败</div>';
+                    return;
+                }
+                var rules = data.rules || [];
+                if (!rules.length) {
+                    list.innerHTML = '<div class="alert-empty">暂无预警规则<br><span style="font-size:12px;">点击下方「添加预警规则」创建</span></div>';
+                    return;
+                }
+                var html = '';
+                rules.forEach(function(r) {
+                    var typeLabel = _alertRuleTypeLabels[r.rule_type] || r.rule_type;
+                    var scopeLabel = r.scope === '全局' ? '🌍 全局' : ('📈 ' + (r.name || r.symbol || '个股'));
+                    var thresholdStr = r.threshold != null ? ' | 阈值: ' + r.threshold : '';
+                    var enabledStr = r.enabled ? '<span style="color:#27ae60;">✅ 启用</span>' : '<span style="color:#999;">⏸️ 停用</span>';
+                    html += '<div style="padding:12px 16px;border-bottom:1px solid #f0f0f0;">';
+                    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">';
+                    html += '<span class="alert-item-type ' + r.rule_type + '">' + typeLabel + '</span>';
+                    html += '<button onclick="deleteAlertRule(' + r.id + ', event)" style="border:none;background:none;color:#e74c3c;cursor:pointer;font-size:12px;padding:2px 6px;">🗑 删除</button>';
+                    html += '</div>';
+                    html += '<div style="font-size:13px;color:#555;">' + scopeLabel + thresholdStr + ' ' + enabledStr + '</div>';
+                    html += '</div>';
+                });
+                list.innerHTML = html;
+            })
+            .catch(function(err) {
+                list.innerHTML = '<div class="alert-empty">加载失败: ' + err + '</div>';
+            });
+    }
+
+    function deleteAlertRule(ruleId, e) {
+        if (e) e.stopPropagation();
+        if (!confirm('确定删除这条预警规则吗？')) return;
+        fetch('/api/alerts/rules/' + ruleId, { method: 'DELETE' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    loadAlertRules();
+                } else {
+                    alert('删除失败：' + (data.message || '未知错误'));
+                }
+            })
+            .catch(function(err) { alert('网络错误：' + err); });
+    }
+
+    function openAlertRuleModal(e) {
+        if (e) e.stopPropagation();
+        var modal = document.getElementById('alertRuleModal');
+        modal.style.display = 'flex';
+        // 重置表单
+        document.getElementById('alertRuleType').value = 'rating_change';
+        document.getElementById('alertRuleScope').value = 'global';
+        document.getElementById('alertThresholdInput').value = '';
+        document.getElementById('alertStockSelectWrap').style.display = 'none';
+        document.getElementById('alertRuleError').style.display = 'none';
+        onAlertRuleTypeChange();
+        // 加载股票列表（缓存）
+        if (!_alertStocksCache) {
+            fetch('/api/stocks')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.success) {
+                        _alertStocksCache = data.stocks || [];
+                        populateAlertStockSelect();
+                    }
+                })
+                .catch(function() {});
+        } else {
+            populateAlertStockSelect();
+        }
+    }
+
+    function populateAlertStockSelect() {
+        var sel = document.getElementById('alertStockSelect');
+        var html = '';
+        _alertStocksCache.forEach(function(s) {
+            html += '<option value="' + s.id + '">' + s.symbol + ' ' + (s.name || '') + ' (' + (s.market === 'a_stock' ? 'A股' : '港股') + ')</option>';
+        });
+        sel.innerHTML = html;
+    }
+
+    function closeAlertRuleModal() {
+        document.getElementById('alertRuleModal').style.display = 'none';
+    }
+
+    function onAlertRuleTypeChange() {
+        var type = document.getElementById('alertRuleType').value;
+        var conf = _alertRuleTypeHints[type] || {};
+        var wrap = document.getElementById('alertThresholdWrap');
+        var label = document.getElementById('alertThresholdLabel');
+        var hint = document.getElementById('alertThresholdHint');
+        if (conf.show) {
+            wrap.style.display = '';
+            label.textContent = conf.label;
+            hint.textContent = conf.hint;
+        } else {
+            wrap.style.display = 'none';
+        }
+    }
+
+    function onAlertScopeChange() {
+        var scope = document.getElementById('alertRuleScope').value;
+        document.getElementById('alertStockSelectWrap').style.display = (scope === 'stock') ? '' : 'none';
+    }
+
+    function submitAlertRule() {
+        var type = document.getElementById('alertRuleType').value;
+        var scope = document.getElementById('alertRuleScope').value;
+        var thresholdInput = document.getElementById('alertThresholdInput').value;
+        var errorDiv = document.getElementById('alertRuleError');
+        errorDiv.style.display = 'none';
+
+        var body = { rule_type: type };
+        if (scope === 'stock') {
+            body.stock_id = parseInt(document.getElementById('alertStockSelect').value);
+        }
+        var conf = _alertRuleTypeHints[type] || {};
+        if (conf.show) {
+            var tv = parseFloat(thresholdInput);
+            if (isNaN(tv)) {
+                errorDiv.textContent = '请输入有效的阈值';
+                errorDiv.style.display = '';
+                return;
+            }
+            body.threshold = tv;
+        }
+
+        fetch('/api/alerts/rules', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    closeAlertRuleModal();
+                    // 确保在规则管理模式下
+                    if (document.getElementById('alertRulesList').style.display === 'none') {
+                        toggleAlertRulesView();
+                    } else {
+                        loadAlertRules();
+                    }
+                } else {
+                    errorDiv.textContent = data.message || '创建失败';
+                    errorDiv.style.display = '';
+                }
+            })
+            .catch(function(err) {
+                errorDiv.textContent = '网络错误：' + err;
+                errorDiv.style.display = '';
+            });
+    }
+
+    // 点击弹窗背景关闭
+    document.getElementById('alertRuleModal').addEventListener('click', function(e) {
+        if (e.target === this) closeAlertRuleModal();
+    });
 
     function formatAlertTime(ts) {
         if (!ts) return '';

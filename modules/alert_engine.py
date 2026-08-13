@@ -197,10 +197,12 @@ def check_capital_outflow(cursor, stock_id, n_days=3):
         return None
 
     # 查询最近 N*2 个交易日（考虑缺失，多取）
+    # 019H：过滤估算行（is_estimated=1），确保预警判定仅使用真实资金流数据
     cursor.execute(
         """SELECT trade_date, main_net_inflow
            FROM raw_capital_flow
            WHERE stock_id=?
+           AND (is_estimated = 0 OR is_estimated IS NULL)
            ORDER BY trade_date DESC
            LIMIT ?""",
         (stock_id, n_days * 2),

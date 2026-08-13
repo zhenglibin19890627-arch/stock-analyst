@@ -19,7 +19,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from database.db_manager import _ensure_price_backtest_columns, get_connection
+from database.db_manager import _ensure_price_backtest_columns, backup_database, get_connection
 
 from modules.data_adapter import _calc_bollinger, _calc_ma
 
@@ -222,11 +222,12 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr):
     }
 
 
-def _gen_with_position(close, cost_price, rating, ma60=None, boll_upper=None):
-    """有持仓：止盈价 / 止损价（009 动态止盈版）
+def _gen_with_position(close, cost_price, rating, ma60=None, boll_upper=None, atr=None):
+    """有持仓：止盈价 / 止损价 / 补仓价位（009 动态止盈版）
 
     与 price_advisor._gen_with_position 逻辑一致（L749-764），修改时需双向同步。
     动态止盈公式：take_profit = max(min_tp, min(fixed_tp, resistance))
+    补仓价位与 price_advisor._build_grid 有持仓补仓位一致（S4 已破止损时不设）。
     """
     target_gain = RATING_TARGET_GAIN.get(rating, 0.12)
     min_target_gain = MIN_TARGET_GAIN.get(rating, 0.04)
@@ -244,6 +245,14 @@ def _gen_with_position(close, cost_price, rating, ma60=None, boll_upper=None):
     if stop_loss < min_stop:
         stop_loss = min_stop
 
+    # ---- 补仓价位（网格补仓位，与 price_advisor._build_grid 同公式）----
+    add_price = None
+    if close > stop_loss:  # S4 已破止损时不设补仓位
+        if atr and atr > 0:
+            add_price = max(stop_loss + atr * 0.5, close - atr * 1.0)
+        else:
+            add_price = close * 0.97
+
     return {
         'available': True,
         'has_position': True,
@@ -253,6 +262,7 @@ def _gen_with_position(close, cost_price, rating, ma60=None, boll_upper=None):
         'target_price': None,
         'stop_loss': round(stop_loss, 2),
         'take_profit': round(take_profit, 2),
+        'add_price': round(add_price, 2) if add_price is not None else None,
     }
 
 
@@ -279,7 +289,7 @@ def _gen_price_advice_at_date(indicators, rating, cost_price):
 
     # 有持仓模式（传递 ma60/boll_upper 用于动态止盈计算）
     if cost_price and cost_price > 0:
-        return _gen_with_position(close, cost_price, rating, ma60, boll_upper)
+        return _gen_with_position(close, cost_price, rating, ma60, boll_upper, indicators['atr'])
 
     # 无持仓模式
     return _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr)
@@ -312,6 +322,8 @@ def _check_hit(kline_slice, advice, period_label):
         f'{period_label}_hit_target': None,
         f'{period_label}_hit_stop_loss': None,
         f'{period_label}_hit_take_profit': None,
+        f'{period_label}_hit_add': None,
+        f'{period_label}_hit_hold': None,
         f'{period_label}_days_to_buy_range': None,
         f'{period_label}_days_to_target': None,
         f'{period_label}_days_to_stop_loss': None,
@@ -335,6 +347,19 @@ def _check_hit(kline_slice, advice, period_label):
     target_price = advice.get('target_price')
     stop_loss = advice.get('stop_loss')
     take_profit = advice.get('take_profit')
+
+    # 补仓区间（有持仓网格补仓位）：优先 advice['add_price']，兼容 grid 中 type='add' 档位
+    add_price = None
+    add_raw = advice.get('add_price')
+    if add_raw is not None:
+        add_price = float(add_raw)
+    else:
+        grid = advice.get('grid')
+        if isinstance(grid, list):
+            for g in grid:
+                if g.get('type') == 'add' and g.get('price'):
+                    add_price = float(g['price'])
+                    break
 
     for day_idx, row in enumerate(kline_slice):
         day_high = float(row['high'] or 0)
@@ -368,6 +393,12 @@ def _check_hit(kline_slice, advice, period_label):
                     result[f'{period_label}_hit_take_profit'] = 1
                     result[f'{period_label}_days_to_take_profit'] = day_idx + 1
 
+        # 补仓区间命中: low <= add_price（有持仓补仓位，出现过加仓机会）
+        if add_price is not None:
+            if day_low <= add_price:
+                if result[f'{period_label}_hit_add'] is None:
+                    result[f'{period_label}_hit_add'] = 1
+
     # 未命中的设为0（buy_range/target/stop_loss）
     for key in [
         f'{period_label}_hit_buy_range',
@@ -382,6 +413,23 @@ def _check_hit(kline_slice, advice, period_label):
     tp_key = f'{period_label}_hit_take_profit'
     if take_profit is not None and result[tp_key] is None:
         result[tp_key] = 0
+
+    # 补仓区间特殊处理：仅当有补仓价位时未命中设0，否则保持 None
+    add_key = f'{period_label}_hit_add'
+    if add_price is not None and result[add_key] is None:
+        result[add_key] = 0
+
+    # 持有区间命中（有持仓且止损/止盈价齐全时）：
+    # 股价在 [stop_loss, take_profit] 内保持（未触发止盈也未触发止损），
+    # 即"持有观望"建议有效期内未被打破；仅对中性持有语义有意义。
+    hold_key = f'{period_label}_hit_hold'
+    if stop_loss is not None and take_profit is not None:
+        hit_sl = result[f'{period_label}_hit_stop_loss']
+        hit_tp = result[tp_key]
+        if hit_sl == 0 and hit_tp == 0:
+            result[hold_key] = 1
+        else:
+            result[hold_key] = 0
 
     return result
 
@@ -576,8 +624,9 @@ def run_price_backtest(market=None, force=False):
     conn = get_connection()
     cursor = conn.cursor()
 
-    # force=True 时清除旧记录
+    # force=True 时清除旧记录（全表清空，破坏性操作 → 先备份）
     if force:
+        backup_database('clear_price_backtest_results')
         cursor.execute('DELETE FROM price_backtest_results')
         cleared = cursor.rowcount if cursor.rowcount else 0
         conn.commit()
@@ -722,13 +771,15 @@ def run_price_backtest(market=None, force=False):
                      buy_range_low, buy_range_high, target_price, stop_loss, take_profit, position_pct,
                      close_at_backtest, ma20, ma60, boll_upper, boll_lower, atr,
                      t5_hit_buy_range, t5_hit_target, t5_hit_stop_loss, t5_hit_take_profit,
+                     t5_hit_add, t5_hit_hold,
                      t5_days_to_buy_range, t5_days_to_target, t5_days_to_stop_loss, t5_days_to_take_profit,
                      t5_max_high, t5_min_low,
                      t20_hit_buy_range, t20_hit_target, t20_hit_stop_loss, t20_hit_take_profit,
+                     t20_hit_add, t20_hit_hold,
                      t20_days_to_buy_range, t20_days_to_target, t20_days_to_stop_loss, t20_days_to_take_profit,
                      t20_max_high, t20_min_low,
                      rating_confidence, anchor_rating_date, anchor_rating, bias_risk, days_since_rating)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                     (
                         stock_id,
@@ -752,6 +803,8 @@ def run_price_backtest(market=None, force=False):
                         t5_result['t5_hit_target'],
                         t5_result['t5_hit_stop_loss'],
                         t5_result['t5_hit_take_profit'],
+                        t5_result['t5_hit_add'],
+                        t5_result['t5_hit_hold'],
                         t5_result['t5_days_to_buy_range'],
                         t5_result['t5_days_to_target'],
                         t5_result['t5_days_to_stop_loss'],
@@ -762,6 +815,8 @@ def run_price_backtest(market=None, force=False):
                         t20_result['t20_hit_target'],
                         t20_result['t20_hit_stop_loss'],
                         t20_result['t20_hit_take_profit'],
+                        t20_result['t20_hit_add'],
+                        t20_result['t20_hit_hold'],
                         t20_result['t20_days_to_buy_range'],
                         t20_result['t20_days_to_target'],
                         t20_result['t20_days_to_stop_loss'],
@@ -809,6 +864,9 @@ def compute_price_backtest_report(market='a_stock'):
     Returns:
         dict: 完整报告（命中率/时间效率/偏差分析/分组统计/综合评估）
     """
+    # 确保新增列存在（补仓区间/持有区间等，幂等；旧库首次读取前补齐）
+    _ensure_price_backtest_columns()
+
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -923,7 +981,7 @@ def compute_price_backtest_report(market='a_stock'):
         'buy_range_avg_width': buy_avg_width,
     }
 
-    # ---- 分评级统计 ----
+    # ---- 分评级统计（无持仓/有持仓拆分：各组分母一致，可横向比较）----
     rating_order = ['强烈推荐买入', '推荐买入', '持有观望', '建议减仓', '强烈建议卖出']
     rating_stats = {}
     for rating in rating_order:
@@ -931,8 +989,12 @@ def compute_price_backtest_report(market='a_stock'):
         if not r_rows:
             continue
 
-        def _rhr(field):
-            valid = [r for r in r_rows if r.get(field) is not None]
+        # 无持仓样本有 买入区间/目标价/止损价；有持仓样本有 止盈价/止损价
+        np_rows = [r for r in r_rows if not r.get('has_position')]
+        hp_rows = [r for r in r_rows if r.get('has_position')]
+
+        def _rhr(field, sub):
+            valid = [r for r in sub if r.get(field) is not None]
             if not valid:
                 return None
             hits = sum(1 for r in valid if r[field] == 1)
@@ -940,12 +1002,17 @@ def compute_price_backtest_report(market='a_stock'):
 
         rating_stats[rating] = {
             'total': len(r_rows),
-            't5_buy_range': _rhr('t5_hit_buy_range'),
-            't5_target': _rhr('t5_hit_target'),
-            't5_stop_loss': _rhr('t5_hit_stop_loss'),
-            't20_buy_range': _rhr('t20_hit_buy_range'),
-            't20_target': _rhr('t20_hit_target'),
-            't20_stop_loss': _rhr('t20_hit_stop_loss'),
+            # 无持仓样本（分母=np_total）：买入区间/目标价/止损价
+            'np_total': len(np_rows),
+            'np_t20_buy_range': _rhr('t20_hit_buy_range', np_rows),
+            'np_t20_target': _rhr('t20_hit_target', np_rows),
+            'np_t20_stop_loss': _rhr('t20_hit_stop_loss', np_rows),
+            # 有持仓样本（分母=hp_total）：补仓区间/持有区间/止盈价/止损价
+            'hp_total': len(hp_rows),
+            'hp_t20_add': _rhr('t20_hit_add', hp_rows),
+            'hp_t20_hold': _rhr('t20_hit_hold', hp_rows),
+            'hp_t20_take_profit': _rhr('t20_hit_take_profit', hp_rows),
+            'hp_t20_stop_loss': _rhr('t20_hit_stop_loss', hp_rows),
         }
 
     # ---- 综合评估 ----

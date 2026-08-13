@@ -204,8 +204,7 @@ CAPITAL_SUBITEMS: list[SubItem] = [
         'main_capital',
         ['main_net_inflow'],
         0.55,
-        'keep_default',
-        default_fills={'main_net_inflow': NEUTRAL_INFLOW},
+        'zero',  # 019T T2: C类(keep_default 填充) → A类(归零)；缺失=无信息，不占权重
     ),
     SubItem('互联互通', 'north_capital', ['north_net_buy'], 0.10, 'reduce'),
     SubItem('杠杆资金', 'margin_capital', ['margin_balance_chg'], 0.35, 'reduce'),
@@ -764,10 +763,15 @@ def score_holder(data: StockData) -> tuple[float, dict]:
 
 
 def score_main_capital(data: StockData) -> tuple[float, dict]:
-    """主力资金子项评分：主力净流入（缺失时用中性0.0填充，D02）"""
+    """主力资金子项评分：主力净流入（缺失时返回中性 50，不填充 0.0 进档位）
+
+    019T T2（遗留项⑨修复）：缺失 → 不再 D02 填充 0.0（会落入 inflow>=0 档得 85 分，
+    形成"数据越缺、分越高"的偏多偏差）；缺失分支改为返回 50.0 中性分 + note，
+    展示诚实化。实测值路径与修复前逐位一致。
+    """
     inflow = data.main_net_inflow
     if inflow is None:
-        inflow = NEUTRAL_INFLOW  # D02: 中性值0.0万元
+        return 50.0, {'note': '主力资金数据缺失，返回中性分（不填充、不占权重）'}
 
     detail = {'main_net_inflow': f'{inflow:.2f}万元'}
     # 正流入得分高，负流入得分低
@@ -789,10 +793,14 @@ def score_main_capital(data: StockData) -> tuple[float, dict]:
 
 
 def score_north_capital(data: StockData) -> tuple[float, dict]:
-    """互联互通子项评分：北向/港股通净买入"""
+    """互联互通子项评分：北向/港股通净买入（缺失返回中性 50）
+
+    019T T2（开放项 A 同批修复）：缺失分支 70 → 50（去除中性偏暖残存）；
+    degradation 仍为 B 类 reduce，实测档位不变。
+    """
     north = data.north_net_buy
     if north is None:
-        return 70.0, {'note': '互联互通数据缺失，返回中性偏暖分(B18-Hotfix-R4/O2-A+ 65→70)'}
+        return 50.0, {'note': '互联互通数据缺失，返回中性分'}
 
     detail = {'north_net_buy': f'{north:.2f}万元'}
     if north >= 3000:
@@ -810,10 +818,14 @@ def score_north_capital(data: StockData) -> tuple[float, dict]:
 
 
 def score_margin_capital(data: StockData) -> tuple[float, dict]:
-    """杠杆资金子项评分：融资余额变化"""
+    """杠杆资金子项评分：融资余额变化（缺失返回中性 50）
+
+    019T T2（开放项 A 同批修复）：缺失分支 68 → 50（去除中性偏暖残存）；
+    degradation 仍为 B 类 reduce，实测档位不变。
+    """
     margin = data.margin_balance_chg
     if margin is None:
-        return 68.0, {'note': '杠杆资金数据缺失，返回中性偏暖分(B18-Hotfix-R3/O2-A+ 63→68)'}
+        return 50.0, {'note': '杠杆资金数据缺失，返回中性分'}
 
     detail = {'margin_balance_chg': f'{margin:.2f}万元'}
     if margin >= 2000:
@@ -989,7 +1001,7 @@ def _normalize_dim_weights(
 
 
 def _map_rating(total_score: float) -> tuple[str, str]:
-    """总分 → 评级档位（中文5档，85/70/50/30 边界）
+    """总分 → 评级档位（中文5档，80/65/50/30 边界）
 
     RATING-ALIGN-004：返回中文5档，key 与 label 统一。
     """

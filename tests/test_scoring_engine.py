@@ -470,31 +470,45 @@ class TestCapitalScoring:
     """资金面 3 子项评分"""
 
     # --- score_main_capital 主力资金 ---
-    def test_main_capital_missing_uses_neutral(self):
-        # 缺失填充 0.0 -> >=0 小幅净流入 85
+    # 019T T2：缺失分支不再 D02 填充 0.0 进档位（原 85 分偏多偏差），返回中性 50
+    def test_main_capital_missing_returns_neutral(self):
         score, detail = score_main_capital(_sd())
-        assert score == 85.0
-        assert NEUTRAL_INFLOW == 0.0
+        assert score == 50.0
+        assert '缺失' in detail.get('note', '')
+        assert NEUTRAL_INFLOW == 0.0  # D02 常量保留（历史决策记录，不再用于填充）
 
     @pytest.mark.parametrize(
         'inflow,expected',
         [
             (5000, 95.0),  # 大幅净流入
             (1000, 87.0),  # 温和净流入
-            (0, 85.0),  # 小幅净流入
+            (0, 85.0),  # 实测 0（非缺失）必须仍 85 —— 019T 回归断言
             (-1000, 60.0),  # 小幅净流出
             (-5000, 42.0),  # 温和净流出
             (-5001, 20.0),  # 大幅净流出
         ],
     )
     def test_main_capital_levels(self, inflow, expected):
+        # 实测值路径与修复前逐位一致（T2 零回归）
         score, _ = score_main_capital(_sd(main_net_inflow=inflow))
         assert score == expected
 
+    def test_main_capital_four_branches(self):
+        """019T T2 四类分支：缺失 / 实测0 / 实测正 / 实测负"""
+        missing, _ = score_main_capital(_sd())
+        zero, _ = score_main_capital(_sd(main_net_inflow=0.0))
+        positive, _ = score_main_capital(_sd(main_net_inflow=5000.0))
+        negative, _ = score_main_capital(_sd(main_net_inflow=-5000.0))
+        assert missing == 50.0
+        assert zero == 85.0
+        assert positive == 95.0
+        assert negative == 42.0
+
     # --- score_north_capital 互联互通 ---
-    def test_north_capital_missing_returns_warm_neutral(self):
+    # 019T T2（开放项 A）：缺失 70 → 50，实测档位不变
+    def test_north_capital_missing_returns_neutral(self):
         score, _ = score_north_capital(_sd())
-        assert score == 70.0
+        assert score == 50.0
 
     @pytest.mark.parametrize(
         'north,expected',
@@ -512,9 +526,10 @@ class TestCapitalScoring:
         assert score == expected
 
     # --- score_margin_capital 杠杆资金 ---
-    def test_margin_capital_missing_returns_warm_neutral(self):
+    # 019T T2（开放项 A）：缺失 68 → 50，实测档位不变
+    def test_margin_capital_missing_returns_neutral(self):
         score, _ = score_margin_capital(_sd())
-        assert score == 68.0
+        assert score == 50.0
 
     @pytest.mark.parametrize(
         'margin,expected',
@@ -530,6 +545,16 @@ class TestCapitalScoring:
     def test_margin_capital_levels(self, margin, expected):
         score, _ = score_margin_capital(_sd(margin_balance_chg=margin))
         assert score == expected
+
+    # --- 019T T2 配置回归：degradation 类型 ---
+    def test_capital_subitems_degradation_019T(self):
+        """019T T2：main_capital 已改 A 类归零（无 default_fills）；north/margin 保持 B 类"""
+        by_key = {si.key: si for si in CAPITAL_SUBITEMS}
+        main_si = by_key['main_capital']
+        assert main_si.degradation == 'zero'
+        assert main_si.default_fills == {}
+        assert by_key['north_capital'].degradation == 'reduce'
+        assert by_key['margin_capital'].degradation == 'reduce'
 
 
 # ============================================================

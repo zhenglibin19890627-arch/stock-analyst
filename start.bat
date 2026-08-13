@@ -49,7 +49,8 @@ echo.
 echo [2/5] 检查关键依赖...
 
 set "DEPS_MISSING=0"
-for %%D in (flask pydantic requests) do (
+REM 016: deps check aligned with requirements.txt (9 pkgs, dateutil=python-dateutil)
+for %%D in (flask pydantic requests akshare pandas numpy dateutil openpyxl pytest) do (
     "%PYTHON_EXE%" -c "import %%D" >nul 2>&1
     if errorlevel 1 (
         echo   X 缺失依赖: %%D
@@ -62,7 +63,7 @@ for %%D in (flask pydantic requests) do (
 if "%DEPS_MISSING%"=="1" (
     echo.
     echo   正在自动安装缺失依赖...
-    "%PYTHON_EXE%" -m pip install flask pydantic requests akshare pandas numpy python-dateutil -q
+    "%PYTHON_EXE%" -m pip install -r requirements.txt -q
     if %errorlevel% neq 0 (
         echo   X 依赖安装失败，请手动执行: pip install -r requirements.txt
         echo   X 启动失败，错误码: 2

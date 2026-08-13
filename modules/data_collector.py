@@ -14,7 +14,9 @@
 3. 数据缺失时记录原因，供报告生成时提示用户
 """
 
+import json
 import logging
+import math
 import os
 import sys
 import time
@@ -152,6 +154,7 @@ import akshare as ak
 # 添加项目根目录到路径，确保能导入 config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
+    EM_USE_PROXY,
     FUNDAMENTAL_REPORT_TTL_DAYS,
     KLINE_DAYS,
     MAX_RETRIES,
@@ -182,17 +185,30 @@ def _http_get(url, params=None, headers=None, timeout=15):
     return resp
 
 
+# ============================================================
+# 019X T1：东方财富失败重试退避参数（仅 _http_get_em 内部使用）
+# 019W 诊断：WAF 窗口式丢弃持续 2~4 分钟，原 1.5~3.5s 短间隔重试全撞窗口内；
+# 改为 30s→60s→60s 轮间退避（各加 ±15% 随机抖动），轮数提至 4。
+# 注意：不得修改全局 MAX_RETRIES=3（同时服务新浪/腾讯源的 @retry 装饰器）。
+# ============================================================
+_EM_RETRY_BACKOFFS = (30.0, 60.0, 60.0)  # 轮间等待序列（秒），attempt 0/1/2 → 30/60/60
+_EM_RETRY_JITTER = 0.15                   # 每轮等待 ±15% 随机抖动
+_EM_RETRY_ROUNDS = 4                      # 本函数轮数（仅内部，不影响其他数据源）
+
+
 def _http_get_em(url, params=None, timeout=15, max_retries=None):
     """
     东方财富专用请求：智能回退 + 多轮重试 + UA池 + 随机延迟。
-    策略：有系统代理时优先走代理（EM直连通常被拒），无代理时走直连。
-    每轮2次尝试，共max_retries轮（默认MAX_RETRIES）。
+    019X T3：由 EM_USE_PROXY 开关控制代理路径——默认 False 只走直连，
+    代理分支与 _proxy_health 健康检查保留代码、开关跳过（留回滚能力）。
+    019X T1：轮间失败退避 30s→60s→60s（各 ±15% 抖动），轮数 4（仅本函数）。
+    每轮1~2次尝试（代理开启时 proxy+direct），共_EM_RETRY_ROUNDS轮。
     """
     system_proxies = _urlreq.getproxies()
     last_error = None
-    # 代理健康检查：被禁用的代理跳过
-    proxy_available = bool(system_proxies) and _proxy_health.is_available()
-    rounds = max_retries if max_retries else MAX_RETRIES
+    # 代理健康检查：仅当开关开启且存在系统代理时才检查（EM_USE_PROXY=False 时零触碰）
+    proxy_available = bool(EM_USE_PROXY) and bool(system_proxies) and _proxy_health.is_available()
+    rounds = max_retries if max_retries else _EM_RETRY_ROUNDS
     # connect_timeout=5, read_timeout=10
     timeout_tuple = (5, 10) if timeout == 15 else timeout
 
@@ -215,7 +231,7 @@ def _http_get_em(url, params=None, timeout=15, max_retries=None):
                     {
                         'User-Agent': _random_ua(),
                         'Accept': 'application/json, text/plain, */*',
-                        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                        'Accept-Language': 'zh-CN,zh;q=0.8',
                     }
                 )
                 if use_proxy:
@@ -241,11 +257,19 @@ def _http_get_em(url, params=None, timeout=15, max_retries=None):
                 logger.info(f'东方财富{label}失败: ' + str(e)[:80])
 
         if attempt < rounds - 1:
-            wait = _random.uniform(1.5, 3.5)
+            # 019X T1：轮间退避 30s→60s→60s（各 ±15% 抖动），总窗口约 2~3 分钟
+            base_wait = (
+                _EM_RETRY_BACKOFFS[attempt]
+                if attempt < len(_EM_RETRY_BACKOFFS)
+                else _EM_RETRY_BACKOFFS[-1]
+            )
+            wait = base_wait * _random.uniform(1 - _EM_RETRY_JITTER, 1 + _EM_RETRY_JITTER)
             logger.info(f'东方财富第{attempt + 1}轮失败，等待{wait:.1f}秒后重试...')
             time.sleep(wait)
 
-    raise ConnectionError(f'东方财富接口无法访问（直连和代理均失败，重试{rounds}轮）: {last_error}')
+    if proxy_available:
+        raise ConnectionError(f'东方财富接口无法访问（直连和代理均失败，重试{rounds}轮）: {last_error}')
+    raise ConnectionError(f'东方财富接口无法访问（直连重试{rounds}轮均失败，EM_USE_PROXY=False 未走代理）: {last_error}')
 
 
 def retry(func, max_retries=MAX_RETRIES, delay=1):
@@ -400,6 +424,270 @@ def _fetch_valuation_tencent(symbol, market):
 
 
 # ============================================================
+# 019Y T1：mootdx 行情适配层
+# （K线/实时行情降级备用源 + 五档盘口增量数据维度）
+#
+# 大白话说明：
+# - mootdx 走通达信 TCP socket 协议，不经过 requests/httpx，
+#   因此不受本项目 requests.Session.request 全局 patch 影响（天然隔离）。
+# - mootdx 仅支持 A股（沪市 6 开头、深市 0/3 开头，不带 sh/sz 前缀）。
+#   港股 K线/盘口仍走现有源（腾讯/akshare），估值港股仍走 akshare。
+# - 首次初始化会挑选最快的行情服务器（约 5 秒），之后全局复用（单例缓存）。
+# ============================================================
+import threading as _threading_019y
+
+_MOOTDX_CLIENT = None  # 全局单例客户端（首次初始化约 0.5 秒，之后复用）
+_MOOTDX_INIT_DONE = False  # 首次初始化是否已尝试过（成功或失败后不再重复扫描服务器）
+_MOOTDX_LOCK = _threading_019y.Lock()
+
+# 019Y M-2：备用服务器池（2026-08-11 实测可用，返回完整行情/K线）。
+# 通达信服务器存在区域性故障（部分服务器 TCP 连接成功但返回空数据），
+# 因此先逐个健康检查备用池，全部失败才走 bestip 全网扫描（约 70 秒）。
+_MOOTDX_FALLBACK_SERVERS = [
+    ('115.238.56.198', 7709),  # 浙江电信（实测可用）
+    ('115.238.90.165', 7709),  # 浙江电信（实测可用）
+    ('218.75.126.9', 7709),    # 浙江电信（实测可用）
+    ('180.153.18.170', 7709),  # 上海电信（实测可用）
+]
+
+
+def _mootdx_verify(client):
+    """019Y：mootdx 客户端健康检查——发一次实时行情请求，判断服务器是否真的返回数据。
+    有些服务器 TCP 连接成功但返回空数据（实测 110.41.147.114 / 218.6.170.47），必须实测验证。
+    """
+    try:
+        df = client.quotes(symbol='000001')
+        return df is not None and len(df) > 0
+    except Exception:
+        return False
+
+
+def _mootdx_client():
+    """获取 mootdx 全局单例客户端（线程安全）。
+    初始化顺序（019Y M-2）：
+    1) 备用服务器池逐个健康检查（快，实测约 0.1 秒/个）；
+    2) 全部失败才走 bestip 全网扫描（慢，约 70 秒，且可能选中故障服务器）；
+    首次初始化后全局复用（单例缓存），避免每只股票都重新初始化。
+    """
+    global _MOOTDX_CLIENT, _MOOTDX_INIT_DONE
+    if _MOOTDX_CLIENT is not None:
+        return _MOOTDX_CLIENT
+    if _MOOTDX_INIT_DONE:
+        return None  # 首次初始化已失败（全部服务器不可用），不再重复扫描
+    with _MOOTDX_LOCK:
+        if _MOOTDX_CLIENT is not None or _MOOTDX_INIT_DONE:
+            return _MOOTDX_CLIENT
+        from mootdx.quotes import Quotes
+        try:
+            # 1) 备用服务器池（已知可用，优先）
+            for host, port in _MOOTDX_FALLBACK_SERVERS:
+                try:
+                    logger.info(f'[mootdx] 尝试备用服务器 {host}:{port}（健康检查中）...')
+                    client = Quotes.factory(market='std', server=(host, port), timeout=10, heartbeat=True)
+                    if _mootdx_verify(client):
+                        _MOOTDX_CLIENT = client
+                        logger.info(f'[mootdx] 备用服务器 {host}:{port} 健康检查通过，全局单例缓存')
+                        return client
+                    logger.warning(f'[mootdx] 备用服务器 {host}:{port} 返回空数据，换下一台')
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.warning(f'[mootdx] 备用服务器 {host}:{port} 连接失败: {e}')
+            # 2) bestip 全网扫描（兜底，首次约 70 秒）
+            logger.info('[mootdx] 备用服务器池全部不可用，走 bestip 全网扫描（约需 1 分钟）...')
+            client = Quotes.factory(market='std', bestip=True, timeout=15, heartbeat=True)
+            if _mootdx_verify(client):
+                _MOOTDX_CLIENT = client
+                logger.info('[mootdx] bestip 服务器健康检查通过，全局单例缓存')
+                return client
+            logger.warning('[mootdx] bestip 选中的服务器返回空数据（服务器区域性故障）')
+            try:
+                client.close()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f'[mootdx] 客户端初始化异常: {e}')
+        _MOOTDX_INIT_DONE = True
+        logger.error('[mootdx] 全部服务器均不可用，本次运行不再重试（K线/盘口降级将标记失败）')
+        return None
+
+
+def _mootdx_symbol(symbol, market):
+    """A股代码 → mootdx 代码（不带前缀）。港股/非A股返回 None（mootdx 支持有限）。"""
+    if market != 'a_stock':
+        return None
+    if symbol.startswith(('6', '0', '3')):
+        return symbol
+    return None
+
+
+def _fetch_kline_mootdx(symbol):
+    """019Y T1：mootdx 日K线（frequency=9 表示日线）。
+    返回与腾讯接口同格式的 DataFrame（日期/开盘/收盘/最高/最低/成交量/成交额/涨跌幅），
+    供 fetch_kline 统一入库。失败抛异常由调用方处理。
+    """
+    client = _mootdx_client()
+    if client is None:
+        raise ValueError('mootdx 客户端不可用（初始化失败）')
+    bars = client.bars(symbol=symbol, frequency=9, offset=KLINE_DAYS)
+    if bars is None or len(bars) == 0:
+        raise ValueError('mootdx K线返回空数据')
+    rows = []
+    for _, r in bars.iterrows():
+        dt = str(r.get('datetime', ''))
+        try:
+            rows.append(
+                {
+                    '日期': dt.split(' ')[0] if ' ' in dt else dt[:10],
+                    '开盘': float(r.get('open', 0) or 0),
+                    '收盘': float(r.get('close', 0) or 0),
+                    '最高': float(r.get('high', 0) or 0),
+                    '最低': float(r.get('low', 0) or 0),
+                    '成交量': float(r.get('vol', 0) or 0),
+                    '成交额': float(r.get('amount', 0) or 0),
+                }
+            )
+        except (ValueError, TypeError):
+            continue
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out['涨跌幅'] = out['收盘'].pct_change() * 100
+        out['涨跌幅'] = out['涨跌幅'].fillna(0)
+    return out
+
+
+def _fetch_realtime_quote_mootdx(symbol):
+    """019Y T1：mootdx 实时行情（含五档买卖盘）。
+    返回 dict：{'price','pct_change','bid1_price'..'bid5_price','bid1_vol'..'bid5_vol',
+               'ask1_price'..'ask5_price','ask1_vol'..'ask5_vol','quote_time'}
+    失败返回 None（不抛异常，不阻塞主流程）。
+    """
+    try:
+        client = _mootdx_client()
+        if client is None:
+            logger.warning(f'[mootdx] {symbol} 客户端不可用，跳过实时行情')
+            return None
+        df = client.quotes(symbol=symbol)
+        if df is None or len(df) == 0:
+            logger.warning(f'[mootdx] {symbol} 实时行情返回空数据')
+            return None
+        row = df.iloc[0]
+        price = _safe_num(row.get('price'))
+        last_close = _safe_num(row.get('last_close'))
+        if price is None or price <= 0:
+            logger.warning(f'[mootdx] {symbol} 实时行情价格异常: price={price}')
+            return None
+        pct = round((price - last_close) / last_close * 100, 2) if last_close else None
+        quote = {'price': price, 'pct_change': pct}
+        for lvl in range(1, 6):
+            quote[f'bid{lvl}_price'] = _safe_num(row.get(f'bid{lvl}'))
+            quote[f'bid{lvl}_vol'] = _safe_num(row.get(f'bid_vol{lvl}'))
+            quote[f'ask{lvl}_price'] = _safe_num(row.get(f'ask{lvl}'))
+            quote[f'ask{lvl}_vol'] = _safe_num(row.get(f'ask_vol{lvl}'))
+        quote['quote_time'] = str(row.get('servertime', ''))[:8]
+        return quote
+    except Exception as e:
+        logger.warning(f'[mootdx] {symbol} 实时行情获取失败: {e}')
+        return None
+
+
+def get_realtime_quote_mootdx(symbol):
+    """019Y T1：对外只读接口——供 app.py 实时价格刷新降级使用（只取价格，不写库）。"""
+    q = _fetch_realtime_quote_mootdx(symbol)
+    if q is None or q.get('price') is None:
+        return None
+    return {'price': q['price'], 'pct_change': q.get('pct_change')}
+
+
+def _ensure_kline_source_column():
+    """019Y：确保 raw_kline.data_source 列存在（幂等，兼容未迁移的旧库）"""
+    try:
+        conn = get_connection()
+        conn.execute('ALTER TABLE raw_kline ADD COLUMN data_source TEXT DEFAULT NULL')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # 列已存在
+
+
+def fetch_orderbook(symbol, market, force_full=False):
+    """019Y T1：采集五档盘口快照（mootdx 实时行情）。
+    每只股票每天仅保留最新一条快照（UNIQUE(stock_id, trade_date)，重复采集覆盖当日）。
+    仅支持 A股（mootdx 港股支持有限）。失败不阻塞主流程。
+    返回: (状态, 消息)
+    """
+    stock_id = get_stock_id(symbol, market)
+    if not stock_id:
+        return 'failed', f'数据库中未找到股票 {symbol}'
+
+    mootdx_code = _mootdx_symbol(symbol, market)
+    if not mootdx_code:
+        save_data_status(stock_id, 'orderbook', 'skipped', 'mootdx暂不支持港股盘口')
+        return 'skipped', 'mootdx暂不支持港股盘口'
+
+    try:
+        quote = _fetch_realtime_quote_mootdx(mootdx_code)
+        if not quote or quote.get('price') is None:
+            save_data_status(stock_id, 'orderbook', 'failed', 'mootdx实时行情获取失败')
+            return 'failed', 'mootdx实时行情获取失败'
+
+        today_str = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO stock_orderbook
+            (stock_id, trade_date, quote_time, latest_price, pct_change,
+             bid1_price, bid1_vol, bid2_price, bid2_vol, bid3_price, bid3_vol,
+             bid4_price, bid4_vol, bid5_price, bid5_vol,
+             ask1_price, ask1_vol, ask2_price, ask2_vol, ask3_price, ask3_vol,
+             ask4_price, ask4_vol, ask5_price, ask5_vol, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                stock_id,
+                today_str,
+                quote.get('quote_time'),
+                quote['price'],
+                quote.get('pct_change'),
+                quote.get('bid1_price'),
+                quote.get('bid1_vol'),
+                quote.get('bid2_price'),
+                quote.get('bid2_vol'),
+                quote.get('bid3_price'),
+                quote.get('bid3_vol'),
+                quote.get('bid4_price'),
+                quote.get('bid4_vol'),
+                quote.get('bid5_price'),
+                quote.get('bid5_vol'),
+                quote.get('ask1_price'),
+                quote.get('ask1_vol'),
+                quote.get('ask2_price'),
+                quote.get('ask2_vol'),
+                quote.get('ask3_price'),
+                quote.get('ask3_vol'),
+                quote.get('ask4_price'),
+                quote.get('ask4_vol'),
+                quote.get('ask5_price'),
+                quote.get('ask5_vol'),
+                'mootdx',
+            ),
+        )
+        conn.commit()
+        conn.close()
+        msg = f'五档盘口已入库（mootdx，快照{quote.get("quote_time")}，最新价{quote["price"]}）'
+        save_data_status(stock_id, 'orderbook', 'success', msg)
+        logger.info(f'[{symbol}] {msg}')
+        return 'success', msg
+    except Exception as e:
+        save_data_status(stock_id, 'orderbook', 'failed', str(e))
+        logger.warning(f'[{symbol}] 五档盘口采集失败: {e}')
+        return 'failed', str(e)
+
+
+# ============================================================
 # K线数据采集（A股 + 港股统一使用腾讯接口）
 # ============================================================
 
@@ -483,12 +771,30 @@ def fetch_kline(symbol, market, force_full=False):
         except Exception as e:
             logger.warning(f'[{symbol}] K线增量检查异常(降级为全量): {e}')
 
+    # 019Y T1：K线降级链路 —— 腾讯野接口（主源）→ mootdx（备用源，仅A股）→ 标记失败
+    # 主源失败时自动降级，数据来源在日志与数据库（raw_kline.data_source）中标注 mootdx
+    kline_source = None  # None=腾讯主源；'mootdx'=降级备用源
     try:
         df = _fetch_kline_tencent(symbol, market)
         if df is None or df.empty:
-            save_data_status(stock_id, 'kline', 'failed', '腾讯接口返回空数据')
-            return 'failed', '腾讯接口返回空数据'
+            raise ValueError('腾讯接口返回空数据')
+    except Exception as e_tencent:
+        logger.warning(f'[{symbol}] 腾讯K线获取失败（尝试mootdx降级）: {e_tencent}')
+        df = None
+        mootdx_code = _mootdx_symbol(symbol, market)
+        if mootdx_code:
+            try:
+                df = _fetch_kline_mootdx(mootdx_code)
+                kline_source = 'mootdx'
+                logger.info(f'[{symbol}] mootdx K线降级成功（数据来源标注 mootdx）')
+            except Exception as e_mootdx:
+                logger.error(f'[{symbol}] mootdx K线降级也失败: {e_mootdx}')
+        if df is None or df.empty:
+            save_data_status(stock_id, 'kline', 'failed', '腾讯接口与mootdx降级均失败')
+            return 'failed', '腾讯接口与mootdx降级均失败'
 
+    try:
+        _ensure_kline_source_column()
         conn = get_connection()
         cursor = conn.cursor()
 
@@ -499,8 +805,8 @@ def fetch_kline(symbol, market, force_full=False):
                 cursor.execute(
                     """
                     INSERT OR REPLACE INTO raw_kline
-                    (stock_id, trade_date, open, close, high, low, volume, amount, turnover, pct_change)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (stock_id, trade_date, open, close, high, low, volume, amount, turnover, pct_change, data_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
                         stock_id,
@@ -510,9 +816,10 @@ def fetch_kline(symbol, market, force_full=False):
                         float(row.get('最高', 0) or 0),
                         float(row.get('最低', 0) or 0),
                         float(row.get('成交量', 0) or 0),
-                        0,  # 成交额（腾讯接口不提供，留空）
+                        float(row.get('成交额', 0) or 0),  # 腾讯接口不提供成交额（留空）；mootdx 有
                         0,  # 换手率（同上）
                         float(row.get('涨跌幅', 0) or 0),
+                        kline_source,
                     ),
                 )
                 saved_count += 1
@@ -522,10 +829,11 @@ def fetch_kline(symbol, market, force_full=False):
         conn.commit()
         conn.close()
 
-        save_data_status(stock_id, 'kline', 'success', f'成功获取{saved_count}条K线数据')
+        src_tag = '（数据来源: mootdx 降级）' if kline_source else ''
+        save_data_status(stock_id, 'kline', 'success', f'成功获取{saved_count}条K线数据{src_tag}')
         market_name = 'A股' if market == 'a_stock' else '港股'
-        logger.info(f'[{market_name} {symbol}] K线数据采集成功，共{saved_count}条')
-        return 'success', f'获取{saved_count}条K线数据'
+        logger.info(f'[{market_name} {symbol}] K线数据采集成功，共{saved_count}条{src_tag}')
+        return 'success', f'获取{saved_count}条K线数据{src_tag}'
 
     except Exception as e:
         save_data_status(stock_id, 'kline', 'failed', str(e))
@@ -537,12 +845,170 @@ def fetch_kline(symbol, market, force_full=False):
 # A股 —— 基本面数据
 # ============================================================
 
+# ============================================================
+# 019P：新浪关键指标摘要（stock_financial_abstract）主源解析
+# 结构（架构师实测 M-2，无需转置）：行=指标（80），列=['选项','指标']+报告期列（最新在前）
+# ============================================================
+_FUND_ABSTRACT_TIMEOUT = 30  # 019P：abstract 调用超时阈值（秒），实测单次约 1s
+
+# 019P R-1：abstract 同名指标去重优先级（选项组：常用指标优先 + 取第一行）
+_ABSTRACT_GROUP_PRIORITY = [
+    '常用指标',
+    '每股指标',
+    '盈利能力',
+    '成长能力',
+    '收益质量',
+    '财务风险',
+    '营运能力',
+]
+
+# 019P M-2：abstract 指标行名 → raw_fundamental 列 映射表（架构师实测行名）
+_ABSTRACT_FIELD_MAP = [
+    ('毛利率', 'gross_margin'),
+    ('销售净利率', 'net_margin'),
+    ('营业总收入增长率', 'revenue_growth'),
+    ('归属母公司净利润增长率', 'profit_growth'),
+    ('净资产收益率(ROE)', 'roe'),
+    ('资产负债率', 'debt_ratio'),
+    ('流动比率', 'current_ratio'),
+    ('速动比率', 'quick_ratio'),
+    ('经营活动净现金/归属母公司的净利润', 'ocf_to_net_profit'),
+]
+
+
+def _call_ak_with_timeout(fn, label, timeout=_FUND_ABSTRACT_TIMEOUT):
+    """019P P3（必需）：daemon 线程 join(timeout) 包装 akshare 基本面接口调用。
+    019I 模式同型，自建于基本面区域（THS 的 _call_with_timeout 为函数内闭包，不可复用）。
+    超时返回 (None, True)；正常返回 (result, False)。abstract/analysis_indicator 严禁裸调用。
+    """
+    import threading as _threading_019p
+
+    box = {}
+    t = _threading_019p.Thread(target=lambda: box.update(r=fn()), daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        logger.warning(f'[019P] {label} 超时({timeout}s)，按失败处理')
+        return None, True
+    return box.get('r'), False
+
+
+def _fetch_a_fundamental_sina(symbol):
+    """019P：主源切换——akshare 新浪关键指标摘要 stock_financial_abstract（M-2/A-1）。
+    返回原始 DataFrame（行=指标，列=['选项','指标']+报告期列最新在前）。
+    P3 超时保护；异常/超时向上抛出，由 fetch_a_fundamental 降级现接口（P2）。
+    注：不挂 @retry——abstract 失败即降级（P2），避免批量场景超时重试累积（最坏 3×30s 超批次上限）。
+    """
+    df, timed_out = _call_ak_with_timeout(
+        lambda: ak.stock_financial_abstract(symbol=symbol), f'A股 {symbol} abstract'
+    )
+    if timed_out:
+        raise TimeoutError(f'stock_financial_abstract 超时(>{_FUND_ABSTRACT_TIMEOUT}s)')
+    return df
+
 
 @retry
-def _fetch_a_fundamental_sina(symbol):
-    """通过akshare从新浪获取A股财务分析指标"""
-    df = ak.stock_financial_analysis_indicator(symbol=symbol, start_year='2020')
+def _fetch_a_fundamental_sina_indicator(symbol):
+    """019P P2：降级层——现接口 stock_financial_analysis_indicator（保留原路径）。
+    P3 超时保护；异常/超时向上抛出由 fetch_a_fundamental 处理。
+    """
+    df, timed_out = _call_ak_with_timeout(
+        lambda: ak.stock_financial_analysis_indicator(symbol=symbol, start_year='2020'),
+        f'A股 {symbol} analysis_indicator',
+    )
+    if timed_out:
+        raise TimeoutError(f'stock_financial_analysis_indicator 超时(>{_FUND_ABSTRACT_TIMEOUT}s)')
     return df
+
+
+def _abstract_name_index(df, symbol):
+    """019P R-1：按指标名建立去重索引（选项组优先级 + 取第一行）。
+    返回 {指标名: 行下标}，仅包含 _ABSTRACT_FIELD_MAP 中的指标名。
+    """
+    rank = {g: i for i, g in enumerate(_ABSTRACT_GROUP_PRIORITY)}
+    wanted = {name for name, _ in _ABSTRACT_FIELD_MAP}
+    name_to_idx = {}
+    for idx, r in df.iterrows():
+        name = str(r.get('指标', '')).strip()
+        if name not in wanted:
+            continue
+        if name not in name_to_idx:
+            name_to_idx[name] = idx
+        else:
+            cur_rank = rank.get(str(df.iloc[name_to_idx[name]].get('选项', '')).strip(), len(rank))
+            new_rank = rank.get(str(r.get('选项', '')).strip(), len(rank))
+            if new_rank < cur_rank:
+                name_to_idx[name] = idx
+    return name_to_idx
+
+
+def _extract_abstract_rows(df, symbol, max_periods=8):
+    """019P M-2/R-2：abstract DataFrame → 最近 max_periods 期财报行。
+    按报告期列遍历（最新在前，R-2 修正）；20260331→2026-03-31；
+    写最近 8 期（2 年，否决全历史 100+ 期防 UI 膨胀 R-8）。
+    返回 [(report_date, {db_col: value_or_None}), ...] 最新在前。
+    """
+    if df is None or df.empty:
+        return []
+    name_to_idx = _abstract_name_index(df, symbol)
+    if not name_to_idx:
+        logger.warning(f'[019P {symbol}] abstract 未匹配到指标行，实际列: {list(df.columns)[:5]}')
+        return []
+    period_cols = [c for c in df.columns if isinstance(c, str) and len(c) == 8 and c.isdigit()][
+        :max_periods
+    ]
+    if not period_cols:
+        logger.warning(f'[019P {symbol}] abstract 未识别到报告期列: {list(df.columns)[:5]}')
+        return []
+    rows = []
+    for pcol in period_cols:
+        report_date = f'{pcol[:4]}-{pcol[4:6]}-{pcol[6:8]}'
+        vals = {}
+        for name, db_col in _ABSTRACT_FIELD_MAP:
+            idx = name_to_idx.get(name)
+            vals[db_col] = _safe_num(df.iloc[idx][pcol]) if idx is not None else None
+        rows.append((report_date, vals))
+    return rows
+
+
+def _safe_row_val(r, *keys):
+    """019P：DataFrame 行安全取数（沿用原 safe_get 语义，模块级化供降级层复用）"""
+    for k in keys:
+        if k in r.index:
+            val = r[k]
+            if pd.notna(val):
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    return None
+    return None
+
+
+def _extract_indicator_rows(df, max_periods=4):
+    """019P P2：降级层 analysis_indicator DataFrame → 最近 max_periods 期行（旧逻辑保留）。
+    返回 [(report_date, {db_col: value_or_None}), ...] 最新在前。
+    """
+    rows = []
+    total_rows = len(df)
+    take_count = min(max_periods, total_rows)
+    for idx in range(total_rows - 1, total_rows - 1 - take_count, -1):
+        row = df.iloc[idx]
+        report_date = str(row.get('日期', '')).split(' ')[0]
+        vals = {
+            'roe': _safe_row_val(row, '净资产收益率(%)', '加权净资产收益率(%)'),
+            'gross_margin': _safe_row_val(row, '销售毛利率(%)'),
+            'net_margin': _safe_row_val(row, '销售净利率(%)'),
+            'debt_ratio': _safe_row_val(row, '资产负债率(%)'),
+            'current_ratio': _safe_row_val(row, '流动比率'),
+            'quick_ratio': _safe_row_val(row, '速动比率'),
+            'revenue_growth': _safe_row_val(row, '主营业务收入增长率(%)'),
+            'profit_growth': _safe_row_val(row, '净利润增长率(%)'),
+            'ocf_to_net_profit': _safe_row_val(
+                row, '经营现金净流量对净利润的比率(%)', '经营现金净流量与净利润的比率(%)'
+            ),
+        }
+        rows.append((report_date, vals))
+    return rows
 
 
 def fetch_a_fundamental(symbol, force_full=False):
@@ -556,9 +1022,13 @@ def fetch_a_fundamental(symbol, force_full=False):
     # 011增量门控
     skip_financial = False  # 是否跳过财报采集
     skip_pepb = False  # 是否跳过PE/PB采集
+    # 019P-A6：存量自动回补标记（最新期毛利率缺失触发，message 区分 R-4）
+    backfill_triggered = False
 
     if not force_full:
         # 门控A：财报数据TTL（80天）
+        # 019P-A6：TTL 门控内附加完整性检查——最新一期 gross_margin IS NULL → 不跳过财报采集
+        # （"不重复获取"= 已有完整数据不重复获取；完整性缺失时获取缺项不构成重复，B10 先例精神）
         try:
             conn_chk = get_connection()
             cursor_chk = conn_chk.cursor()
@@ -574,26 +1044,39 @@ def fetch_a_fundamental(symbol, force_full=False):
                     - datetime.strptime(last_report_date, '%Y-%m-%d')
                 ).days
                 if days_since < FUNDAMENTAL_REPORT_TTL_DAYS:
-                    skip_financial = True
-                    logger.info(f'[A股 {symbol}] 财报数据{days_since}天内，跳过财报采集')
+                    # 019P-A6：完整性检查（最新期毛利率缺失 → 自动回补，不跳过）
+                    cursor_chk.execute(
+                        'SELECT gross_margin FROM raw_fundamental WHERE stock_id = ? AND report_date = ?',
+                        (stock_id, last_report_date),
+                    )
+                    gm_row = cursor_chk.fetchone()
+                    if gm_row is not None and gm_row['gross_margin'] is None:
+                        backfill_triggered = True
+                        logger.info(
+                            f'[A股 {symbol}] 最新期({last_report_date})毛利率缺失，触发财报补全（abstract 重采）'
+                        )
+                    else:
+                        skip_financial = True
+                        logger.info(f'[A股 {symbol}] 财报数据{days_since}天内，跳过财报采集')
 
                     # 门控B：PE/PB TTL（24h），仅当财报跳过时检查
-                    cursor_chk.execute(
-                        """SELECT fetched_at FROM data_status
-                           WHERE stock_id = ? AND dimension = 'fundamental'
-                           ORDER BY fetched_at DESC LIMIT 1""",
-                        (stock_id,),
-                    )
-                    status_row = cursor_chk.fetchone()
-                    if status_row and status_row['fetched_at']:
-                        last_fetch = datetime.strptime(
-                            str(status_row['fetched_at'])[:19], '%Y-%m-%d %H:%M:%S'
+                    if skip_financial:
+                        cursor_chk.execute(
+                            """SELECT fetched_at FROM data_status
+                               WHERE stock_id = ? AND dimension = 'fundamental'
+                               ORDER BY fetched_at DESC LIMIT 1""",
+                            (stock_id,),
                         )
-                        hours_since = (
-                            datetime.now(_CN_TZ).replace(tzinfo=None) - last_fetch
-                        ).total_seconds() / 3600
-                        if hours_since < PE_PB_CACHE_TTL_HOURS:
-                            skip_pepb = True
+                        status_row = cursor_chk.fetchone()
+                        if status_row and status_row['fetched_at']:
+                            last_fetch = datetime.strptime(
+                                str(status_row['fetched_at'])[:19], '%Y-%m-%d %H:%M:%S'
+                            )
+                            hours_since = (
+                                datetime.now(_CN_TZ).replace(tzinfo=None) - last_fetch
+                            ).total_seconds() / 3600
+                            if hours_since < PE_PB_CACHE_TTL_HOURS:
+                                skip_pepb = True
             conn_chk.close()
         except Exception as e:
             logger.warning(f'[A股 {symbol}] 基本面增量检查异常(降级为全量): {e}')
@@ -607,72 +1090,118 @@ def fetch_a_fundamental(symbol, force_full=False):
     warnings = []
     saved_count = 0
 
-    # --- 财务分析指标（新浪源）---
+    # --- 财务分析指标（019P：abstract 主源，P2 失败降级 analysis_indicator）---
+    # 019P-A1：主源切换 stock_financial_abstract（新浪关键指标摘要）：
+    #   - 结构适配（M-2）：行=指标，列=['选项','指标']+报告期列（最新在前），无需转置
+    #   - 同名指标去重（R-1）：选项=常用指标优先 + 取第一行
+    #   - 写最近 8 期（2 年，防 UI 膨胀 R-8）；次新股（688795/688802）顺带解决（发现 4）
+    #   - 数据源标注：'sina_abstract'；降级路径标 'sina_analysis_indicator'（A-3）
+    used_abstract = False
     if not skip_financial:
+        fin_rows = None
         try:
-            df_fin = _fetch_a_fundamental_sina(symbol)
-            if df_fin is not None and not df_fin.empty:
-                conn = get_connection()
-                cursor = conn.cursor()
-
-                def safe_get(r, *keys):
-                    for k in keys:
-                        if k in r.index:
-                            val = r[k]
-                            if pd.notna(val):
-                                try:
-                                    return float(val)
-                                except (ValueError, TypeError):
-                                    return None
-                    return None
-
-                # 取最近4条财报（从尾部往前取，确保是最新数据）
-                total_rows = len(df_fin)
-                take_count = min(4, total_rows)
-                for idx in range(total_rows - 1, total_rows - 1 - take_count, -1):
-                    row = df_fin.iloc[idx]
-                    report_date = str(row.get('日期', '')).split(' ')[0]
-
-                    cursor.execute(
-                        """
-                        INSERT OR REPLACE INTO raw_fundamental
-                        (stock_id, report_date,
-                         roe, gross_margin, net_margin, debt_ratio,
-                         current_ratio, quick_ratio,
-                         revenue_growth, profit_growth,
-                         ocf_to_net_profit)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                        (
-                            stock_id,
-                            report_date,
-                            safe_get(row, '净资产收益率(%)', '加权净资产收益率(%)'),
-                            safe_get(row, '销售毛利率(%)'),
-                            safe_get(row, '销售净利率(%)'),
-                            safe_get(row, '资产负债率(%)'),
-                            safe_get(row, '流动比率'),
-                            safe_get(row, '速动比率'),
-                            safe_get(row, '主营业务收入增长率(%)'),
-                            safe_get(row, '净利润增长率(%)'),
-                            safe_get(
-                                row,
-                                '经营现金净流量对净利润的比率(%)',
-                                '经营现金净流量与净利润的比率(%)',
-                            ),
-                        ),
-                    )
-                    saved_count += 1
-                    logger.info(
-                        f'[A股 {symbol}] 财报: {report_date}, ROE={safe_get(row, "净资产收益率(%)")}'
-                    )
-
-                conn.commit()
-                conn.close()
+            df_abstract = _fetch_a_fundamental_sina(symbol)
+            fin_rows = _extract_abstract_rows(df_abstract, symbol)
+            if fin_rows:
+                used_abstract = True
+                logger.info(f'[A股 {symbol}] abstract 解析 {len(fin_rows)} 期财报（最新在前）')
             else:
-                warnings.append('财务分析指标数据为空')
+                logger.warning(f'[A股 {symbol}] abstract 数据为空，降级现接口')
         except Exception as e:
-            warnings.append(f'财务指标获取失败: {e}')
-            logger.warning(f'[A股 {symbol}] 财务指标获取失败: {e}')
+            # P2：abstract 失败仅记日志（降级由 message 前缀标注，不重复写入 warnings 致 partial）
+            logger.warning(f'[A股 {symbol}] abstract 获取失败(降级现接口): {e}')
+
+        if fin_rows is None or not fin_rows:
+            # P2 降级层：现接口 stock_financial_analysis_indicator（保留原路径）
+            try:
+                df_ind = _fetch_a_fundamental_sina_indicator(symbol)
+                if df_ind is not None and not df_ind.empty:
+                    fin_rows = _extract_indicator_rows(df_ind)
+                    used_abstract = False
+                else:
+                    warnings.append('财务分析指标数据为空')
+            except Exception as e:
+                warnings.append(f'财务指标获取失败: {e}')
+                logger.warning(f'[A股 {symbol}] 财务指标获取失败(降级层): {e}')
+
+        # 019Y T2：P3 备用层——baostock 财务数据（仅A股，akshare 两层全失败时降级使用）
+        used_baostock = False
+        if fin_rows is None or not fin_rows:
+            try:
+                bs_rows = fetch_fundamental_baostock(symbol)
+                if bs_rows:
+                    fin_rows = bs_rows
+                    used_baostock = True
+                    # P3 成功时，移除 P2 层累积的失败警告（数据已由备用源补全，不误报缺失）
+                    warnings = [
+                        w
+                        for w in warnings
+                        if not w.startswith('财务指标获取失败') and w != '财务分析指标数据为空'
+                    ]
+                    logger.info(f'[A股 {symbol}] baostock 财务备用源成功: {len(bs_rows)} 期')
+                else:
+                    warnings.append('baostock财务备用源也无数据（akshare+baostock均失败）')
+            except Exception as e:
+                warnings.append(f'baostock财务备用源失败: {e}')
+                logger.warning(f'[A股 {symbol}] baostock财务备用源失败: {e}')
+        else:
+            used_baostock = False
+
+        if fin_rows:
+            conn = get_connection()
+            cursor = conn.cursor()
+            # P1（必需）：读取既有 ocf 值，abstract 该期 ocf 为 NaN 时保留原值（回归红线）
+            cursor.execute(
+                'SELECT report_date, ocf_to_net_profit FROM raw_fundamental WHERE stock_id = ?',
+                (stock_id,),
+            )
+            existing_ocf = {str(r['report_date']): r['ocf_to_net_profit'] for r in cursor.fetchall()}
+            # 019Y T2：数据源标注三通道——sina_abstract / baostock / sina_analysis_indicator
+            if used_abstract:
+                data_source = 'sina_abstract'
+            elif used_baostock:
+                data_source = 'baostock'
+            else:
+                data_source = 'sina_analysis_indicator'
+            for report_date, vals in fin_rows:
+                ocf = vals.get('ocf_to_net_profit')
+                if ocf is None and existing_ocf.get(report_date) is not None:
+                    # P1：abstract ocf=NaN 且 DB 已有值 → 保留原值（实测 600276 20260331 场景）
+                    ocf = existing_ocf[report_date]
+                    logger.info(
+                        f'[A股 {symbol}] {report_date} ocf 保留既有值 {ocf}（abstract 该期为 NaN）'
+                    )
+
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO raw_fundamental
+                    (stock_id, report_date,
+                     roe, gross_margin, net_margin, debt_ratio,
+                     current_ratio, quick_ratio,
+                     revenue_growth, profit_growth,
+                     ocf_to_net_profit, data_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        stock_id,
+                        report_date,
+                        vals.get('roe'),
+                        vals.get('gross_margin'),
+                        vals.get('net_margin'),
+                        vals.get('debt_ratio'),
+                        vals.get('current_ratio'),
+                        vals.get('quick_ratio'),
+                        vals.get('revenue_growth'),
+                        vals.get('profit_growth'),
+                        ocf,
+                        data_source,
+                    ),
+                )
+                saved_count += 1
+                logger.info(f'[A股 {symbol}] 财报: {report_date}, ROE={vals.get("roe")}')
+
+            conn.commit()
+            conn.close()
 
     # --- 估值指标 PE/PB（腾讯实时行情接口）---
     # PE/PB 是实时行情数据，不单独创建记录，而是合并到最新的财报记录中
@@ -716,19 +1245,41 @@ def fetch_a_fundamental(symbol, force_full=False):
         conn2.close()
 
     # 011：返回逻辑调整（增加 skip_financial 仅PE/PB更新的场景）
+    # 019P-A3：data_status message 前缀标注数据源（'新浪abstract财报+腾讯估值' /
+    #          '新浪指标(analysis_indicator降级)+腾讯估值' / 港股见 fetch_hk_fundamental）
     if skip_financial and not skip_pepb:
         # 仅采集了PE/PB（财报跳过）
         if not warnings:
-            save_data_status(stock_id, 'fundamental', 'success', 'PE/PB更新成功(财报跳过)')
-            return 'success', 'PE/PB更新成功(财报跳过)'
+            save_data_status(stock_id, 'fundamental', 'success', '腾讯估值: PE/PB更新成功(财报跳过)')
+            return 'success', '腾讯估值: PE/PB更新成功(财报跳过)'
         else:
-            save_data_status(stock_id, 'fundamental', 'partial', '; '.join(warnings))
-            return 'partial', '; '.join(warnings)
+            save_data_status(stock_id, 'fundamental', 'partial', '腾讯估值: ' + '; '.join(warnings))
+            return 'partial', '腾讯估值: ' + '; '.join(warnings)
     elif saved_count > 0 and not warnings:
-        save_data_status(stock_id, 'fundamental', 'success', '基本面数据采集成功')
-        return 'success', '基本面数据采集成功'
+        # 019Y T2：三通道来源标注（abstract主源 / baostock备用 / analysis_indicator降级）
+        if used_abstract:
+            src_tag = '新浪abstract财报+腾讯估值'
+        elif used_baostock:
+            src_tag = 'baostock财务备用+腾讯估值'
+        else:
+            src_tag = '新浪指标(analysis_indicator降级)+腾讯估值'
+        if backfill_triggered:
+            # 019P-R4：回补场景 message 区分（与"同日跳过"区分）
+            msg = f'{src_tag}: 财报补全(毛利率缺失触发)'
+        else:
+            msg = f'{src_tag}: 基本面数据采集成功'
+        save_data_status(stock_id, 'fundamental', 'success', msg)
+        return 'success', msg
     elif saved_count > 0 and warnings:
-        save_data_status(stock_id, 'fundamental', 'partial', '; '.join(warnings))
+        if used_abstract:
+            src_tag = '新浪abstract财报+腾讯估值'
+        elif used_baostock:
+            src_tag = 'baostock财务备用+腾讯估值'
+        else:
+            src_tag = '新浪指标(analysis_indicator降级)+腾讯估值'
+        save_data_status(
+            stock_id, 'fundamental', 'partial', f'{src_tag}: 获取{saved_count}条财务数据，缺失: ' + '; '.join(warnings)
+        )
         return 'partial', f'获取{saved_count}条财务数据，缺失: ' + '; '.join(warnings)
     else:
         save_data_status(stock_id, 'fundamental', 'failed', '; '.join(warnings))
@@ -928,6 +1479,8 @@ def fetch_hk_fundamental(symbol, force_full=False):
         return 'failed', f'数据库中未找到港股 {symbol}'
 
     # 011增量：80天财报门控
+    # 019P-A6：附加完整性检查（最新期毛利率缺失 → 自动回补）；占位行修复（M-5）为收敛前提
+    backfill_triggered = False
     if not force_full:
         try:
             conn_chk = get_connection()
@@ -945,9 +1498,24 @@ def fetch_hk_fundamental(symbol, force_full=False):
                     - datetime.strptime(last_report_date, '%Y-%m-%d')
                 ).days
                 if days_since < FUNDAMENTAL_REPORT_TTL_DAYS:
-                    skip_msg = f'同日跳过(港股财报{days_since}天内)'
-                    save_data_status(stock_id, 'fundamental', 'success', skip_msg)
-                    return 'success', skip_msg
+                    # 019P-A6：完整性检查——最新真实财报行毛利率缺失 → 回补（M-5 清理占位行后收敛）
+                    conn_chk2 = get_connection()
+                    cur_chk2 = conn_chk2.cursor()
+                    cur_chk2.execute(
+                        'SELECT gross_margin FROM raw_fundamental WHERE stock_id = ? AND report_date = ?',
+                        (stock_id, last_report_date),
+                    )
+                    gm_row = cur_chk2.fetchone()
+                    conn_chk2.close()
+                    if gm_row is not None and gm_row['gross_margin'] is None:
+                        backfill_triggered = True
+                        logger.info(
+                            f'[港股 {symbol}] 最新期({last_report_date})毛利率缺失，触发财报补全'
+                        )
+                    else:
+                        skip_msg = f'同日跳过(港股财报{days_since}天内)'
+                        save_data_status(stock_id, 'fundamental', 'success', skip_msg)
+                        return 'success', skip_msg
         except Exception as e:
             logger.warning(f'[港股 {symbol}] 基本面增量检查异常(降级为全量): {e}')
 
@@ -986,8 +1554,8 @@ def fetch_hk_fundamental(symbol, force_full=False):
                     (stock_id, report_date,
                      roe, gross_margin, net_margin, debt_ratio,
                      current_ratio, revenue_growth, profit_growth,
-                     ocf_to_net_profit)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ocf_to_net_profit, data_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
                         stock_id,
@@ -1004,12 +1572,42 @@ def fetch_hk_fundamental(symbol, force_full=False):
                             row, 'HOLDER_PROFIT_YOY', '净利润增长率(%)', '净利润同比增长（%）'
                         ),
                         None,  # ocf_to_net_profit：指标接口无直接对应字段，留空降级（不引入估算）
+                        'em_hk',  # 019P-A3：港股财报来源标注（东方财富 EM）
                     ),
                 )
                 saved_count += 1
 
             conn.commit()
             conn.close()
+
+            # 019P M-5（R-3 高优先）：清理"全部指标字段 NULL 且 report_date 晚于最新真实财报行"的占位行。
+            # 占位行仅含 PE/PB 时点值，真实财报行存在后无信息增量（PE/PB 下次采集即重新合并，零数据损失）。
+            # 前提：仅财报写入成功时清理；同时是 A-6 自动回补收敛的前提（否则港股每日触发回补且永不收敛）。
+            try:
+                conn_cln = get_connection()
+                cur_cln = conn_cln.cursor()
+                cur_cln.execute(
+                    """DELETE FROM raw_fundamental WHERE stock_id = ?
+                       AND roe IS NULL AND gross_margin IS NULL AND net_margin IS NULL
+                       AND debt_ratio IS NULL AND current_ratio IS NULL AND quick_ratio IS NULL
+                       AND revenue_growth IS NULL AND profit_growth IS NULL
+                       AND ocf_to_net_profit IS NULL
+                       AND report_date > (
+                           SELECT MAX(report_date) FROM raw_fundamental WHERE stock_id = ?
+                           AND (roe IS NOT NULL OR gross_margin IS NOT NULL
+                                OR net_margin IS NOT NULL OR debt_ratio IS NOT NULL
+                                OR current_ratio IS NOT NULL OR revenue_growth IS NOT NULL
+                                OR profit_growth IS NOT NULL OR ocf_to_net_profit IS NOT NULL)
+                       )""",
+                    (stock_id, stock_id),
+                )
+                cleaned = cur_cln.rowcount
+                conn_cln.commit()
+                conn_cln.close()
+                if cleaned:
+                    logger.info(f'[港股 {symbol}] 清理 PE/PB 占位行 {cleaned} 条（全指标NULL）')
+            except Exception as e:
+                logger.warning(f'[港股 {symbol}] 占位行清理异常(不阻塞): {e}')
         else:
             warnings.append('港股财务指标数据为空')
     except Exception as e:
@@ -1028,8 +1626,14 @@ def fetch_hk_fundamental(symbol, force_full=False):
                 cursor2 = conn2.cursor()
                 # P0-HK-FUND-002：PE/PB 合并到最新财报行（对齐 A 股逻辑），
                 # 不再 INSERT 新行，避免 data_adapter 只读到 PE/PB 而丢财报指标。
+                # 019P M-5：改为取最新"含指标值"的真实财报行（排除全指标 NULL 的 PE/PB 占位行 R-3）
                 cursor2.execute(
-                    'SELECT report_date FROM raw_fundamental WHERE stock_id = ? ORDER BY report_date DESC LIMIT 1',
+                    """SELECT report_date FROM raw_fundamental WHERE stock_id = ?
+                       AND (roe IS NOT NULL OR gross_margin IS NOT NULL
+                            OR net_margin IS NOT NULL OR debt_ratio IS NOT NULL
+                            OR current_ratio IS NOT NULL OR revenue_growth IS NOT NULL
+                            OR profit_growth IS NOT NULL OR ocf_to_net_profit IS NOT NULL)
+                       ORDER BY report_date DESC LIMIT 1""",
                     (stock_id,),
                 )
                 latest_fund_row = cursor2.fetchone()
@@ -1065,15 +1669,433 @@ def fetch_hk_fundamental(symbol, force_full=False):
         logger.warning(f'[港股 {symbol}] PE/PB获取失败: {e}')
 
     # P0-HK-FUND-002：返回逻辑对齐 A 股三档（success/partial/failed）
+    # 019P-A3：data_status message 前缀标注数据源（'港股EM财报+腾讯估值'）
     if saved_count > 0 and not warnings:
-        save_data_status(stock_id, 'fundamental', 'success', '港股基本面数据采集成功')
-        return 'success', '港股基本面数据采集成功'
+        if backfill_triggered:
+            msg = '港股EM财报+腾讯估值: 财报补全(毛利率缺失触发)'
+        else:
+            msg = '港股EM财报+腾讯估值: 港股基本面数据采集成功'
+        save_data_status(stock_id, 'fundamental', 'success', msg)
+        return 'success', msg
     elif saved_count > 0 and warnings:
-        save_data_status(stock_id, 'fundamental', 'partial', '; '.join(warnings))
+        save_data_status(
+            stock_id,
+            'fundamental',
+            'partial',
+            '港股EM财报+腾讯估值: 获取' + str(saved_count) + '条财务数据，缺失: ' + '; '.join(warnings),
+        )
         return 'partial', f'获取{saved_count}条财务数据，缺失: ' + '; '.join(warnings)
     else:
         save_data_status(stock_id, 'fundamental', 'failed', '; '.join(warnings))
         return 'failed', '; '.join(warnings)
+
+
+# ============================================================
+# 019Y T2：估值数据 + 限售解禁 + baostock 财务备用源
+#
+# 大白话说明：
+# - 估值（PE/PB/PS/PCF/股息率）是项目此前缺失的数据维度，单独存入新表 stock_valuation。
+# - 降级链路：akshare（A股 stock_a_indicator_lg，1.18 版本不存在时自动回退
+#   stock_value_em；港股 stock_hk_valuation_baidu）→ baostock（仅A股）→ 标记缺失。
+# - baostock 登录/登出成对管理（批次级），登录一次全局复用，不逐只重复登录。
+# - baostock 走 TCP socket，不经过 requests 全局 patch，天然隔离。
+# - baostock 不支持港股：港股估值仍走 akshare。
+# ============================================================
+import atexit as _atexit_019y
+import threading as _threading_019y_bs
+
+_BS_LOGGED_IN = False
+_BS_LOCK = _threading_019y_bs.Lock()
+
+
+def _bs_ensure_login():
+    """019Y：baostock 登录（幂等，全局只登录一次；线程安全）。
+    返回 True=已登录/登录成功；False=登录失败。
+    """
+    global _BS_LOGGED_IN
+    if _BS_LOGGED_IN:
+        return True
+    with _BS_LOCK:
+        if _BS_LOGGED_IN:
+            return True
+        try:
+            import baostock as bs
+            lg = bs.login()
+            if lg.error_code == '0':
+                _BS_LOGGED_IN = True
+                logger.info('[baostock] 登录成功（生命周期：批次级，全局复用）')
+                return True
+            logger.warning(f'[baostock] 登录失败: code={lg.error_code} msg={lg.error_msg}')
+            return False
+        except Exception as e:
+            logger.warning(f'[baostock] 登录异常: {e}')
+            return False
+
+
+def _bs_logout():
+    """019Y：baostock 登出（与登录成对，进程退出时兜底）"""
+    global _BS_LOGGED_IN
+    if not _BS_LOGGED_IN:
+        return
+    try:
+        import baostock as bs
+        bs.logout()
+        _BS_LOGGED_IN = False
+        logger.info('[baostock] 已登出（生命周期成对）')
+    except Exception as e:
+        logger.warning(f'[baostock] 登出异常: {e}')
+
+
+_atexit_019y.register(_bs_logout)
+
+
+def _bs_code(symbol, market):
+    """A股代码 → baostock 代码（sz.000001 / sh.600276）。港股不支持返回 None。"""
+    if market != 'a_stock':
+        return None
+    if symbol.startswith('6'):
+        return 'sh.' + symbol
+    if symbol.startswith(('0', '3')):
+        return 'sz.' + symbol
+    return None
+
+
+def _pick_val(row, names, frags):
+    """019Y：从 DataFrame 行取数——先精确匹配 names，再按 frags 子串匹配（兼容 akshare 列名漂移）。
+    找不到或值为空返回 None。
+    """
+    for n in names:
+        if n in row.index:
+            v = row[n]
+            if pd.notna(v):
+                return v
+    for f in frags:
+        for n in row.index:
+            if f in str(n):
+                v = row[n]
+                if pd.notna(v):
+                    return v
+    return None
+
+
+def _fetch_valuation_akshare(symbol, market):
+    """019Y T2：akshare 估值主源（A股+港股）。
+    任务书指定 stock_a_indicator_lg，但本机 akshare 1.18.53 已无此接口
+    （乐咕估值更名），自动回退同源接口 stock_value_em（东财估值，同 PE/PB/PS 口径）。
+    返回最近一条 dict 或 None；异常/超时向上抛出由 fetch_valuation 降级 baostock。
+    """
+    def _ak_call():
+        if market == 'a_stock':
+            fn = getattr(ak, 'stock_a_indicator_lg', None)
+            if fn is not None:
+                return fn(symbol=symbol)
+            return ak.stock_value_em(symbol=symbol)
+        if market == 'hk_stock':
+            fn = getattr(ak, 'stock_hk_valuation_baidu', None)
+            if fn is not None:
+                return fn(symbol=symbol)
+            return None
+        return None
+
+    df, timed_out = _call_ak_with_timeout(_ak_call, f'{symbol} 估值')
+    if timed_out:
+        raise TimeoutError('akshare 估值接口超时')
+    if df is None or len(df) == 0:
+        return None
+    row = df.iloc[-1]  # 接口按日期升序，取最新一行
+    raw_date = _pick_val(row, ['数据日期', '日期', 'trade_date'], ['数据日期', '日期'])
+    val = {
+        'trade_date': str(raw_date)[:10] if raw_date is not None else None,
+        'pe_ttm': _safe_num(_pick_val(row, ['PE(TTM)', 'pe_ttm'], ['PE(TTM)'])),
+        'pe': _safe_num(_pick_val(row, ['PE(静)', 'PE(动)', 'pe'], ['PE(静)', 'PE(动)'])),
+        'pb_mrq': _safe_num(_pick_val(row, ['市净率', 'pb_mrq', 'pb'], ['市净率'])),
+        'ps_ttm': _safe_num(_pick_val(row, ['市销率', 'ps_ttm'], ['市销率'])),
+        'ps': None,
+        'pcf_ncf_ttm': _safe_num(_pick_val(row, ['市现率', 'pcf_ncf_ttm'], ['市现率'])),
+        'dv_ttm': _safe_num(_pick_val(row, ['股息率'], ['股息率'])),
+        'total_mv': _safe_num(_pick_val(row, ['总市值', 'total_mv'], ['总市值'])),
+    }
+    return val
+
+
+def _fetch_valuation_baostock(symbol, market):
+    """019Y T2：baostock 估值备用源（仅A股，peTTM/pbMRQ/psTTM/pcfNcfTTM）。
+    返回最近一条交易日 dict 或 None（失败不抛异常）：
+    {'trade_date','pe_ttm','pb_mrq','ps_ttm','pcf_ncf_ttm'}
+    """
+    code = _bs_code(symbol, market)
+    if not code:
+        return None
+    if not _bs_ensure_login():
+        return None
+    try:
+        import baostock as bs
+        now = datetime.now(_CN_TZ).replace(tzinfo=None)
+        start_d = (now - timedelta(days=7)).strftime('%Y-%m-%d')
+        end_d = now.strftime('%Y-%m-%d')
+        rs = bs.query_history_k_data_plus(
+            code,
+            'date,code,peTTM,pbMRQ,psTTM,pcfNcfTTM',
+            start_date=start_d,
+            end_date=end_d,
+            frequency='d',
+        )
+        rows = []
+        while (rs.error_code == '0') & rs.next():
+            rows.append(rs.get_row_data())
+        if not rows:
+            logger.warning(f'[baostock] {symbol} 估值返回空数据: {rs.error_msg}')
+            return None
+        last = rows[-1]
+        return {
+            'trade_date': last[0],
+            'pe_ttm': _safe_num(last[2]),
+            'pb_mrq': _safe_num(last[3]),
+            'ps_ttm': _safe_num(last[4]),
+            'pcf_ncf_ttm': _safe_num(last[5]),
+        }
+    except Exception as e:
+        logger.warning(f'[baostock] {symbol} 估值获取异常: {e}')
+        return None
+
+
+def fetch_valuation(symbol, market, force_full=False):
+    """019Y T2：采集估值数据（PE/PB/PS/PCF/股息率）存入 stock_valuation 表。
+    降级链路：akshare → baostock（仅A股）→ 标记缺失。
+    估值属低频数据（日级），同日跳过。
+    返回: (状态, 消息)
+    """
+    stock_id = get_stock_id(symbol, market)
+    if not stock_id:
+        return 'failed', f'数据库中未找到股票 {symbol}'
+
+    # 日级低频：同日跳过
+    if not force_full:
+        try:
+            conn_chk = get_connection()
+            cursor_chk = conn_chk.cursor()
+            cursor_chk.execute(
+                """SELECT fetched_at FROM data_status
+                   WHERE stock_id = ? AND dimension = 'valuation'
+                   ORDER BY fetched_at DESC LIMIT 1""",
+                (stock_id,),
+            )
+            row = cursor_chk.fetchone()
+            conn_chk.close()
+            if row and row['fetched_at']:
+                last_date = str(row['fetched_at'])[:10]
+                today_str = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
+                if last_date >= today_str:
+                    skip_msg = '同日跳过(估值当日已采集)'
+                    save_data_status(stock_id, 'valuation', 'success', skip_msg)
+                    logger.info(f'[{symbol}] {skip_msg}')
+                    return 'success', skip_msg
+        except Exception as e:
+            logger.warning(f'[{symbol}] 估值同日检查异常(降级为采集): {e}')
+
+    val = None
+    src = None
+    # 主源：akshare（A股/港股）
+    try:
+        val = _fetch_valuation_akshare(symbol, market)
+        if val and val.get('trade_date'):
+            src = 'akshare'
+            logger.info(f'[{symbol}] akshare 估值命中: {val["trade_date"]}')
+    except Exception as e:
+        logger.warning(f'[{symbol}] akshare估值失败(尝试baostock降级): {e}')
+    # 备用源：baostock（仅A股）
+    if not val:
+        try:
+            val = _fetch_valuation_baostock(symbol, market)
+            if val and val.get('trade_date'):
+                src = 'baostock'
+                logger.info(f'[{symbol}] baostock 估值备用源命中: {val["trade_date"]}')
+        except Exception as e:
+            logger.warning(f'[{symbol}] baostock估值失败: {e}')
+
+    if not val or not val.get('trade_date'):
+        fail_msg = 'akshare与baostock估值均失败'
+        if market == 'hk_stock':
+            # baostock 不支持港股，仅 akshare 一路失败（诚实标注，不误导）
+            fail_msg = 'akshare估值失败（港股；baostock不支持港股）'
+        save_data_status(stock_id, 'valuation', 'failed', fail_msg)
+        return 'failed', fail_msg
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO stock_valuation
+        (stock_id, trade_date, pe_ttm, pe, pb_mrq, ps_ttm, ps, pcf_ncf_ttm, dv_ttm, total_mv, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """,
+        (
+            stock_id,
+            val['trade_date'],
+            val.get('pe_ttm'),
+            val.get('pe'),
+            val.get('pb_mrq'),
+            val.get('ps_ttm'),
+            val.get('ps'),
+            val.get('pcf_ncf_ttm'),
+            val.get('dv_ttm'),
+            val.get('total_mv'),
+            src,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    msg = (
+        f'估值已入库({src}): PE_TTM={val.get("pe_ttm")}, '
+        f'PB={val.get("pb_mrq")}, PS_TTM={val.get("ps_ttm")}'
+    )
+    save_data_status(stock_id, 'valuation', 'success', msg)
+    logger.info(f'[{symbol}] {msg}')
+    return 'success', msg
+
+
+def fetch_fundamental_baostock(symbol):
+    """019Y T2：baostock 财务数据备用源（仅A股）。
+    仅在 akshare 财务接口（abstract / analysis_indicator）全部失败时降级使用。
+    query_profit_data 逐季度获取，返回 [(report_date, {db_col: value}), ...] 最新在前。
+    roeAvg/npMargin/gpMargin 为小数比例，×100 转百分比。
+    """
+    code = _bs_code(symbol, 'a_stock')
+    if not code:
+        return []
+    if not _bs_ensure_login():
+        return []
+    try:
+        import baostock as bs
+        now = datetime.now(_CN_TZ)
+        rows_out = []
+        # 近 8 个季度（2 年），最新在前
+        quarters = []
+        for back in range(8):
+            total = now.year * 4 + (now.month - 1) // 3 - back
+            y, q = divmod(total, 4)
+            if q == 0:
+                y, q = y - 1, 4
+            quarters.append((y, q))
+        for y, q in quarters:
+            rs = bs.query_profit_data(code=code, year=y, quarter=q)
+            lst = []
+            while (rs.error_code == '0') & rs.next():
+                lst.append(rs.get_row_data())
+            if not lst:
+                continue
+            rec = dict(zip(rs.fields, lst[0]))
+            stat_date = str(rec.get('statDate', ''))
+            if not stat_date:
+                continue
+            report_date = stat_date[:10]
+            vals = {}
+            roe = _safe_num(rec.get('roeAvg'))
+            np_m = _safe_num(rec.get('npMargin'))
+            gp_m = _safe_num(rec.get('gpMargin'))
+            if roe is not None:
+                vals['roe'] = round(roe * 100, 2)
+            if np_m is not None:
+                vals['net_margin'] = round(np_m * 100, 2)
+            if gp_m is not None:
+                vals['gross_margin'] = round(gp_m * 100, 2)
+            if vals:
+                rows_out.append((report_date, vals))
+        return rows_out
+    except Exception as e:
+        logger.warning(f'[baostock] {symbol} 财务备用源异常: {e}')
+        return []
+
+
+def fetch_restricted_release(symbol, market='a_stock', force_full=False):
+    """019Y T2：采集个股限售解禁明细（风险因子，事件级）存入 stock_restricted_release 表。
+    数据源：akshare stock_restricted_release_queue_em（东方财富个股解禁时间表）。
+    当日快照语义：每次采集整表按 stock_id 重建（DELETE + INSERT）。
+    仅 A股；港股无免费解禁接口返回 skipped。
+    返回: (状态, 消息)
+    """
+    stock_id = get_stock_id(symbol, market)
+    if not stock_id:
+        return 'failed', f'数据库中未找到股票 {symbol}'
+    if market != 'a_stock':
+        save_data_status(stock_id, 'restricted_release', 'skipped', '限售解禁仅A股')
+        return 'skipped', '限售解禁仅A股'
+
+    # 日级低频：同日跳过
+    if not force_full:
+        try:
+            conn_chk = get_connection()
+            cursor_chk = conn_chk.cursor()
+            cursor_chk.execute(
+                """SELECT fetched_at FROM data_status
+                   WHERE stock_id = ? AND dimension = 'restricted_release'
+                   ORDER BY fetched_at DESC LIMIT 1""",
+                (stock_id,),
+            )
+            row = cursor_chk.fetchone()
+            conn_chk.close()
+            if row and row['fetched_at']:
+                last_date = str(row['fetched_at'])[:10]
+                today_str = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
+                if last_date >= today_str:
+                    skip_msg = '同日跳过(限售解禁当日已采集)'
+                    save_data_status(stock_id, 'restricted_release', 'success', skip_msg)
+                    logger.info(f'[{symbol}] {skip_msg}')
+                    return 'success', skip_msg
+        except Exception as e:
+            logger.warning(f'[{symbol}] 限售解禁同日检查异常(降级为采集): {e}')
+
+    try:
+        df, timed_out = _call_ak_with_timeout(
+            lambda: ak.stock_restricted_release_queue_em(symbol=symbol),
+            f'{symbol} 限售解禁',
+        )
+        if timed_out:
+            raise TimeoutError('限售解禁接口超时')
+        conn = get_connection()
+        cursor = conn.cursor()
+        # 当日快照：先清空该股旧记录，再写入本次最新解禁列表
+        cursor.execute('DELETE FROM stock_restricted_release WHERE stock_id = ?', (stock_id,))
+        saved = 0
+        if df is not None and len(df) > 0:
+            for _, r in df.iterrows():
+                raw_date = _pick_val(r, ['解禁时间'], ['解禁时间'])
+                release_date = str(raw_date)[:10] if raw_date is not None else None
+                if not release_date:
+                    continue
+                ratio = _safe_num(_pick_val(r, ['占总市值比例', '占解禁前总股本比例'], ['占总市值比例', '总股本比例']))
+                if ratio is not None:
+                    ratio = round(ratio * 100, 2)  # 小数比例 → 百分比
+                cursor.execute(
+                    """
+                    INSERT INTO stock_restricted_release
+                    (stock_id, release_date, release_type, release_shares,
+                     actual_shares, actual_mv, release_ratio, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        stock_id,
+                        release_date,
+                        str(_pick_val(r, ['限售股类型', '解禁类型'], ['限售股类型', '解禁类型']) or '')
+                        or None,
+                        _safe_num(_pick_val(r, ['解禁数量'], ['解禁数量'])),
+                        _safe_num(_pick_val(r, ['实际解禁数量'], ['实际解禁数量'])),
+                        _safe_num(_pick_val(r, ['实际解禁数量市值', '实际解禁市值'], ['解禁市值'])),
+                        ratio,
+                        'akshare',
+                    ),
+                )
+                saved += 1
+        conn.commit()
+        conn.close()
+        msg = f'限售解禁已入库(akshare): {saved} 条记录'
+        save_data_status(stock_id, 'restricted_release', 'success', msg)
+        logger.info(f'[{symbol}] {msg}')
+        return 'success', msg
+    except Exception as e:
+        save_data_status(stock_id, 'restricted_release', 'failed', str(e))
+        logger.warning(f'[{symbol}] 限售解禁采集失败: {e}')
+        return 'failed', str(e)
 
 
 # ============================================================
@@ -1089,12 +2111,51 @@ def fetch_hk_fundamental(symbol, force_full=False):
 # P0-CAPITAL-001：同花顺全市场批量资金流向源
 # 单次调用返回全 A 股当日资金流向（5197+只），从根因消除东方财富逐只限流。
 # 1 小时缓存（避免重复下载，单次约 6-12s）。
-# 仅含主净额（净额字段），不含分层（超大单/大单/中单/小单），分层由东财逐只补。
+# 018: 同花顺净额为辅助指标（全部资金净流入），非主力净流入。
+# 主力净流入由东方财富逐只采集提供（含分层：超大单/大单/中单/小单）。
 # ============================================================
 _THS_CAPITAL_CACHE = {'data': None, 'ts': 0.0}  # 模块级缓存：{DataFrame, 时间戳}
 _THS_CAPITAL_CACHE_TTL = 3600  # 缓存有效期（秒）= 1 小时
 _THS_CONSECUTIVE_FAIL_COUNT = 0  # FIX-B：THS连续失败计数
 _THS_FAIL_THRESHOLD = 3  # FIX-B：连续失败阈值，达到后标记降级
+_THS_REQUEST_TIMEOUT = 60  # 019I：单次 THS 接口请求超时（秒）
+
+# ============================================================
+# 019C：东方财富（EM）回退循环优化常量
+# 用于 fetch_capital_flow_batch 中 THS批量源失败后的逐只回退循环
+# 机制：错峰 → 分批 → 退避 → 冷却 → 熔断 → 整体软超时
+# ============================================================
+_EM_CONSECUTIVE_FAIL_COUNT = 0  # 进程级连续失败计数（R-4：Flask不重启时跨次批量生效）
+_EM_INTER_DELAY_RANGE = (2.0, 5.0)     # 股票间基础错峰延迟（秒）
+_EM_BATCH_SIZE = 5                     # 分批大小（只）
+_EM_BATCH_GAP_RANGE = (30.0, 60.0)     # 批间间隔（秒）
+_EM_BACKOFF_CAP_SECONDS = 30           # 退避延迟上限（秒）
+_EM_COOLDOWN_FAIL_N = 3                # 冷却触发：连续失败只数
+_EM_COOLDOWN_SECONDS = 60              # 冷却暂停时长（秒）
+_EM_CIRCUIT_BREAK_N = 5                # 熔断触发：连续失败只数
+_EM_FALLBACK_TOTAL_CAP_SECONDS = 600   # 回退循环整体软超时（秒）
+
+# ============================================================
+# 019Q：新浪资金流（lscjfb 主力口径）常量与模块级超时包装
+# _call_with_timeout 复制自 019I 嵌套版（_fetch_capital_flow_ths_batch 内部 L1424-1436），
+# 提升为模块级并新增 timeout 参数（M-3/D-4/M-10）；既有 THS 嵌套版零改动（避免回归面扩大）。
+# 新浪网络调用必须走本模块级 _call_with_timeout，严禁裸调用（含 https 回退的第二次请求）。
+# ============================================================
+_SINA_REQUEST_TIMEOUT = 15  # 019Q：单次新浪接口请求超时（秒），探针实测 0.2~0.6s
+
+
+def _call_with_timeout(fn, label, timeout=_SINA_REQUEST_TIMEOUT):
+    """019Q：模块级 daemon 线程包装网络调用，超时返回 (None, True)，正常返回 (result, False)"""
+    import threading as _threading_019Q
+
+    box = {}
+    t = _threading_019Q.Thread(target=lambda: box.update(r=fn()), daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        logger.warning(f'[网络调用] {label} 超时({timeout}s)，跳过')
+        return None, True
+    return box.get('r'), False
 
 # B11-API-DEDUP：股东增减持接口缓存（10分钟TTL，避免批量时重复调用全市场接口）
 _holder_cache = None
@@ -1125,19 +2186,42 @@ def _fetch_capital_flow_ths_batch():
         )
         return None
 
-    # FIX-B：主接口 stock_fund_flow_individual()
-    df = _try_ths_primary()
+    # 019I：THS 接口调用增加超时保护，防止服务器不响应时无限阻塞
+    # M-1 修正：禁止使用 with ThreadPoolExecutor（with 退出时 shutdown(wait=True)
+    #          会 join 挂死线程，修复无效——经架构师运行时实验 + PM 独立复现确认）
+    # 改用 daemon 线程 join(timeout) 模式：
+    #   - daemon 线程不参与解释器退出 join，进程退出不被阻塞（R-1 消除）
+    #   - t.join(timeout=N) 超时后立即返回，不等待挂死线程
+    import threading as _threading_019I
 
-    # FIX-B：主接口失败时重试1次（间隔5秒）
-    if df is None:
+    def _call_with_timeout(fn, label):
+        """019I：daemon 线程包装 THS 接口调用，超时返回 (None, True)，正常返回 (result, False)"""
+        box = {}
+        t = _threading_019I.Thread(
+            target=lambda: box.update(r=fn()),
+            daemon=True,
+        )
+        t.start()
+        t.join(timeout=_THS_REQUEST_TIMEOUT)
+        if t.is_alive():
+            logger.warning(f'[同花顺批量] {label} 超时({_THS_REQUEST_TIMEOUT}s)，跳过')
+            return None, True
+        return box.get('r'), False
+
+    # FIX-B：主接口 stock_fund_flow_individual()
+    df, _primary_timed_out = _call_with_timeout(_try_ths_primary, '主接口')
+
+    # 019I M-2：主接口超时（hang）视为服务器不响应，跳过重试直接尝试备选
+    #（THS 阶段上界 185s→120s；非超时的普通失败仍按 FIX-B 重试1次）
+    if df is None and not _primary_timed_out:
         logger.info('[同花顺批量] 主接口失败，5秒后重试1次...')
         time.sleep(5)
-        df = _try_ths_primary()
+        df, _ = _call_with_timeout(_try_ths_primary, '主接口(重试)')
 
     # FIX-B：重试仍失败时，尝试备选接口 stock_individual_fund_flow_rank()
     if df is None:
         logger.info('[同花顺批量] 重试仍失败，尝试备选接口 stock_individual_fund_flow_rank()...')
-        df = _try_ths_rank_backup()
+        df, _ = _call_with_timeout(_try_ths_rank_backup, '备选接口')
 
     if df is not None:
         _THS_CONSECUTIVE_FAIL_COUNT = 0  # 成功则重置计数
@@ -1195,43 +2279,170 @@ def _try_ths_rank_backup():
         return None
 
 
+def _em_batch_collect(symbols, log_prefix='EM回退'):
+    """
+    019C/019E 共享：EM 逐只采集循环（错峰/分批/退避/冷却/熔断/软超时六项机制）。
+    直接沿用共享常量 _EM_INTER_DELAY_RANGE ~ _EM_FALLBACK_TOTAL_CAP_SECONDS
+    及模块级计数器 _EM_CONSECUTIVE_FAIL_COUNT，不新增平行常量。
+
+    Args:
+        symbols: list[str] 待采集 A 股代码列表
+        log_prefix: str 日志前缀（'EM回退' / '资金面补采'，QA 依赖区分）
+
+    Returns:
+        dict: {'success_count': n, 'fail_count': n, 'source': str}
+    """
+    global _EM_CONSECUTIVE_FAIL_COUNT
+    em_success = 0
+    em_fail = 0
+    start_ts = time.time()
+    cooldown_done = False  # 本轮冷却是否已触发（避免重复暂停）
+    timed_out = False
+    circuit_broken = False
+    remaining = list(symbols)
+
+    for idx, sym in enumerate(remaining):
+        # --- 6. 整体软超时检查（每只开始前） ---
+        elapsed = time.time() - start_ts
+        if elapsed > _EM_FALLBACK_TOTAL_CAP_SECONDS:
+            unprocessed = remaining[idx:]
+            logger.warning(
+                f'[{log_prefix}] 整体软超时({int(elapsed)}s>{_EM_FALLBACK_TOTAL_CAP_SECONDS}s)，'
+                f'终止剩余 {len(unprocessed)} 只未采集: {unprocessed}'
+            )
+            em_fail += len(unprocessed)
+            timed_out = True
+            break
+
+        # --- 5. 熔断检查（模块级计数 R-3/R-4） ---
+        if _EM_CONSECUTIVE_FAIL_COUNT >= _EM_CIRCUIT_BREAK_N:
+            unprocessed = remaining[idx:]
+            logger.warning(
+                f'[{log_prefix}] 熔断触发（连续失败{_EM_CONSECUTIVE_FAIL_COUNT}'
+                f'>={_EM_CIRCUIT_BREAK_N}），'
+                f'终止本轮回退，剩余 {len(unprocessed)} 只未采集: {unprocessed}'
+            )
+            em_fail += len(unprocessed)
+            circuit_broken = True
+            break
+
+        # --- 2. 分批间隔（每_BATCH_SIZE只进入新批次） ---
+        if idx > 0 and idx % _EM_BATCH_SIZE == 0:
+            batch_gap = _random.uniform(*_EM_BATCH_GAP_RANGE)
+            logger.info(
+                f'[{log_prefix}] 进入第{idx // _EM_BATCH_SIZE + 1}批'
+                f'（第{idx + 1}只），批间停顿{batch_gap:.1f}s'
+            )
+            time.sleep(batch_gap)
+        elif idx > 0:
+            # --- 1. 错峰 + 3. 退避 ---
+            base_delay = _random.uniform(*_EM_INTER_DELAY_RANGE)
+            if _EM_CONSECUTIVE_FAIL_COUNT > 0:
+                delay = min(
+                    base_delay * (2 ** _EM_CONSECUTIVE_FAIL_COUNT),
+                    _EM_BACKOFF_CAP_SECONDS,
+                )
+                logger.info(
+                    f'[{log_prefix}] {sym} 退避延迟{delay:.1f}s'
+                    f'（连续失败{_EM_CONSECUTIVE_FAIL_COUNT}次，'
+                    f'基础{base_delay:.1f}s×2^{_EM_CONSECUTIVE_FAIL_COUNT}）'
+                )
+            else:
+                delay = base_delay
+                logger.info(f'[{log_prefix}] {sym} 错峰延迟{delay:.1f}s')
+            time.sleep(delay)
+
+        # --- 4. 冷却（连续失败≥阈值时额外暂停一次） ---
+        if (
+            _EM_CONSECUTIVE_FAIL_COUNT >= _EM_COOLDOWN_FAIL_N
+            and not cooldown_done
+        ):
+            logger.warning(
+                f'[{log_prefix}] 连续失败{_EM_CONSECUTIVE_FAIL_COUNT}'
+                f'>={_EM_COOLDOWN_FAIL_N}，'
+                f'冷却暂停{_EM_COOLDOWN_SECONDS}s后继续...'
+            )
+            time.sleep(_EM_COOLDOWN_SECONDS)
+            cooldown_done = True
+
+        # --- 采集 ---
+        try:
+            result = fetch_capital_flow(sym, 'a_stock')
+            if result and result[0] == 'success':
+                em_success += 1
+                if _EM_CONSECUTIVE_FAIL_COUNT > 0:
+                    logger.info(
+                        f'[{log_prefix}] {sym} 成功，连续失败计数重置'
+                        f'({_EM_CONSECUTIVE_FAIL_COUNT}→0)'
+                    )
+                _EM_CONSECUTIVE_FAIL_COUNT = 0  # 7. 计数重置（R-3：含同日跳过）
+                cooldown_done = False  # 成功后重置冷却标记
+            else:
+                em_fail += 1
+                _EM_CONSECUTIVE_FAIL_COUNT += 1
+                logger.warning(
+                    f'[{log_prefix}] {sym} 采集失败'
+                    f'(result={result[0] if result else "None"})，'
+                    f'连续失败计数={_EM_CONSECUTIVE_FAIL_COUNT}'
+                )
+        except Exception as e:
+            em_fail += 1
+            _EM_CONSECUTIVE_FAIL_COUNT += 1
+            logger.warning(
+                f'[{log_prefix}] {sym} 采集异常: {e}，'
+                f'连续失败计数={_EM_CONSECUTIVE_FAIL_COUNT}'
+            )
+
+    # 构造返回值（标注终止原因）
+    source = f'EM逐只({log_prefix}'
+    if timed_out:
+        source += '，软超时终止'
+    if circuit_broken:
+        source += f'，熔断终止(EM连续失败={_EM_CONSECUTIVE_FAIL_COUNT})'
+    source += f'，成功{em_success}/失败{em_fail})'
+    return {
+        'success_count': em_success,
+        'fail_count': em_fail,
+        'source': source,
+    }
+
+
 def fetch_capital_flow_batch(a_stock_symbols):
     """
-    P0-CAPITAL-001 批量资金面预取入口。
-    调用同花顺全市场批量源，一次性写入所有 A 股标的的当日资金流向。
-    后续逐只 fetch_capital_flow 调用时，前置校验层会识别到已有数据而跳过东财采集。
+    018改造：同花顺批量预取 — 仅写入辅助指标 ths_net_inflow。
+    同花顺"净额"= 全部资金净流入（总主动买入-总主动卖出），非主力净流入。
+    本函数不写入 main_net_inflow / main_net_inflow_pct；
+    主力净流入链路为：东财三层 → 新浪 lscjfb 主力口径(sina_main) → 估算兜底（仅展示不参评）；
+    019S 起不再使用同花顺顶替主力净流入（ths_total 仅为历史存量，不产生新顶替行）。
+    同花顺净额作为辅助指标，用于判断主力与散户行为背离。
 
     Args:
         a_stock_symbols: list[str]，A 股代码列表（如 ['600276','000333',...]）
 
     Returns:
-        dict: {'success_count': n, 'fail_count': n, 'source': '同花顺批量'}
+        dict: {'success_count': n, 'fail_count': n, 'source': '同花顺批量(辅助指标)'}
     """
+    # 019G：交易日校验 — 周末（周六/周日）跳过 THS 批量预取（含补采），
+    # 避免非交易日 THS 接口返回旧数据被写入。法定节假日落在工作日时
+    # 仍执行（THS 返回前一交易日数据，低概率可接受）。
+    now = datetime.now(_CN_TZ)
+    if now.weekday() >= 5:  # 5=周六, 6=周日
+        logger.info(f'[同花顺批量] 非交易日（{now.strftime("%A")}），跳过 THS 批量预取（含补采）')
+        return {
+            'success_count': 0, 'fail_count': 0,
+            'source': '同花顺批量(非交易日跳过)',
+            'skipped': True, 'reason': 'non_trading_day'
+        }
+
     if not a_stock_symbols:
         return {'success_count': 0, 'fail_count': 0, 'source': '同花顺批量(空列表)'}
 
     today_str = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
     df = _fetch_capital_flow_ths_batch()
     if df is None:
-        # FIX-B：THS不可用时回退EM逐只采集
-        logger.warning('[同花顺批量] 批量源不可用（含重试+备选均失败），回退EM逐只采集')
-        em_success = 0
-        em_fail = 0
-        for sym in a_stock_symbols:
-            try:
-                result = fetch_capital_flow(sym, 'a_stock')
-                if result and result[0] == 'success':
-                    em_success += 1
-                else:
-                    em_fail += 1
-            except Exception as e:
-                em_fail += 1
-                logger.warning(f'[同花顺批量] EM回退 {sym} 失败: {e}')
-        return {
-            'success_count': em_success,
-            'fail_count': em_fail,
-            'source': f'EM逐只回退(THS连续失败={_THS_CONSECUTIVE_FAIL_COUNT})',
-        }
+        # FIX-B：THS不可用时回退EM逐只采集（019C六项机制增强，已提取为_em_batch_collect共享函数）
+        logger.warning('[同花顺批量] 批量源不可用（含重试+备选均失败），回退EM逐只采集（019C增强）')
+        return _em_batch_collect(a_stock_symbols, log_prefix='EM回退')
 
     # 同花顺股票代码列可能为 int64（000333→333）或字符串，统一规整为6位字符串
     def _norm_code(v):
@@ -1278,25 +2489,94 @@ def fetch_capital_flow_batch(a_stock_symbols):
             fail_count += 1
             continue
 
-        main_net = round(main_net_yuan / 1e4, 2)  # 元→万元
-        main_net_pct = round(main_net_yuan / turnover_yuan * 100, 2) if turnover_yuan else None
+        ths_net = round(main_net_yuan / 1e4, 2)  # 元→万元
 
+        # 018: 仅写入辅助字段 ths_net_inflow，不影响 main_net_inflow
+        # 使用 UPDATE（当天已有东财数据时）或 INSERT OR IGNORE（当天无数据时）
         cursor.execute(
             """
-            INSERT OR REPLACE INTO raw_capital_flow
-            (stock_id, trade_date, main_net_inflow, main_net_inflow_pct)
-            VALUES (?, ?, ?, ?)
+            UPDATE raw_capital_flow SET ths_net_inflow = ?
+            WHERE stock_id = ? AND trade_date = ?
         """,
-            (stock_id, today_str, main_net, main_net_pct),
+            (ths_net, stock_id, today_str),
         )
+        if cursor.rowcount == 0:
+            # 当天尚无东财数据，插入占位行（仅含 ths_net_inflow）
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO raw_capital_flow
+                (stock_id, trade_date, ths_net_inflow)
+                VALUES (?, ?, ?)
+            """,
+                (stock_id, today_str, ths_net),
+            )
         success_count += 1
 
     conn.commit()
     conn.close()
     logger.info(
-        f'[同花顺批量] 批量预取完成: 成功 {success_count}/{len(a_stock_symbols)}，source=同花顺批量'
+        f'[同花顺批量] 辅助指标写入完成: 成功 {success_count}/{len(a_stock_symbols)}，source=同花顺批量(辅助指标)'
     )
-    return {'success_count': success_count, 'fail_count': fail_count, 'source': '同花顺批量'}
+
+    # ============================================================
+    # 019E Task 1：批量补采正向触发机制（D1）
+    # THS 批量成功后，检查哪些股票仍缺少当日真实资金面数据，
+    # 对缺失股票执行 EM 逐只补采（完整复用 019C 六项机制）。
+    # 评审 E-2：补采清单 = 输入列表 - 已有真实数据的股票
+    # ============================================================
+    import inspect as _inspect
+    try:
+        _caller_file = _inspect.stack()[1].filename
+        _trigger_source = '日报批次' if 'daily_report' in _caller_file else 'batch-analyze'
+    except Exception:
+        _trigger_source = 'batch-analyze'
+
+    # 补采清单生成（评审 E-2 裁定）
+    # 019Q Task 3（M-5）：补采清单 SQL 扩为 NOT IN ('ths_total','sina_main')。
+    # 语义：只有东财真数据（capital_source IS NULL 且非估算）才算"已完成"；
+    # sina_main / ths_total 行仍进入补采清单 —— 东财 30 分钟内恢复时可覆盖回补
+    # （"东财恢复后自动回补"的实现），新浪重采不降级已有数据（019Q QA F9 实证）。
+    # 019S：'ths_total' 字面量保留不动——防御存量 ths_total 行（方案 b 处置后已清零），
+    # 若删除则存量行被计为"已有真实数据"，东财恢复后永不回补覆盖；
+    # 待存量清零确认后经新批次评审简化（可改为 NOT IN ('sina_main') 或删除）。
+    supplement_symbols = list(a_stock_symbols)
+    try:
+        conn_sup = get_connection()
+        cursor_sup = conn_sup.cursor()
+        real_sids = set()
+        for sym in a_stock_symbols:
+            sid = get_stock_id(sym, 'a_stock')
+            if sid:
+                cursor_sup.execute(
+                    'SELECT 1 FROM raw_capital_flow WHERE stock_id=? AND trade_date=? '
+                    'AND main_net_inflow IS NOT NULL '
+                    'AND (is_estimated = 0 OR is_estimated IS NULL) '
+                    "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main'))",
+                    (sid, today_str),
+                )
+                if cursor_sup.fetchone():
+                    real_sids.add(sid)
+        conn_sup.close()
+        supplement_symbols = [
+            s for s in a_stock_symbols
+            if get_stock_id(s, 'a_stock') not in real_sids
+        ]
+    except Exception as e:
+        logger.warning(f'[资金面补采] 补采清单生成异常(降级为全量补采): {e}')
+
+    if supplement_symbols:
+        logger.info(
+            f'[资金面补采] 触发来源={_trigger_source}，'
+            f'补采清单({len(supplement_symbols)}/{len(a_stock_symbols)}只): {supplement_symbols}'
+        )
+        supplement_result = _em_batch_collect(supplement_symbols, log_prefix='资金面补采')
+        return {
+            'success_count': success_count + supplement_result['success_count'],
+            'fail_count': fail_count + supplement_result['fail_count'],
+            'source': f'同花顺批量(辅助指标) + 资金面补采(成功{supplement_result["success_count"]}/失败{supplement_result["fail_count"]})',
+        }
+
+    return {'success_count': success_count, 'fail_count': fail_count, 'source': '同花顺批量(辅助指标)'}
 
 
 def _get_em_market_code(symbol):
@@ -1326,6 +2606,40 @@ def _parse_cn_amount(val_str):
         return None
 
 
+def _safe_num(val):
+    """019N: 安全数值转换。None/空串/'nan'/'NaN'/'-'/'None'(strip后)/数值NaN/±Inf → None；
+    ValueError/TypeError → None；其余 → float"""
+    if val is None:
+        return None
+    if isinstance(val, str):
+        s = val.strip()
+        if s == '' or s.lower() in ('nan', 'none', '-', 'inf', '-inf'):
+            return None
+        try:
+            return float(s)
+        except (ValueError, TypeError):
+            return None
+    try:
+        f = float(val)
+    except (ValueError, TypeError):
+        return None
+    if pd.isna(f) or not math.isfinite(f):
+        return None
+    return f
+
+
+def _safe_float_wan(val):
+    """安全转换（元→万元，round 2），None 透传"""
+    f = _safe_num(val)
+    return round(f / 1e4, 2) if f is not None else None
+
+
+def _safe_float_pct(val):
+    """安全转换（% 字段，round 2），None 透传"""
+    f = _safe_num(val)
+    return round(f, 2) if f is not None else None
+
+
 def _fetch_capital_flow_em_individual(symbol, market):
     """
     直接请求东方财富个股资金流向接口（不走akshare，避免代理干扰）。
@@ -1349,7 +2663,7 @@ def _fetch_capital_flow_em_individual(symbol, market):
     logger.info(f'请求东方财富个股资金流向: {symbol} (market={market}, secid={secid})')
 
     try:
-        resp = _http_get_em(url, params=params, max_retries=1)
+        resp = _http_get_em(url, params=params)
         data = resp.json()
 
         klines = data.get('data', {}).get('klines', [])
@@ -1366,18 +2680,19 @@ def _fetch_capital_flow_em_individual(symbol, market):
                 continue
             row = {
                 '日期': parts[0],
-                '主力净流入-净额': float(parts[1]) if parts[1] else 0,
-                '小单净流入-净额': float(parts[2]) if parts[2] else 0,
-                '中单净流入-净额': float(parts[3]) if parts[3] else 0,
-                '大单净流入-净额': float(parts[4]) if parts[4] else 0,
-                '超大单净流入-净额': float(parts[5]) if parts[5] else 0,
-                '主力净流入-净占比': float(parts[6]) if parts[6] else 0,
-                '小单净流入-净占比': float(parts[7]) if parts[7] else 0,
-                '中单净流入-净占比': float(parts[8]) if parts[8] else 0,
-                '大单净流入-净占比': float(parts[9]) if parts[9] else 0,
-                '超大单净流入-净占比': float(parts[10]) if parts[10] else 0,
-                '收盘价': float(parts[11]) if parts[11] else 0,
-                '涨跌幅': float(parts[12]) if parts[12] else 0,
+                # 019N M-2: 改用 _safe_num（None 语义），'-'/空/NaN 不再抛 ValueError 炸整批
+                '主力净流入-净额': _safe_num(parts[1]),
+                '小单净流入-净额': _safe_num(parts[2]),
+                '中单净流入-净额': _safe_num(parts[3]),
+                '大单净流入-净额': _safe_num(parts[4]),
+                '超大单净流入-净额': _safe_num(parts[5]),
+                '主力净流入-净占比': _safe_num(parts[6]),
+                '小单净流入-净占比': _safe_num(parts[7]),
+                '中单净流入-净占比': _safe_num(parts[8]),
+                '大单净流入-净占比': _safe_num(parts[9]),
+                '超大单净流入-净占比': _safe_num(parts[10]),
+                '收盘价': _safe_num(parts[11]),
+                '涨跌幅': _safe_num(parts[12]),
             }
             results.append(row)
 
@@ -1414,7 +2729,7 @@ def _fetch_capital_flow_em(symbol, market):
         'ut': 'b2884a393a59ad64002292a3e90d46a5',
     }
     logger.info(f'请求资金流向: secid={secid}, url={url}')
-    resp = _http_get_em(url, params=params, max_retries=1)
+    resp = _http_get_em(url, params=params)
     data = resp.json()
 
     klines = data.get('data', {}).get('klines', [])
@@ -1667,15 +2982,144 @@ def _fetch_capital_flow_netease(symbol, market):
         return None
 
 
+def _fetch_capital_flow_sina_main(symbol, market, target_date=None):
+    """
+    019Q Task 1：新浪资金流主力口径采集（lscjfb 历史逐日分单接口，A股）。
+
+    ⚠️ 命名规避（M-1）：既有估算源 _fetch_capital_flow_sina（hq.sinajs.cn 实时行情估算，
+    019E 链路）零改动；本函数为新增主力口径源，命名为 _fetch_capital_flow_sina_main。
+
+    网络规格（M-3/D-4/M-10）：
+    - 协议 https 优先、失败回退 http（仅回退 1 次，不做代理尝试）
+    - GBK 解码（errors='replace'）；必须带 UA（_random_ua()）+ Referer https://finance.sina.com.cn
+    - 禁用系统代理：urllib.build_opener(ProxyHandler({}))
+    - 全部网络调用（含 https 回退的第二次请求）走模块级 _call_with_timeout（单次 15s）
+    - 每只请求后间隔 0.5~1.0s（防限流；29 只串行上限 ~29s，仅在 EM 失败路径发生）
+
+    严格日期匹配（M-2，正确性红线）：lscjfb 是历史逐日表，非交易日/当日未发布时
+    "最新行"即上一交易日（探针实证：周日最新行=08-07）。必须 opendate == target_date
+    精确匹配才返回，不匹配一律返回 None 落回下一层，严禁"取最新行"实现。
+
+    Args:
+        symbol: str 股票代码（A股，6开头→sh 前缀，0/3开头→sz 前缀；港股不适用返回 None）
+        market: str 市场（'a_stock'）
+        target_date: str YYYY-MM-DD；None 表示当日（当日采集 num=2，回补窗口 num=5）
+
+    Returns:
+        dict 或 None：
+        {'trade_date', 'main_net_inflow', 'super_large_net', 'large_net',
+         'medium_net', 'small_net'}（万元，round 2）
+        main_net_inflow = (r0_net + r1_net) / 1e4（主力 = 超大单 + 大单，与 EM 同定义，
+        行内自洽 main == super_large + large）；四档之和 == netamount/1e4（新浪恒等式）。
+        不写 main_net_inflow_pct（lscjfb ratioamount 为总净占比 netamount/turnover，
+        非主力净流入占比，口径错位，M-4/D-6）。
+    """
+    try:
+        if market != 'a_stock' or not symbol:
+            return None
+
+        # A股 symbol → 新浪 daima 映射（与 019K D-6 一致，港股不适用）
+        daima = ('sh' + symbol) if symbol.startswith('6') else ('sz' + symbol)
+
+        if target_date is None:
+            target_date = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
+            num = 2  # 当日采集：覆盖今日+上一交易日
+        else:
+            num = 5  # 回补窗口：覆盖目标日期（5 个交易日窗口）
+
+        def _request_once(proto):
+            url = (
+                f'{proto}://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/'
+                f'MoneyFlow.ssl_qsfx_lscjfb?page=1&num={num}&sort=opendate&asc=0&daima={daima}'
+            )
+            req = _urlreq.Request(
+                url,
+                headers={'User-Agent': _random_ua(), 'Referer': 'https://finance.sina.com.cn'},
+            )
+            opener = _urlreq.build_opener(_urlreq.ProxyHandler({}))  # 禁用系统代理
+            resp = opener.open(req, timeout=_SINA_REQUEST_TIMEOUT)
+            return resp.read().decode('gbk', errors='replace')
+
+        # https 优先、失败回退 http（仅回退 1 次）；两次均走 _call_with_timeout（M-10）
+        text, _timed_out = _call_with_timeout(
+            lambda: _request_once('https'), f'新浪lscjfb https({symbol})'
+        )
+        if text is None:
+            text, _ = _call_with_timeout(
+                lambda: _request_once('http'), f'新浪lscjfb http回退({symbol})'
+            )
+        if text is None:
+            logger.warning(f'[{symbol}] 新浪lscjfb https/http 均失败或超时')
+            return None
+
+        # JSON 解析健壮性（R-8）：接口偶发 null/非严格 JSON；非数组/空 → None
+        data = None
+        try:
+            data = json.loads(text)
+        except Exception:
+            try:
+                start = text.find('[')
+                end = text.rfind(']')
+                if start >= 0 and end > start:
+                    data = json.loads(text[start:end + 1])
+            except Exception:
+                data = None
+        if not isinstance(data, list) or not data:
+            logger.warning(f'[{symbol}] 新浪lscjfb 返回非数组或为空')
+            return None
+
+        # 严格日期匹配：opendate == target_date 才写，严禁"取最新行"（M-2）
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            opendate = str(row.get('opendate', '') or '').strip()
+            if opendate != target_date:
+                continue
+            # 金额统一走 _safe_float_wan（019N 模式，元→万元，None 语义）
+            r0_wan = _safe_float_wan(row.get('r0_net'))  # 超大单净额
+            r1_wan = _safe_float_wan(row.get('r1_net'))  # 大单净额
+            r2_wan = _safe_float_wan(row.get('r2_net'))  # 中单净额
+            r3_wan = _safe_float_wan(row.get('r3_net'))  # 小单净额
+            if any(v is None for v in (r0_wan, r1_wan, r2_wan, r3_wan)):
+                logger.warning(f'[{symbol}] 新浪lscjfb {opendate} 分单字段缺失，放弃')
+                return None
+            main_wan = round(r0_wan + r1_wan, 2)  # 主力 = 超大单 + 大单（行内自洽）
+            logger.info(
+                f'[{symbol}] 新浪lscjfb 命中 {opendate}: main={main_wan} 万'
+                f'（r0={r0_wan}, r1={r1_wan}, r2={r2_wan}, r3={r3_wan}）'
+            )
+            return {
+                'trade_date': opendate,
+                'main_net_inflow': main_wan,
+                'super_large_net': r0_wan,
+                'large_net': r1_wan,
+                'medium_net': r2_wan,
+                'small_net': r3_wan,
+            }
+        # 无当日行（如非交易日最新行=上一交易日）→ 不写入，落回下一层
+        logger.info(f'[{symbol}] 新浪lscjfb 无 {target_date} 行（最新行=上一交易日），返回 None')
+        return None
+    except Exception as e:
+        logger.warning(f'[{symbol}] 新浪lscjfb 顶替采集异常: {e}')
+        return None
+    finally:
+        # 每只请求后间隔 0.5~1.0s（防限流）
+        time.sleep(_random.uniform(0.5, 1.0))
+
+
 def fetch_capital_flow(symbol, market):
     """
     采集资金面数据。
-    P3-A验收前置修复后策略：仅使用东方财富真实数据源，禁用所有估算源。
-    Layer 1: 东方财富 push2his 个股历史资金流向（A股+港股）
-    Layer 2: 东方财富 push2 实时资金流向（A股+港股）
+    主力净流入来源阶梯（019S 定稿，M-11 更新）：
+    Layer 1: 东方财富 push2his 个股历史资金流向（A股+港股，真实，capital_source=NULL）
+    Layer 2: 东方财富 push2 实时资金流向（A股+港股，真实）
     Layer 3: akshare stock_individual_fund_flow（仅A股，底层仍为东方财富）
-    全部失败时返回failed，不降级到估算源（新浪/腾讯/网易已禁用）。
-    同日已有真实数据时自动跳过采集（防覆盖机制）。
+    EM 三层全失败时降级阶梯：
+      ① 新浪 lscjfb 主力口径顶替（capital_source='sina_main'，r0+r1 超大单+大单，
+         is_estimated=0 参与评分，019Q）
+      ② 估算兜底（is_estimated=1，仅展示，不参与评分；019S 起不再使用同花顺顶替主力净流入）
+    链路：东财三层 → 新浪 lscjfb 主力口径(sina_main) → 估算兜底（仅展示不参评）。
+    同日已有真实数据时自动跳过采集（防覆盖机制：EM > 新浪 > 估算）。
     """
     stock_id = get_stock_id(symbol, market)
     if not stock_id:
@@ -1683,25 +3127,38 @@ def fetch_capital_flow(symbol, market):
 
     warnings = []
     saved_count = 0
+    skipped = 0  # 019N: 跳过的异常数据行数（EM 三层全字段 None 行，不写 NULL 占位）
     source = ''
 
     # ============================================================
-    # P0-CAPITAL-001 前置校验层：同花顺批量预取/东财已有的当日真实数据，
-    # 一律视为已采集完成，跳过本次逐只采集（从根因消除东方财富批量限流）。
-    # 仅作为前置 gate，不修改下方 L1091 防覆盖 / L1225 early return 既有逻辑。
+    # 018/019K/019Q: 前置校验层 — 仅检测东方财富已写入的当日真实数据。
+    # 同花顺批量预取仅写入辅助字段 ths_net_inflow，不会触发本跳过逻辑。
+    # 019K: THS 顶替行（capital_source='ths_total'）同样不触发跳过——
+    # 019Q: 新浪顶替行（capital_source='sina_main'）同样不触发跳过——
+    # 东财恢复后必须能重采覆盖，故本跳过 SQL 显式排除顶替行（M-5 扩展 NOT IN）。
+    # 019S 起主力净流入链路为：东财三层 → 新浪 lscjfb 主力口径(sina_main) → 估算兜底
+    # （仅展示不参评）；ths_total 仅为历史存量，不再产生新顶替行。
     # ============================================================
     today_str_pre = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
     conn_pre = get_connection()
     cursor_pre = conn_pre.cursor()
+    # 019E Task 2.4：前置校验适配——估算行（is_estimated=1）不阻止 EM 恢复后重写
+    # 019K Task 3：前置校验排除 THS 顶替行（capital_source='ths_total'），保证 EM 恢复可回补
+    # 019Q Task 3：防覆盖 SQL 扩展为 NOT IN ('ths_total','sina_main')（M-5）
+    # 019S：'ths_total' 字面量保留不动——防御存量 ths_total 行（08-05/08-06 共 27 行），
+    # 若删除则存量行会被误判为"已有真实数据"，东财恢复后永不回补覆盖；
+    # 待存量清零后（方案 b 处置 + 只读断言）经新批次评审简化。
     cursor_pre.execute(
-        'SELECT COUNT(*) AS cnt FROM raw_capital_flow WHERE stock_id = ? AND trade_date = ?',
+        'SELECT COUNT(*) AS cnt FROM raw_capital_flow WHERE stock_id = ? AND trade_date = ? '
+        'AND main_net_inflow IS NOT NULL AND (is_estimated = 0 OR is_estimated IS NULL) '
+        "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main'))",
         (stock_id, today_str_pre),
     )
     pre_cnt = cursor_pre.fetchone()['cnt']
     conn_pre.close()
     if pre_cnt > 0:
         skip_msg = f'同日跳过(已有真实资金流数据,记录数={pre_cnt})'
-        logger.info(f'[{symbol}] {skip_msg}（同花顺批量预取或东方财富已写入）')
+        logger.info(f'[{symbol}] {skip_msg}（东方财富已写入）')
         save_data_status(stock_id, 'capital', 'success', skip_msg)
         return 'success', f'今日已有真实资金流数据（{pre_cnt}条），跳过采集'
 
@@ -1735,27 +3192,34 @@ def fetch_capital_flow(symbol, market):
         if rows_data:
             conn = get_connection()
             cursor = conn.cursor()
+            skipped = 0
 
             for row in rows_data:
                 trade_date = str(row.get('日期', '')).strip()
                 if not trade_date:
                     continue
 
-                # 东财返回的金额单位为元，写入DB前统一转换为万元（÷10000，保留2位小数）
-                # 占比字段（%）不转换
-                main_net = round(float(row.get('主力净流入-净额', 0) or 0) / 1e4, 2)
-                main_net_pct = round(float(row.get('主力净流入-净占比', 0) or 0), 2)
-                super_large = round(float(row.get('超大单净流入-净额', 0) or 0) / 1e4, 2)
-                large = round(float(row.get('大单净流入-净额', 0) or 0) / 1e4, 2)
-                medium = round(float(row.get('中单净流入-净额', 0) or 0) / 1e4, 2)
-                small = round(float(row.get('小单净流入-净额', 0) or 0) / 1e4, 2)
+                # 019N: 安全转换（None/NaN/'-'/±Inf → None，移除 or 0 伪造零），金额元→万元，占比不转换
+                main_net = _safe_float_wan(row.get('主力净流入-净额'))
+                main_net_pct = _safe_float_pct(row.get('主力净流入-净占比'))
+                super_large = _safe_float_wan(row.get('超大单净流入-净额'))
+                large = _safe_float_wan(row.get('大单净流入-净额'))
+                medium = _safe_float_wan(row.get('中单净流入-净额'))
+                small = _safe_float_wan(row.get('小单净流入-净额'))
 
+                # 019N: 六字段全 None → 跳过该行（不写 NULL 占位行、不清空该日既有字段）
+                if all(v is None for v in (main_net, main_net_pct, super_large, large, medium, small)):
+                    skipped += 1
+                    continue
+
+                # 019E M-7：EM 写入显式携带 is_estimated=0（防御估算→真实覆盖时标记归位）
+                # 019K Task 3：EM 写入显式携带 capital_source=NULL（顶替行被 EM 覆盖后来源归位）
                 cursor.execute(
                     """
                     INSERT OR REPLACE INTO raw_capital_flow
                     (stock_id, trade_date, main_net_inflow, main_net_inflow_pct,
-                     super_large_net, large_net, medium_net, small_net)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     super_large_net, large_net, medium_net, small_net, is_estimated, capital_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
                 """,
                     (
                         stock_id,
@@ -1768,12 +3232,16 @@ def fetch_capital_flow(symbol, market):
                         small,
                     ),
                 )
-                saved_count += 1
+                # 019N: saved_count 仅计主字段 main 非 None 的行（假成功修正）
+                if main_net is not None:
+                    saved_count += 1
 
             conn.commit()
             conn.close()
             source = '东方财富(个股历史)'
-            logger.info(f'[{symbol}] 资金面保存成功: {saved_count}天历史数据')
+            logger.info(
+                f'[{symbol}] 资金面保存成功: {saved_count}天有效数据, 跳过 {skipped} 天异常数据'
+            )
         else:
             warnings.append('东方财富个股资金流向返回空数据')
     except Exception as e:
@@ -1789,24 +3257,35 @@ def fetch_capital_flow(symbol, market):
             elif klines:
                 conn = get_connection()
                 cursor = conn.cursor()
+                skipped = 0
 
                 for line in klines:
                     parts = line.split(',')
                     if len(parts) >= 6:
                         trade_date = parts[0]
-                        # 元转万元，保留2位小数
-                        main_net = round(float(parts[1]) / 1e4, 2) if parts[1] else 0
-                        small_net = round(float(parts[2]) / 1e4, 2) if parts[2] else 0
-                        medium_net = round(float(parts[3]) / 1e4, 2) if parts[3] else 0
-                        large_net = round(float(parts[4]) / 1e4, 2) if parts[4] else 0
-                        super_large_net = round(float(parts[5]) / 1e4, 2) if parts[5] else 0
+                        # 019N: 安全转换（parts 为原始字符串，'nan'/'-'/空 → None），元转万元
+                        main_net = _safe_float_wan(parts[1])
+                        small_net = _safe_float_wan(parts[2])
+                        medium_net = _safe_float_wan(parts[3])
+                        large_net = _safe_float_wan(parts[4])
+                        super_large_net = _safe_float_wan(parts[5])
 
+                        # 019N: 五字段全 None → 跳过该行（不写 NULL 占位行）
+                        if all(
+                            v is None
+                            for v in (main_net, small_net, medium_net, large_net, super_large_net)
+                        ):
+                            skipped += 1
+                            continue
+
+                        # 019E M-7：EM 写入显式携带 is_estimated=0
+                        # 019K Task 3：EM 写入显式携带 capital_source=NULL（顶替行被 EM 覆盖后来源归位）
                         cursor.execute(
                             """
                             INSERT OR REPLACE INTO raw_capital_flow
                             (stock_id, trade_date, main_net_inflow,
-                             super_large_net, large_net, medium_net, small_net)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                             super_large_net, large_net, medium_net, small_net, is_estimated, capital_source)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL)
                         """,
                             (
                                 stock_id,
@@ -1818,7 +3297,9 @@ def fetch_capital_flow(symbol, market):
                                 small_net,
                             ),
                         )
-                        saved_count += 1
+                        # 019N: saved_count 仅计主字段 main 非 None 的行
+                        if main_net is not None:
+                            saved_count += 1
 
                 conn.commit()
                 conn.close()
@@ -1837,25 +3318,36 @@ def fetch_capital_flow(symbol, market):
             if df_ak is not None and not df_ak.empty:
                 conn = get_connection()
                 cursor = conn.cursor()
+                skipped = 0
 
                 for _, row in df_ak.iterrows():
                     trade_date = str(row.get('日期', '')).strip()
                     if not trade_date:
                         continue
 
-                    main_net = round(float(row.get('主力净流入-净额', 0) or 0) / 1e4, 2)
-                    main_net_pct = round(float(row.get('主力净流入-净占比', 0) or 0), 2)
-                    super_large = round(float(row.get('超大单净流入-净额', 0) or 0) / 1e4, 2)
-                    large = round(float(row.get('大单净流入-净额', 0) or 0) / 1e4, 2)
-                    medium = round(float(row.get('中单净流入-净额', 0) or 0) / 1e4, 2)
-                    small = round(float(row.get('小单净流入-净额', 0) or 0) / 1e4, 2)
+                    # 019N: 安全转换（df 值为 np.float64/str，pd.isna 兼容），金额元→万元，占比不转换
+                    main_net = _safe_float_wan(row.get('主力净流入-净额'))
+                    main_net_pct = _safe_float_pct(row.get('主力净流入-净占比'))
+                    super_large = _safe_float_wan(row.get('超大单净流入-净额'))
+                    large = _safe_float_wan(row.get('大单净流入-净额'))
+                    medium = _safe_float_wan(row.get('中单净流入-净额'))
+                    small = _safe_float_wan(row.get('小单净流入-净额'))
 
+                    # 019N: 六字段全 None → 跳过该行（不写 NULL 占位行）
+                    if all(
+                        v is None for v in (main_net, main_net_pct, super_large, large, medium, small)
+                    ):
+                        skipped += 1
+                        continue
+
+                    # 019E M-7：EM 写入显式携带 is_estimated=0
+                    # 019K Task 3：EM 写入显式携带 capital_source=NULL（顶替行被 EM 覆盖后来源归位）
                     cursor.execute(
                         """
                         INSERT OR REPLACE INTO raw_capital_flow
                         (stock_id, trade_date, main_net_inflow, main_net_inflow_pct,
-                         super_large_net, large_net, medium_net, small_net)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         super_large_net, large_net, medium_net, small_net, is_estimated, capital_source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
                     """,
                         (
                             stock_id,
@@ -1868,12 +3360,16 @@ def fetch_capital_flow(symbol, market):
                             small,
                         ),
                     )
-                    saved_count += 1
+                    # 019N: saved_count 仅计主字段 main 非 None 的行
+                    if main_net is not None:
+                        saved_count += 1
 
                 conn.commit()
                 conn.close()
                 source = 'akshare(备用)'
-                logger.info(f'[{symbol}] akshare备用源成功: {saved_count}天数据')
+                logger.info(
+                    f'[{symbol}] akshare备用源成功: {saved_count}天有效数据, 跳过 {skipped} 天异常数据'
+                )
             else:
                 warnings.append('akshare备用数据源返回空数据')
         except Exception as e:
@@ -1881,132 +3377,210 @@ def fetch_capital_flow(symbol, market):
             logger.warning(f'[{symbol}] akshare备用源失败: {e}')
 
     # ============================================================
-    # 估算数据源已禁用（P3-A验收前置修复）
-    # 原Layer 3b(腾讯估算)/Layer 4(新浪估算)/Layer 5(网易估算)
-    # 使用公式"成交额×涨跌幅/100"近似主力资金流向，
-    # 与真实主力资金流向无相关性，不具备评分有效性。
-    # 东方财富全部失败时直接返回失败，不再降级到估算源。
+    # 019E Task 2：估算兜底（仅展示用，不参与评分）
+    # EM 三层全失败时，降级到估算源（新浪/腾讯/网易）写入当日 1 行。
+    # 估算值通过 is_estimated=1 标记，data_adapter/advisor SQL 层过滤确保不进入评分。
+    # 估算源公式"成交额×涨跌幅/100"与真实主力净流入无相关性，仅供展示。
     # ============================================================
-    if saved_count == 0:
-        fail_msg = (
-            '资金面数据不可用：东方财富接口全部失败（push2his/push2/akshare）。'
-            '估算数据源（新浪/腾讯/网易）已禁用，不再写入估算值作为真实数据。'
-            '引擎将使用最近交易日的真实资金流数据（T-1或更早）。'
+    # 019E Task 2.6（M-4）：拆除提前 return，改为标志位继续执行估算降级链路
+    em_all_failed = (saved_count == 0)
+    est_source = ''
+    if em_all_failed:
+        logger.warning(
+            f'[{symbol}] 东方财富三层全失败（push2his/push2/akshare），'
+            '尝试新浪顶替 → 估算兜底（链路：东财三层 → 新浪 lscjfb 主力口径(sina_main) → 估算兜底仅展示不参评）'
         )
-        save_data_status(stock_id, 'capital', 'failed', fail_msg)
-        logger.warning(f'[{symbol}] {fail_msg}')
-        return 'failed', fail_msg
 
-    # === 以下估算数据源已禁用，保留代码供参考（已不可达）===
-    # === 备用数据源3：腾讯K线估算（港股专用fallback，直连不需代理）===
-    if False and saved_count == 0 and market == 'hk_stock':
+        # ============================================================
+        # 019Q Task 2：新浪 lscjfb 真实数据顶替（019S 起为 EM 三层全失败时唯一真实顶替源，D-1）
+        # 主力口径（r0+r1 超大单+大单），与 EM"主力=超大+大"同概念，口径逼近度最高
+        # （019K 实证 THS 全部资金口径同日符号可相反，019S 已弃用）。
+        # 写四档 + 主力（D-6），不写 main_net_inflow_pct（ratioamount 为总净占比，M-4）。
+        # 严格日期匹配：lscjfb 无当日行（非交易日/未发布）→ 返回 None → 落回估算兜底（M-2）。
+        # 写入模式复用 019K 规格：UPDATE + INSERT OR IGNORE，严禁 INSERT OR REPLACE；
+        # 无条件 UPDATE（不带来源守卫，M-5）——可覆盖估算行（口径更优）。
+        # ============================================================
         try:
-            logger.info(f'[{symbol}] 东方财富资金流不可用，尝试腾讯K线估算...')
-            tencent_rows = _fetch_capital_flow_tencent_hk(symbol, market)
-            if tencent_rows:
+            sina_row = _fetch_capital_flow_sina_main(symbol, market)
+            if sina_row:
                 conn = get_connection()
-                cursor = conn.cursor()
-
-                for row in tencent_rows:
-                    trade_date = str(row.get('日期', '')).strip()
-                    if not trade_date:
-                        continue
-
-                    # 估算值已在_fetch中计算，单位为万元
-                    main_net = round(float(row.get('主力净流入-净额', 0) or 0), 2)
-                    main_net_pct = round(float(row.get('主力净流入-净占比', 0) or 0), 2)
-
-                    cursor.execute(
-                        """
-                        INSERT OR REPLACE INTO raw_capital_flow
-                        (stock_id, trade_date, main_net_inflow, main_net_inflow_pct,
-                         super_large_net, large_net, medium_net, small_net)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                        (stock_id, trade_date, main_net, main_net_pct, 0, 0, 0, 0),
+                cur = conn.cursor()
+                cur.execute(
+                    'UPDATE raw_capital_flow SET main_net_inflow=?, super_large_net=?, '
+                    'large_net=?, medium_net=?, small_net=?, is_estimated=0, capital_source=? '
+                    'WHERE stock_id=? AND trade_date=?',
+                    (
+                        sina_row['main_net_inflow'],
+                        sina_row['super_large_net'],
+                        sina_row['large_net'],
+                        sina_row['medium_net'],
+                        sina_row['small_net'],
+                        'sina_main',
+                        stock_id,
+                        today_str,
+                    ),
+                )
+                if cur.rowcount == 0:
+                    cur.execute(
+                        'INSERT OR IGNORE INTO raw_capital_flow '
+                        '(stock_id, trade_date, main_net_inflow, super_large_net, large_net, '
+                        'medium_net, small_net, is_estimated, capital_source) '
+                        'VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)',
+                        (
+                            stock_id,
+                            today_str,
+                            sina_row['main_net_inflow'],
+                            sina_row['super_large_net'],
+                            sina_row['large_net'],
+                            sina_row['medium_net'],
+                            sina_row['small_net'],
+                            'sina_main',
+                        ),
                     )
-                    saved_count += 1
-
                 conn.commit()
                 conn.close()
-                source = '腾讯K线估算'
-                logger.info(f'[{symbol}] 腾讯资金面估算成功: {saved_count}天数据')
-            else:
-                warnings.append('腾讯K线估算返回空数据')
+                saved_count = 1
+                save_data_status(
+                    stock_id, 'capital', 'fallback',
+                    '新浪顶替(主力口径r0+r1；东财恢复后自动回补)'
+                )
+                logger.info(
+                    f'[{symbol}] 新浪 lscjfb 主力口径顶替成功: '
+                    f'main={sina_row["main_net_inflow"]} 万'
+                    f'（is_estimated=0，capital_source=sina_main，仅写当日 1 行）'
+                )
+                return 'fallback', '新浪顶替(主力口径r0+r1；东财恢复后自动回补)'
         except Exception as e:
-            warnings.append(f'腾讯K线估算失败: {e}')
-            logger.warning(f'[{symbol}] 腾讯K线估算失败: {e}')
+            warnings.append(f'新浪顶替失败: {e}')
+            logger.warning(f'[{symbol}] 新浪 lscjfb 顶替失败: {e}')
+        # 019S：THS 顶替块已移除（监理裁定：主力净流入链路不得使用同花顺数据）。
+        # 新浪顶替失败（无当日行或异常）→ 直接落回估算兜底（源3/4/5），链路不断（静默降级）。
 
-    # === 备用数据源4：新浪财经资金面（已禁用：估算源，P3-A验收前置修复）===
-    # 与腾讯(L1235)保持一致风格，if False 硬禁用。
-    # 实际本分支在 L1225 early return 之后已不可达，此为代码卫生性二次保护。
-    if False and saved_count == 0:
-        try:
-            logger.info(f'[{symbol}] 东方财富资金流不可用，尝试新浪财经...')
-            sina_rows = _fetch_capital_flow_sina(symbol, market)
-            if sina_rows:
-                conn = get_connection()
-                cursor = conn.cursor()
-                for row in sina_rows:
+        # === 估算源3：腾讯K线估算（港股专用fallback，直连不需代理）===
+        if saved_count == 0 and market == 'hk_stock':
+            try:
+                logger.info(f'[{symbol}] 尝试腾讯K线估算（兜底展示）...')
+                tencent_rows = _fetch_capital_flow_tencent_hk(symbol, market)
+                if tencent_rows:
+                    # 019E Task 2.2：估算仅写当日 1 行（不污染历史序列）
+                    row = tencent_rows[0]
                     trade_date = str(row.get('日期', '')).strip()
-                    if not trade_date:
-                        continue
-                    main_net = round(float(row.get('主力净流入-净额', 0) or 0), 2)
-                    main_net_pct = round(float(row.get('主力净流入-净占比', 0) or 0), 2)
-                    cursor.execute(
-                        """
-                        INSERT OR REPLACE INTO raw_capital_flow
-                        (stock_id, trade_date, main_net_inflow, main_net_inflow_pct,
-                         super_large_net, large_net, medium_net, small_net)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                        (stock_id, trade_date, main_net, main_net_pct, 0, 0, 0, 0),
-                    )
-                    saved_count += 1
-                conn.commit()
-                conn.close()
-                source = '新浪财经'
-                logger.info(f'[{symbol}] 新浪资金面成功: {saved_count}天数据')
-            else:
-                warnings.append('新浪财经资金面返回空数据')
-        except Exception as e:
-            warnings.append(f'新浪财经资金面失败: {e}')
-            logger.warning(f'[{symbol}] 新浪财经资金面失败: {e}')
+                    if trade_date:
+                        main_net = round(float(row.get('主力净流入-净额', 0) or 0), 2)
+                        main_net_pct = round(float(row.get('主力净流入-净占比', 0) or 0), 2)
+                        conn = get_connection()
+                        cursor = conn.cursor()
+                        # 019E Task 2.7（M-5）：UPDATE + INSERT OR IGNORE（禁止 INSERT OR REPLACE，避免清除占位行已有字段）
+                        # 019K Task 3：估算 UPDATE 追加来源守卫（防御性——估算不得覆盖 THS 顶替行）
+                        # 019S：'ths_total' 字面量保留不动——防御存量 ths_total 行，待存量清零后经新批次评审简化（估算守卫可简化为仅 'sina_main'）
+                        cursor.execute(
+                            'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=?, is_estimated=1 '
+                            'WHERE stock_id=? AND trade_date=? '
+                            "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main'))",
+                            (main_net, main_net_pct, stock_id, trade_date),
+                        )
+                        if cursor.rowcount == 0:
+                            cursor.execute(
+                                'INSERT OR IGNORE INTO raw_capital_flow '
+                                '(stock_id, trade_date, main_net_inflow, main_net_inflow_pct, is_estimated) '
+                                'VALUES (?, ?, ?, ?, 1)',
+                                (stock_id, trade_date, main_net, main_net_pct),
+                            )
+                        conn.commit()
+                        conn.close()
+                        saved_count = 1
+                        est_source = '腾讯K线估算'
+                        logger.info(f'[{symbol}] 估算兜底成功(腾讯K线估算): {trade_date} 1行')
+                else:
+                    warnings.append('腾讯K线估算返回空数据')
+            except Exception as e:
+                warnings.append(f'腾讯K线估算失败: {e}')
+                logger.warning(f'[{symbol}] 腾讯K线估算失败: {e}')
 
-    # === 备用数据源5：网易财经历史资金流向（已禁用：估算源，P3-A验收前置修复）===
-    # 与腾讯(L1235)/新浪(L1272)保持一致风格，if False 硬禁用。
-    if False and saved_count == 0:
-        try:
-            logger.info(f'[{symbol}] 尝试网易财经历史资金流向...')
-            netease_rows = _fetch_capital_flow_netease(symbol, market)
-            if netease_rows:
-                conn = get_connection()
-                cursor = conn.cursor()
-                for row in netease_rows:
+        # === 估算源4：新浪财经资金面（直连不需代理）===
+        if saved_count == 0:
+            try:
+                logger.info(f'[{symbol}] 尝试新浪财经估算（兜底展示）...')
+                sina_rows = _fetch_capital_flow_sina(symbol, market)
+                if sina_rows:
+                    row = sina_rows[0]
                     trade_date = str(row.get('日期', '')).strip()
-                    if not trade_date:
-                        continue
-                    main_net = round(float(row.get('主力净流入-净额', 0) or 0), 2)
-                    main_net_pct = round(float(row.get('主力净流入-净占比', 0) or 0), 2)
-                    cursor.execute(
-                        """
-                        INSERT OR REPLACE INTO raw_capital_flow
-                        (stock_id, trade_date, main_net_inflow, main_net_inflow_pct,
-                         super_large_net, large_net, medium_net, small_net)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                        (stock_id, trade_date, main_net, main_net_pct, 0, 0, 0, 0),
-                    )
-                    saved_count += 1
-                conn.commit()
-                conn.close()
-                source = '网易财经'
-                logger.info(f'[{symbol}] 网易资金面成功: {saved_count}天数据')
-            else:
-                warnings.append('网易财经资金面返回空数据')
-        except Exception as e:
-            warnings.append(f'网易财经资金面失败: {e}')
-            logger.warning(f'[{symbol}] 网易财经资金面失败: {e}')
+                    if trade_date:
+                        main_net = round(float(row.get('主力净流入-净额', 0) or 0), 2)
+                        main_net_pct = round(float(row.get('主力净流入-净占比', 0) or 0), 2)
+                        conn = get_connection()
+                        cursor = conn.cursor()
+                        # 019K Task 3：估算 UPDATE 追加来源守卫（防御性——估算不得覆盖 THS 顶替行）
+                        # 019S：'ths_total' 字面量保留不动——防御存量 ths_total 行，待存量清零后经新批次评审简化（估算守卫可简化为仅 'sina_main'）
+                        cursor.execute(
+                            'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=?, is_estimated=1 '
+                            'WHERE stock_id=? AND trade_date=? '
+                            "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main'))",
+                            (main_net, main_net_pct, stock_id, trade_date),
+                        )
+                        if cursor.rowcount == 0:
+                            cursor.execute(
+                                'INSERT OR IGNORE INTO raw_capital_flow '
+                                '(stock_id, trade_date, main_net_inflow, main_net_inflow_pct, is_estimated) '
+                                'VALUES (?, ?, ?, ?, 1)',
+                                (stock_id, trade_date, main_net, main_net_pct),
+                            )
+                        conn.commit()
+                        conn.close()
+                        saved_count = 1
+                        est_source = '新浪财经'
+                        logger.info(f'[{symbol}] 估算兜底成功(新浪财经): {trade_date} 1行')
+                else:
+                    warnings.append('新浪财经资金面返回空数据')
+            except Exception as e:
+                warnings.append(f'新浪财经资金面失败: {e}')
+                logger.warning(f'[{symbol}] 新浪财经估算失败: {e}')
+
+        # === 估算源5：网易财经历史资金流向（直连不需代理）===
+        if saved_count == 0:
+            try:
+                logger.info(f'[{symbol}] 尝试网易财经估算（兜底展示）...')
+                netease_rows = _fetch_capital_flow_netease(symbol, market)
+                if netease_rows:
+                    row = netease_rows[0]
+                    trade_date = str(row.get('日期', '')).strip()
+                    if trade_date:
+                        main_net = round(float(row.get('主力净流入-净额', 0) or 0), 2)
+                        main_net_pct = round(float(row.get('主力净流入-净占比', 0) or 0), 2)
+                        conn = get_connection()
+                        cursor = conn.cursor()
+                        # 019K Task 3：估算 UPDATE 追加来源守卫（防御性——估算不得覆盖 THS 顶替行）
+                        # 019S：'ths_total' 字面量保留不动——防御存量 ths_total 行，待存量清零后经新批次评审简化（估算守卫可简化为仅 'sina_main'）
+                        cursor.execute(
+                            'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=?, is_estimated=1 '
+                            'WHERE stock_id=? AND trade_date=? '
+                            "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main'))",
+                            (main_net, main_net_pct, stock_id, trade_date),
+                        )
+                        if cursor.rowcount == 0:
+                            cursor.execute(
+                                'INSERT OR IGNORE INTO raw_capital_flow '
+                                '(stock_id, trade_date, main_net_inflow, main_net_inflow_pct, is_estimated) '
+                                'VALUES (?, ?, ?, ?, 1)',
+                                (stock_id, trade_date, main_net, main_net_pct),
+                            )
+                        conn.commit()
+                        conn.close()
+                        saved_count = 1
+                        est_source = '网易财经'
+                        logger.info(f'[{symbol}] 估算兜底成功(网易财经): {trade_date} 1行')
+                else:
+                    warnings.append('网易财经资金面返回空数据')
+            except Exception as e:
+                warnings.append(f'网易财经资金面失败: {e}')
+                logger.warning(f'[{symbol}] 网易财经估算失败: {e}')
+
+        # 019E Task 2.8（M-6）：估算成功返回 'estimated'（非 'success'，确保019C回退循环不误计为成功）
+        if saved_count > 0 and em_all_failed:
+            est_msg = f'估算兜底({est_source})，仅展示用，待东方财富恢复后覆盖'
+            save_data_status(stock_id, 'capital', 'estimated', est_msg)
+            logger.info(f'[{symbol}] 资金面估算兜底完成: {est_source}，返回estimated')
+            return 'estimated', est_msg
 
     # === 所有数据源均失败时写入error_logs ===
     if saved_count == 0:
@@ -2055,7 +3629,7 @@ def fetch_capital_flow(symbol, market):
                 f'[{symbol}] 资金面日期对齐: K线={latest_kline_date}, 资金面={latest_cap_date}, 采用T-1策略'
             )
 
-        msg = f'{source}采集成功。已写入{saved_count}天历史数据，数据库累计{total_records}条记录{date_note}'
+        msg = f'{source}采集成功，写入 {saved_count} 天有效数据（跳过 {skipped} 天异常数据）。数据库累计{total_records}条记录{date_note}'
         save_data_status(stock_id, 'capital', 'success', msg)
         return 'success', msg
     else:
@@ -2468,6 +4042,7 @@ _LOCAL_INDUSTRY_MAP = {
     '600519': '酿酒行业',
     '601012': '光伏设备',
     '601888': '旅游酒店',
+    '603501': '半导体',
     '688017': '半导体',
     '688041': '半导体',
     '688047': '半导体',
@@ -2667,6 +4242,52 @@ def collect_stock_data(symbol, market, force_full=False):
                 dimension='margin',
                 traceback_str=traceback.format_exc(),
             )
+
+    # 019Y：新增数据维度（失败不阻塞主流程）
+    # 五档盘口（mootdx，仅A股，实时快照，每只每天保留最新一条）
+    try:
+        results['orderbook'] = fetch_orderbook(symbol, market)
+    except Exception as e:
+        results['orderbook'] = ('failed', f'五档盘口采集异常: {e}')
+        logger.warning(f'[{symbol}] 五档盘口采集异常(不阻塞): {e}')
+        _log_error_to_db(
+            stock_id,
+            'data_collector',
+            type(e).__name__,
+            str(e),
+            dimension='orderbook',
+            traceback_str=traceback.format_exc(),
+        )
+
+    # 估值数据（akshare主源 → baostock备用，日级低频，同日跳过）
+    try:
+        results['valuation'] = fetch_valuation(symbol, market)
+    except Exception as e:
+        results['valuation'] = ('failed', f'估值采集异常: {e}')
+        logger.warning(f'[{symbol}] 估值采集异常(不阻塞): {e}')
+        _log_error_to_db(
+            stock_id,
+            'data_collector',
+            type(e).__name__,
+            str(e),
+            dimension='valuation',
+            traceback_str=traceback.format_exc(),
+        )
+
+    # 限售解禁（akshare，仅A股，事件级风险因子）
+    try:
+        results['restricted_release'] = fetch_restricted_release(symbol, market)
+    except Exception as e:
+        results['restricted_release'] = ('failed', f'限售解禁采集异常: {e}')
+        logger.warning(f'[{symbol}] 限售解禁采集异常(不阻塞): {e}')
+        _log_error_to_db(
+            stock_id,
+            'data_collector',
+            type(e).__name__,
+            str(e),
+            dimension='restricted_release',
+            traceback_str=traceback.format_exc(),
+        )
 
     # 消息面
     try:

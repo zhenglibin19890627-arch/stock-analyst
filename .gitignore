@@ -4,10 +4,15 @@ __pycache__/
 
 # 数据库文件
 *.db
+*.db-shm
+*.db-wal
 
 # 日志文件（含按日期轮转的日志）
 logs/*.log
 logs/*.log.*
+
+# 破坏性操作前自动生成的数据库备份
+backups/
 
 # Qoder 工具目录
 .qoder/

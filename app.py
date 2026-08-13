@@ -697,7 +697,7 @@ def api_get_kline(stock_id):
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT trade_date, open, close, high, low, volume, pct_change
+        SELECT trade_date, open, close, high, low, volume, pct_change, data_source
         FROM raw_kline WHERE stock_id = ?
         ORDER BY trade_date DESC LIMIT 20
     """,
@@ -794,6 +794,57 @@ def api_get_capital(stock_id):
     return jsonify(
         {'success': True, 'data': rows, 'count': len(rows), 'currency': currency, 'unit': unit}
     )
+
+
+@app.route('/api/stocks/<int:stock_id>/orderbook', methods=['GET'])
+def api_get_orderbook(stock_id):
+    """019Y：五档盘口（mootdx 实时快照，最近5条快照）"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT * FROM stock_orderbook WHERE stock_id = ?
+        ORDER BY trade_date DESC, id DESC LIMIT 5
+    """,
+        (stock_id,),
+    )
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return jsonify({'success': True, 'data': rows, 'count': len(rows)})
+
+
+@app.route('/api/stocks/<int:stock_id>/valuation', methods=['GET'])
+def api_get_valuation(stock_id):
+    """019Y：估值数据（stock_valuation，最近10条，来源标注 akshare/baostock）"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT * FROM stock_valuation WHERE stock_id = ?
+        ORDER BY trade_date DESC LIMIT 10
+    """,
+        (stock_id,),
+    )
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return jsonify({'success': True, 'data': rows, 'count': len(rows)})
+
+
+@app.route('/api/stocks/<int:stock_id>/restricted-release', methods=['GET'])
+def api_get_restricted_release(stock_id):
+    """019Y：限售解禁明细（风险因子，最近20条，来源标注 akshare）"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT * FROM stock_restricted_release WHERE stock_id = ?
+        ORDER BY release_date DESC LIMIT 20
+    """,
+        (stock_id,),
+    )
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return jsonify({'success': True, 'data': rows, 'count': len(rows)})
 
 
 @app.route('/api/stocks/<int:stock_id>/status', methods=['GET'])
@@ -908,13 +959,15 @@ def api_get_report_latest(stock_id):
     conn = get_connection()
     cursor = conn.cursor()
 
-    # 先查当日是否有该股票的有效报告
+    # 019D: 先判定当日 target_type（daily 优先），再限定 report_type + status='ok'
+    target_type = _resolve_report_type(cursor, today)
     cursor.execute(
         """SELECT dr.*, s.symbol, s.name, s.market
            FROM daily_reports dr
            JOIN stocks s ON dr.stock_id = s.id
-           WHERE dr.stock_id = ? AND dr.report_date = ? AND dr.status = 'ok' """,
-        (stock_id, today),
+           WHERE dr.stock_id = ? AND dr.report_date = ?
+           AND dr.status = 'ok' AND dr.report_type = ? """,
+        (stock_id, today, target_type),
     )
     row = cursor.fetchone()
 
@@ -934,6 +987,8 @@ def api_get_report_latest(stock_id):
                 if advice.get('price_advice', {}).get('action_suggestion'):
                     advice['position_advice'] = advice['price_advice']['action_suggestion']
                 # 分析成功，直接返回引擎结果
+                # 019D: 补充 generated_at（报告生成时刻，与 DB 行路径一致）
+                advice['generated_at'] = datetime.now(_CN_TZ).isoformat()
                 return jsonify(advice)
         except Exception:
             pass
@@ -949,12 +1004,15 @@ def api_get_report_latest(stock_id):
             conn.close()
             return jsonify({'success': False, 'message': '无报告数据'})
 
+        # 019D: 回退查询同步统一口径（report_type + status='ok'）
+        fallback_type = _resolve_report_type(cursor, latest_date)
         cursor.execute(
             """SELECT dr.*, s.symbol, s.name, s.market
                FROM daily_reports dr
                JOIN stocks s ON dr.stock_id = s.id
-               WHERE dr.stock_id = ? AND dr.report_date = ?""",
-            (stock_id, latest_date),
+               WHERE dr.stock_id = ? AND dr.report_date = ?
+               AND dr.status = 'ok' AND dr.report_type = ?""",
+            (stock_id, latest_date, fallback_type),
         )
         row = cursor.fetchone()
         conn.close()
@@ -994,6 +1052,8 @@ def api_get_report_latest(stock_id):
         pass
 
     # B15-T3: 从 key_factors 推算 data_quality（各维度完整度）
+    # U7(#5): 当无法从 data_completeness 解析完整度时，不再默认100%，
+    #         标记为 None（前端显示「已采集」），避免与实际数据矛盾
     _dq_map = {
         'kline': 'technical',
         'fundamental': 'fundamental',
@@ -1010,9 +1070,9 @@ def api_get_report_latest(stock_id):
                 try:
                     data_quality[dq_name] = float(str(completeness_str).replace('%', '')) / 100.0
                 except (ValueError, TypeError):
-                    data_quality[dq_name] = 1.0
+                    data_quality[dq_name] = None  # 解析失败，标记为未统计
             else:
-                data_quality[dq_name] = 1.0
+                data_quality[dq_name] = None  # 无完整度字段，标记为未统计（不再默认100%）
         else:
             data_quality[dq_name] = 0.0
 
@@ -1120,6 +1180,12 @@ def api_advise_stock(stock_id):
             # 009补充：动态操作建议覆盖旧建议，避免矛盾
             if result.get('price_advice', {}).get('action_suggestion'):
                 result['position_advice'] = result['price_advice']['action_suggestion']
+            # 019L: 补充 generated_at（报告生成时刻，与 /report-latest 019D 同型）
+            from datetime import datetime, timezone
+            from datetime import timedelta as _td
+
+            _CN_TZ = timezone(_td(hours=8), name='Asia/Shanghai')
+            result['generated_at'] = datetime.now(_CN_TZ).isoformat()
         return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'message': f'建议生成失败: {str(e)}'}), 500
@@ -1273,8 +1339,8 @@ def api_batch_analyze():
     success_count = 0
     fail_count = 0
 
-    # P0-CAPITAL-001：批量资金面预取（同花顺全市场源，1次调用替代东财逐只采集）
-    # 仅对 A 股白名单生效，港股走原东财 secid 路径；预取失败不阻断后续逐只采集
+    # 018: 同花顺批量预取辅助指标（ths_net_inflow），不写入主力净流入
+    # 主力净流入由东方财富逐只采集提供；预取失败不阻断后续逐只采集
     try:
         conn_b = get_connection()
         cursor_b = conn_b.cursor()
@@ -1390,6 +1456,43 @@ def api_batch_analyze():
     )
 
 
+def _resolve_report_type(cursor, report_date):
+    """019D 统一口径：判定当日应取 daily 还是 intraday（daily 优先）。
+
+    与 /api/ratings 原有逻辑完全一致，提取为共享辅助函数供所有读取入口复用，
+    防止未来新入口遗漏 daily-优先 / status='ok' 口径。
+    """
+    cursor.execute(
+        "SELECT COUNT(*) as cnt FROM daily_reports "
+        "WHERE report_date=? AND report_type='daily' AND status='ok'",
+        (report_date,),
+    )
+    return 'daily' if cursor.fetchone()['cnt'] > 0 else 'intraday'
+
+
+def _latest_report_join_sql():
+    """019R 共享口径：每股最新一份有效报告派生表的 SQL 片段（看板/汇总两接口共用）。
+
+    口径：status='ok' 前置过滤；ROW_NUMBER 窗口 PARTITION BY stock_id，
+    ORDER BY report_date DESC、daily 优先（CASE report_type='daily' THEN 0 ELSE 1），
+    取 rn=1 —— 即每股在自身最新 report_date 上 daily 优先的有效报告。
+    全库同日时与 019D 全局判定（_resolve_report_type）完全等价。
+    返回形如 `(... ) AS lr` 的片段；调用方以 LEFT JOIN 本片段 ON lr.stock_id = s.id
+    使用（股票表别名须为 s）。杜绝两处口径漂移。
+    """
+    return (
+        "(SELECT * FROM ("
+        " SELECT dr.*, ROW_NUMBER() OVER ("
+        "  PARTITION BY dr.stock_id"
+        "  ORDER BY dr.report_date DESC,"
+        "   CASE WHEN dr.report_type='daily' THEN 0 ELSE 1 END"
+        " ) AS rn"
+        " FROM daily_reports dr"
+        " WHERE dr.status='ok'"
+        ") WHERE rn=1) AS lr"
+    )
+
+
 @app.route('/api/ratings', methods=['GET'])
 def api_get_ratings_list():
     """
@@ -1425,14 +1528,8 @@ def api_get_ratings_list():
         conn.close()
         return jsonify({'success': True, 'ratings': [], 'count': 0})
 
-    # 014修复：优先取 daily，无 daily 时取 intraday（与 get_latest_reports 同源逻辑）
-    cursor.execute(
-        'SELECT COUNT(*) as cnt FROM daily_reports '
-        "WHERE report_date=? AND report_type='daily' AND status='ok'",
-        (latest_date,),
-    )
-    has_daily = cursor.fetchone()['cnt'] > 0
-    target_type = 'daily' if has_daily else 'intraday'
+    # 019D: 统一口径，调用共享辅助函数（daily 优先，无 daily 时取 intraday）
+    target_type = _resolve_report_type(cursor, latest_date)
 
     sql = """
         SELECT dr.stock_code, dr.stock_name, dr.total_score, dr.rating,
@@ -1755,21 +1852,28 @@ def api_portfolio_summary():
         )
 
     # ---------- 2. P2 新增：评分维度汇总（来自 daily_reports 表） ----------
-    # 强制修正项：先查 MAX(report_date) 再传入主查询，避免相关子查询
-    cursor.execute('SELECT MAX(report_date) as latest_date FROM daily_reports')
+    # 019R: 与看板同口径——每股最新一份有效报告（status='ok'、daily 优先），
+    # 聚合范围限定非退市自选股（与看板行集自洽），不再按全局单一 MAX(report_date) 聚合
+    cursor.execute(
+        'SELECT MAX(lr.report_date) as latest_date, MIN(lr.report_date) as min_date '
+        'FROM stocks s JOIN ' + _latest_report_join_sql() + ' ON lr.stock_id = s.id '
+        "WHERE s.status != 'delisted'"
+    )
     date_row = cursor.fetchone()
     latest_report_date = date_row['latest_date'] if date_row else None
+    report_date_min = date_row['min_date'] if date_row else None
 
     avg_score = None
     rating_dist = {}
     engine_stats = {'v5': 0, 'legacy': 0}
     scores_list = []
+    report_generated_at = None
 
     if latest_report_date:
         cursor.execute(
-            'SELECT total_score, rating, engine_version FROM daily_reports '
-            'WHERE report_date = ? AND status = ?',
-            (latest_report_date, 'ok'),
+            'SELECT lr.total_score, lr.rating, lr.engine_version, lr.generated_at '
+            'FROM stocks s JOIN ' + _latest_report_join_sql() + ' ON lr.stock_id = s.id '
+            "WHERE s.status != 'delisted'"
         )
         for r in cursor.fetchall():
             sc = r['total_score']
@@ -1781,21 +1885,15 @@ def api_portfolio_summary():
             ev = r['engine_version']
             if ev in engine_stats:
                 engine_stats[ev] += 1
+            ga = r['generated_at']
+            if ga and (report_generated_at is None or ga > report_generated_at):
+                report_generated_at = ga
 
     if scores_list:
         avg_score = round(sum(scores_list) / len(scores_list), 1)
 
-    # 从 daily_reports 表读取报告生成时间（稳定值，用于ETag）
-    report_generated_at = None
-    if latest_report_date:
-        cursor.execute(
-            'SELECT MAX(generated_at) as gen_at FROM daily_reports WHERE report_date = ?',
-            (latest_report_date,),
-        )
-        gen_row = cursor.fetchone()
-        report_generated_at = gen_row['gen_at'] if gen_row else None
-
     result['report_date'] = latest_report_date
+    result['report_date_min'] = report_date_min
     result['avg_score'] = avg_score
     result['rating_distribution'] = rating_dist
     result['engine_stats'] = engine_stats
@@ -1834,58 +1932,42 @@ def api_portfolio_watchlist_scores():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # 强制修正项：先查 MAX(report_date)，再作为参数传入主查询
-    cursor.execute('SELECT MAX(report_date) as latest_date FROM daily_reports')
-    date_row = cursor.fetchone()
-    latest_report_date = date_row['latest_date'] if date_row else None
-
-    # 四表 JOIN：stocks LEFT JOIN holdings / price_cache / daily_reports
-    if latest_report_date:
-        cursor.execute(
-            """
-            SELECT s.id, s.symbol, s.name, s.market, s.status, s.industry,
-                   h.cost_price, h.quantity, h.realized_pnl,
-                   pc.latest_price, pc.pct_change as price_pct_change,
-                   dr.engine_version, dr.total_score, dr.rating,
-                   dr.rating_label, dr.score_change, dr.prev_score,
-                   dr.key_factors, dr.status as report_status
-            FROM stocks s
-            LEFT JOIN holdings h     ON s.id = h.stock_id
-            LEFT JOIN price_cache pc ON s.id = pc.stock_id
-            LEFT JOIN daily_reports dr ON s.id = dr.stock_id
-                                     AND dr.report_date = ?
-            WHERE s.status != 'delisted'
-            ORDER BY
-                CASE WHEN dr.total_score IS NULL THEN 1 ELSE 0 END,
-                dr.total_score DESC
-        """,
-            (latest_report_date,),
-        )
-    else:
-        # 无报告数据时，仅返回股票+持仓+价格
-        cursor.execute("""
-            SELECT s.id, s.symbol, s.name, s.market, s.status, s.industry,
-                   h.cost_price, h.quantity, h.realized_pnl,
-                   pc.latest_price, pc.pct_change as price_pct_change,
-                   NULL as engine_version, NULL as total_score,
-                   NULL as rating, NULL as rating_label,
-                   NULL as score_change, NULL as prev_score,
-                   NULL as key_factors, 'no_report' as report_status
-            FROM stocks s
-            LEFT JOIN holdings h     ON s.id = h.stock_id
-            LEFT JOIN price_cache pc ON s.id = pc.stock_id
-            WHERE s.status != 'delisted'
-            ORDER BY s.added_at DESC
-        """)
+    # 019R: 每股最新一份有效报告（ROW_NUMBER 派生表 LEFT JOIN），不再依赖
+    # 全局单一 MAX(report_date) JOIN；无报告股票由 LEFT JOIN 兜底（评分 NULL 排末尾）。
+    # 019D 口径（daily 优先 + status='ok'）逐股化后内置于 _latest_report_join_sql()。
+    cursor.execute(
+        """
+        SELECT s.id, s.symbol, s.name, s.market, s.status, s.industry,
+               h.cost_price, h.quantity, h.realized_pnl,
+               pc.latest_price, pc.pct_change as price_pct_change,
+               lr.engine_version, lr.total_score, lr.rating,
+               lr.rating_label, lr.score_change, lr.prev_score,
+               lr.key_factors, lr.status as report_status, lr.generated_at,
+               lr.report_date
+        FROM stocks s
+        LEFT JOIN holdings h     ON s.id = h.stock_id
+        LEFT JOIN price_cache pc ON s.id = pc.stock_id
+        LEFT JOIN """ + _latest_report_join_sql() + """
+        ON lr.stock_id = s.id
+        WHERE s.status != 'delisted'
+        ORDER BY
+            CASE WHEN lr.total_score IS NULL THEN 1 ELSE 0 END,
+            lr.total_score DESC
+    """
+    )
 
     rows = [dict(row) for row in cursor.fetchall()]
 
-    # 从 daily_reports 表读取报告生成时间（稳定值，用于ETag）
+    # 顶层日期：入选报告（每股最新有效报告）的最新/最早日期
+    report_dates = sorted({r['report_date'] for r in rows if r.get('report_date')})
+    latest_report_date = report_dates[-1] if report_dates else None
+    report_date_min = report_dates[0] if report_dates else None
+
+    # 每股最新报告集合中的 MAX(generated_at)（稳定值，用于ETag；口径随多日期同步）
     report_generated_at = None
     if latest_report_date:
         cursor.execute(
-            'SELECT MAX(generated_at) as gen_at FROM daily_reports WHERE report_date = ?',
-            (latest_report_date,),
+            'SELECT MAX(lr.generated_at) as gen_at FROM ' + _latest_report_join_sql()
         )
         gen_row = cursor.fetchone()
         report_generated_at = gen_row['gen_at'] if gen_row else None
@@ -1945,6 +2027,8 @@ def api_portfolio_watchlist_scores():
                 if r.get('score_change') is not None
                 else None,
                 'has_report': r.get('report_status') == 'ok',
+                'generated_at': r.get('generated_at'),
+                'report_date': r.get('report_date'),
                 # DEV-TASKS-20260727-003：超买超卖信号（从 key_factors 派生，不暴露原始因子）
                 'obos_signal': _derive_obos_signal(r.get('key_factors')),
             }
@@ -1953,6 +2037,7 @@ def api_portfolio_watchlist_scores():
     result = {
         'success': True,
         'report_date': latest_report_date,
+        'report_date_min': report_date_min,
         'generated_at': report_generated_at or datetime.now(_CN_TZ).isoformat(),
         'stocks': stocks,
         'total': len(stocks),
@@ -2838,8 +2923,13 @@ def _fetch_realtime_price_batch(symbols_markets):
     """批量获取实时行情价格（腾讯接口）。
     symbols_markets: [(stock_id, symbol, market), ...]
     返回: {stock_id: {'price': float, 'pct_change': float}}
+    019Y T1：腾讯主源缺失的 A股 自动降级 mootdx（通达信行情，TCP socket，不经过 requests patch）。
     """
+    import logging as _logging019y
+
     import requests as _requests
+
+    _log019y = _logging019y.getLogger(__name__)
 
     result = {}
     if not symbols_markets:
@@ -2897,6 +2987,26 @@ def _fetch_realtime_price_batch(symbols_markets):
                     continue
         except Exception:
             continue
+
+    # 019Y T1：腾讯主源缺失的 A股 → mootdx 降级（每只一次 socket 查询，量小）
+    missing_a = [
+        (stock_id, symbol)
+        for stock_id, symbol, market in symbols_markets
+        if market == 'a_stock' and stock_id not in result
+    ]
+    if missing_a:
+        try:
+            from modules.data_collector import get_realtime_quote_mootdx
+
+            for stock_id, symbol in missing_a:
+                q = get_realtime_quote_mootdx(symbol)
+                if q and q.get('price') and q['price'] > 0:
+                    result[stock_id] = {'price': q['price'], 'pct_change': q.get('pct_change')}
+                    _log019y.info(
+                        f'[019Y] {symbol} 实时价格走 mootdx 降级: price={q["price"]}'
+                    )
+        except Exception as e:
+            _log019y.warning(f'[019Y] mootdx 实时价格降级失败: {e}')
 
     return result
 
@@ -3172,6 +3282,25 @@ def api_v5_scoring_validation():
 # ============================================================
 # US-11: 每日报告 API
 # ============================================================
+
+
+@app.route('/api/daily-report/progress')
+def api_daily_report_progress():
+    """012-B: 查询报告生成进度（前端进度条轮询）"""
+    import json as _json
+    import os as _os
+
+    progress_path = _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)), 'logs', 'report_progress.json'
+    )
+    if not _os.path.exists(progress_path):
+        return jsonify({'success': True, 'progress': None})
+    try:
+        with open(progress_path, encoding='utf-8') as f:
+            progress = _json.load(f)
+        return jsonify({'success': True, 'progress': progress})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'读取进度失败: {e}'}), 500
 
 
 @app.route('/api/daily-report/generate', methods=['POST'])
@@ -3925,10 +4054,29 @@ def main():
 
     init_database()
 
+    # P0-1: 评级配置自检（三处评级定义一致性，不一致时告警但不阻断启动）
+    from modules.analysis_engine import validate_rating_config
+
+    rating_issues = validate_rating_config()
+    if rating_issues:
+        logging.getLogger(__name__).warning(f'[评级配置自检] 发现 {len(rating_issues)} 个问题：')
+        print('  [WARN] 评级配置自检发现不一致（评级可能错乱），请检查：')
+        print('         config_weights.json / config.py / modules/scoring_engine.py')
+        for msg in rating_issues:
+            logging.getLogger(__name__).warning(f'[评级配置自检] {msg}')
+            print(f'         - {msg}')
+    else:
+        logging.getLogger(__name__).info('[评级配置自检] 三处评级定义一致（80/65/50/30）')
+
     # US-11: 启动每日报告定时调度器
     from modules.daily_report import start_scheduler
 
     start_scheduler()
+
+    # 数据完整性驱动的持续补采调度器（缺口检测 + 自动退避，直到数据完整）
+    from modules.backfill_scheduler import start_backfill_scheduler
+
+    start_backfill_scheduler()
 
     print()
     print('  ============================================================')

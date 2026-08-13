@@ -271,12 +271,15 @@ def _read_fundamental_data(stock_id: int) -> dict | None:
 
 
 def _read_capital_data(stock_id: int, limit: int = 10) -> list[dict]:
-    """读取最近 N 天资金面数据（正序）"""
+    """读取最近 N 天资金面数据（正序）。
+    019E-R1：过滤估算行（is_estimated=1），确保评分仅使用真实数据。
+    """
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
         SELECT * FROM raw_capital_flow WHERE stock_id = ?
+        AND (is_estimated = 0 OR is_estimated IS NULL)
         ORDER BY trade_date DESC LIMIT ?
     """,
         (stock_id, limit),

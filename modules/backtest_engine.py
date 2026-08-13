@@ -23,7 +23,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from database.db_manager import get_connection
+from database.db_manager import backup_database, get_connection
 
 from modules.scoring_engine import normalize_rating
 
@@ -89,6 +89,14 @@ def _ensure_columns():
         'dynamic_return': 'REAL',
         'dynamic_is_correct': 'INTEGER',
         'is_simulated': 'INTEGER DEFAULT 0',
+        # 019T T3（评审 §4.2）：基准对比列（A股对标沪深300 / 港股对标恒指）
+        'bench_return_1d': 'REAL',
+        'bench_return_1w': 'REAL',
+        'bench_return_1m': 'REAL',
+        'alpha_1d': 'REAL',
+        'alpha_1w': 'REAL',
+        'alpha_1m': 'REAL',
+        'is_correct_alpha': 'INTEGER',
     }
     cursor.execute('PRAGMA table_info(backtest_results)')
     existing = {row['name'] for row in cursor.fetchall()}
@@ -119,10 +127,94 @@ class BacktestEngine:
 
     FIXED_PERIODS = {'1d': 1, '1w': 5, '1m': 20}
 
+    # 019T T3：基准指数映射（A股→沪深300，港股→恒生指数）
+    BENCH_CODE = {'a_stock': '000300', 'hk_stock': 'HSI'}
+
     def __init__(self):
         _ensure_columns()
 
     # ---------- 数据查询辅助 ----------
+
+    @staticmethod
+    def _get_bench_tn(bench_code, rating_date, n):
+        """获取基准指数在评级日的基准价与 T+n 收盘价（019T T3，时间对齐规则同 T1）。
+
+        对齐规则（评审 §2.2 / §4.3，与 _get_tn_price 约定一致）：
+        基准价 = index_kline 中 trade_date <= rating_date 的最近一行收盘；
+        T+n    = 基准行之后严格第 n 行（trade_date > 基准日 ORDER BY trade_date ASC OFFSET n-1）。
+
+        Returns: (base_close, base_date, tn_close)；任一缺失返回 None。
+        """
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT trade_date, close FROM index_kline '
+            'WHERE index_code = ? AND trade_date <= ? '
+            'ORDER BY trade_date DESC LIMIT 1',
+            (bench_code, rating_date),
+        )
+        base = cursor.fetchone()
+        if not base or base['close'] is None:
+            conn.close()
+            return None, None, None
+        base_date = base['trade_date']
+        base_close = float(base['close'])
+        if n == 0:
+            conn.close()
+            return base_close, base_date, base_close
+        cursor.execute(
+            'SELECT close FROM index_kline '
+            'WHERE index_code = ? AND trade_date > ? '
+            'ORDER BY trade_date ASC LIMIT 1 OFFSET ?',
+            (bench_code, base_date, n - 1),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row and row['close'] is not None:
+            return base_close, base_date, float(row['close'])
+        return base_close, base_date, None
+
+    def _compute_alpha_block(self, market, rating_date, rating_norm, returns):
+        """019T T3：计算基准收益 / alpha / is_correct_alpha（缺基准全置 NULL，不代理）。
+
+        Args:
+            market: 'a_stock' / 'hk_stock'
+            rating_date: 评级日（YYYY-MM-DD）
+            rating_norm: 归一化评级（中文5档）
+            returns: {'return_1d':.., 'return_1w':.., 'return_1m':..}（个股同窗口收益率%）
+        Returns:
+            dict {bench_return_1d/1w/1m, alpha_1d/1w/1m, is_correct_alpha}
+        """
+        block = {
+            'bench_return_1d': None,
+            'bench_return_1w': None,
+            'bench_return_1m': None,
+            'alpha_1d': None,
+            'alpha_1w': None,
+            'alpha_1m': None,
+            'is_correct_alpha': None,
+        }
+        bench_code = self.BENCH_CODE.get(market)
+        if not bench_code:
+            return block
+        for lbl, n_days in self.FIXED_PERIODS.items():
+            base_close, _base_date, tn_close = self._get_bench_tn(bench_code, rating_date, n_days)
+            if base_close is None or tn_close is None:
+                continue
+            bench_ret = round((tn_close - base_close) / base_close * 100, 2)
+            block[f'bench_return_{lbl}'] = bench_ret
+            stock_ret = returns.get(f'return_{lbl}')
+            if stock_ret is not None:
+                block[f'alpha_{lbl}'] = round(stock_ret - bench_ret, 2)
+        # 主 alpha 判定：优先 1d，依次 1w/1m（与 is_correct 主口径一致）；缺基准不判定
+        primary_alpha = block['alpha_1d']
+        if primary_alpha is None:
+            primary_alpha = block['alpha_1w']
+        if primary_alpha is None:
+            primary_alpha = block['alpha_1m']
+        if primary_alpha is not None:
+            block['is_correct_alpha'] = _judge(rating_norm, primary_alpha)
+        return block
 
     @staticmethod
     def _get_tn_price(stock_id, rating_date, n):
@@ -224,6 +316,10 @@ class BacktestEngine:
         if primary_correct is None:
             primary_correct = results.get('is_correct_1m')
 
+        # 019T T3：基准对比（alpha 判定）。is_correct 原口径保留不动；缺基准 → 全 NULL
+        alpha_block = self._compute_alpha_block(market, rating_date, rating_norm, results)
+        results.update(alpha_block)
+
         # 5. 动态周期回测
         dynamic_result = self._compute_dynamic(stock_id, rating_date, rating_norm, price_at)
         results.update(dynamic_result)
@@ -241,7 +337,9 @@ class BacktestEngine:
                     price_at_rating=?, price_1d=?, price_1w=?, price_1m=?,
                     return_1d=?, return_1w=?, return_1m=?,
                     is_correct=?, backtest_date=?,
-                    dynamic_end_date=?, dynamic_return=?, dynamic_is_correct=?
+                    dynamic_end_date=?, dynamic_return=?, dynamic_is_correct=?,
+                    bench_return_1d=?, bench_return_1w=?, bench_return_1m=?,
+                    alpha_1d=?, alpha_1w=?, alpha_1m=?, is_correct_alpha=?
                 WHERE rating_id=?
             """,
                 (
@@ -262,6 +360,13 @@ class BacktestEngine:
                     results.get('dynamic_end_date'),
                     results.get('dynamic_return'),
                     results.get('dynamic_is_correct'),
+                    results.get('bench_return_1d'),
+                    results.get('bench_return_1w'),
+                    results.get('bench_return_1m'),
+                    results.get('alpha_1d'),
+                    results.get('alpha_1w'),
+                    results.get('alpha_1m'),
+                    results.get('is_correct_alpha'),
                     rating_id,
                 ),
             )
@@ -273,8 +378,10 @@ class BacktestEngine:
                  price_at_rating, price_1d, price_1w, price_1m,
                  return_1d, return_1w, return_1m,
                  is_correct, backtest_date,
-                 dynamic_end_date, dynamic_return, dynamic_is_correct)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 dynamic_end_date, dynamic_return, dynamic_is_correct,
+                 bench_return_1d, bench_return_1w, bench_return_1m,
+                 alpha_1d, alpha_1w, alpha_1m, is_correct_alpha)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
                 (
                     stock_id,
@@ -294,6 +401,13 @@ class BacktestEngine:
                     results.get('dynamic_end_date'),
                     results.get('dynamic_return'),
                     results.get('dynamic_is_correct'),
+                    results.get('bench_return_1d'),
+                    results.get('bench_return_1w'),
+                    results.get('bench_return_1m'),
+                    results.get('alpha_1d'),
+                    results.get('alpha_1w'),
+                    results.get('alpha_1m'),
+                    results.get('is_correct_alpha'),
                 ),
             )
         conn.commit()
@@ -414,6 +528,84 @@ class BacktestEngine:
 
     # ---------- 市场级报告 ----------
 
+    def _build_interpretation(self, report):
+        """根据真实样本统计生成客观解读评语（纯数据驱动，不硬编码买卖结论）。
+
+        基于：样本量 / 总体准确率 / 周期衰减趋势 / 动态准确率 / 分档表现。
+        阈值口径：≥60% 有效、45%~60% 一般/接近随机、<45% 偏弱。
+        """
+        parts = []
+        total = report['total']
+        if total == 0:
+            return '暂无真实回测数据，无法解读。请先触发评级变更或手动重跑回测（报告仅统计真实评级回测样本，已排除模拟回测）。'
+
+        parts.append(f'本报告基于 {total} 条真实评级回测样本（样本期 {report.get("date_range") or "—"}，已排除模拟回测数据）。')
+
+        # 总体准确率（T+1日主口径）
+        judged = report.get('correct_count', 0) + report.get('wrong_count', 0)
+        acc = report.get('accuracy')
+        if judged > 0 and acc is not None:
+            if acc >= 0.60:
+                parts.append(f'短期方向判断有效：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定），显著高于随机水平。')
+            elif acc >= 0.45:
+                parts.append(f'短期方向判断一般：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定），仅略高于随机，优势有限。')
+            else:
+                parts.append(f'短期方向判断偏弱：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定），接近或低于随机水平。')
+
+        # 周期衰减趋势
+        pa = report.get('period_accuracy', {})
+        p1d = pa.get('1d', {}).get('accuracy')
+        p1w = pa.get('1w', {}).get('accuracy')
+        p1m = pa.get('1m', {}).get('accuracy')
+        if p1d is not None:
+            tail = []
+            if p1w is not None:
+                tail.append(f'T+1周 {p1w * 100:.0f}%')
+            if p1m is not None:
+                tail.append(f'T+1月 {p1m * 100:.0f}%')
+            if tail:
+                parts.append(
+                    f'周期衰减：准确率随持有期拉长递减（T+1日 {p1d * 100:.0f}% → ' + '、'.join(tail) + '），'
+                    '评级以短线方向参考为主，长期持有参考价值下降。'
+                )
+            else:
+                parts.append(f'周期维度：T+1日准确率 {p1d * 100:.0f}%，周/月样本不足暂不评估。')
+
+        # 动态准确率（评级有效期）
+        dyn_n = report.get('dynamic_count', 0)
+        dyn = report.get('dynamic_accuracy')
+        if dyn_n > 0 and dyn is not None:
+            if dyn >= 0.60:
+                parts.append(f'动态准确率 {dyn * 100:.0f}%（{dyn_n}条）较高：评级有效期内方向判断可信，可参考评级持有至改评。')
+            elif dyn >= 0.45:
+                parts.append(f'动态准确率 {dyn * 100:.0f}%（{dyn_n}条）接近随机水平：评级有效期内的持有无明显超额，不建议按评级长期持有。')
+            else:
+                parts.append(f'动态准确率 {dyn * 100:.0f}%（{dyn_n}条）低于随机：评级有效期内的方向判断不可信。')
+
+        # 分档表现（样本≥30才纳入点评）
+        rs_list = [
+            (r, s) for r, s in report.get('rating_stats', {}).items()
+            if s.get('total', 0) >= 30 and s.get('accuracy') is not None
+        ]
+        if rs_list:
+            best = max(rs_list, key=lambda x: x[1]['accuracy'])
+            worst = min(rs_list, key=lambda x: x[1]['accuracy'])
+            parts.append(
+                f'分档看：「{best[0]}」最可信（{best[1]["total"]}条，T+1日准确率 {best[1]["accuracy"] * 100:.0f}%）；'
+                f'「{worst[0]}」最弱（{worst[1]["total"]}条，T+1日准确率 {worst[1]["accuracy"] * 100:.0f}%）。'
+            )
+
+        # 样本不足档位提示
+        low = [
+            r for r, s in report.get('rating_stats', {}).items()
+            if 0 < s.get('total', 0) < 30 and s.get('accuracy') is not None
+        ]
+        if low:
+            parts.append(f'注意：「{'、'.join(sorted(low))}」样本不足（<30条），其准确率仅供参考，勿单独作为决策依据。')
+
+        parts.append('以上为历史回测统计解读，不构成投资建议。')
+        return ' '.join(parts)
+
     def compute_market_report(self, market='a_stock', include_simulated=False):
         """生成市场级回测报告。
 
@@ -466,6 +658,10 @@ class BacktestEngine:
                     'correct': 0,
                     'wrong': 0,
                     'neutral': 0,
+                    'dyn_correct': 0,
+                    'dyn_wrong': 0,
+                    'dyn_neutral': 0,
+                    'dyn_returns': [],
                     'returns_1d': [],
                     'returns_1w': [],
                     'returns_1m': [],
@@ -478,6 +674,15 @@ class BacktestEngine:
                 rs['wrong'] += 1
             else:
                 rs['neutral'] += 1
+            # 动态周期判定（评级日→下次评级变更）
+            if r.get('dynamic_is_correct') == 1:
+                rs['dyn_correct'] += 1
+            elif r.get('dynamic_is_correct') == 0:
+                rs['dyn_wrong'] += 1
+            else:
+                rs['dyn_neutral'] += 1
+            if r.get('dynamic_return') is not None:
+                rs['dyn_returns'].append(r['dynamic_return'])
             if r.get('return_1d') is not None:
                 rs['returns_1d'].append(r['return_1d'])
             if r.get('return_1w') is not None:
@@ -488,6 +693,15 @@ class BacktestEngine:
         for rating, rs in rating_stats.items():
             judged = rs['correct'] + rs['wrong']
             rs['accuracy'] = round(rs['correct'] / judged, 4) if judged > 0 else None
+            # 分级动态准确率（评级有效期内的方向命中）
+            dyn_judged = rs['dyn_correct'] + rs['dyn_wrong']
+            rs['dyn_accuracy'] = round(rs['dyn_correct'] / dyn_judged, 4) if dyn_judged > 0 else None
+            rs['dyn_judged'] = dyn_judged
+            rs['dyn_avg_return'] = (
+                round(sum(rs['dyn_returns']) / len(rs['dyn_returns']), 2)
+                if rs['dyn_returns']
+                else None
+            )
             for period in ['1d', '1w', '1m']:
                 vals = rs[f'returns_{period}']
                 rs[f'avg_return_{period}'] = round(sum(vals) / len(vals), 2) if vals else None
@@ -534,7 +748,7 @@ class BacktestEngine:
         # 小样本警告
         small_sample = total < 30
 
-        return {
+        report = {
             'market': market,
             'total': total,
             'accuracy': round(accuracy, 4),
@@ -550,6 +764,9 @@ class BacktestEngine:
             'small_sample_warning': small_sample,
             'sample_period_note': f'样本期: {date_range} (共{len(set(dates))}个交易日)',
         }
+        # 客观解读评语（纯数据驱动，基于真实样本统计）
+        report['interpretation'] = self._build_interpretation(report)
+        return report
 
     # ---------- 个股回测明细 ----------
 
@@ -791,9 +1008,14 @@ def run_historical_simulation():
     from modules.data_adapter import load_stockdata_from_db
     from modules.scoring_engine import analyze
 
+    # 019T T3：模拟行 alpha 判定复用 BacktestEngine 基准计算方法
+    engine = BacktestEngine()
+
     # 幂等：清除旧的模拟回测记录后重新生成，确保四维评分逻辑生效且不产生重复行
     conn = get_connection()
     cursor = conn.cursor()
+    # 破坏性操作（批量删除）前自动备份
+    backup_database('delete_backtest_simulated')
     cursor.execute('DELETE FROM backtest_results WHERE is_simulated = 1')
     cleared = cursor.rowcount if (cursor.rowcount and cursor.rowcount > 0) else 0
     conn.commit()
@@ -924,6 +1146,14 @@ def run_historical_simulation():
                 if primary_correct is None:
                     primary_correct = _judge(rating, return_1m)
 
+                # 019T T3：模拟行同样补基准对比（alpha 判定），缺基准全 NULL
+                alpha_block = engine._compute_alpha_block(
+                    market,
+                    sim_date,
+                    rating,
+                    {'return_1d': return_1d, 'return_1w': return_1w, 'return_1m': return_1m},
+                )
+
                 # 6. 写入 backtest_results（is_simulated=1）
                 now_str = datetime.now(_CN_TZ).strftime('%Y-%m-%d %H:%M:%S')
                 cursor.execute(
@@ -932,8 +1162,11 @@ def run_historical_simulation():
                     (stock_id, rating_id, market, rating_date, rating,
                      price_at_rating, price_1d, price_1w, price_1m,
                      return_1d, return_1w, return_1m,
-                     is_correct, backtest_date, is_simulated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                     is_correct, backtest_date, is_simulated,
+                     bench_return_1d, bench_return_1w, bench_return_1m,
+                     alpha_1d, alpha_1w, alpha_1m, is_correct_alpha)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
+                            ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
                         stock_id,
@@ -950,6 +1183,13 @@ def run_historical_simulation():
                         return_1m,
                         primary_correct,
                         now_str,
+                        alpha_block['bench_return_1d'],
+                        alpha_block['bench_return_1w'],
+                        alpha_block['bench_return_1m'],
+                        alpha_block['alpha_1d'],
+                        alpha_block['alpha_1w'],
+                        alpha_block['alpha_1m'],
+                        alpha_block['is_correct_alpha'],
                     ),
                 )
                 success += 1

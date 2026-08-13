@@ -3,13 +3,26 @@
 负责创建和管理所有数据库表。你不需要手动操作数据库，这个模块会自动建好一切。
 """
 
+import logging
 import os
 import sqlite3
 import sys
+from datetime import datetime
 
 # 确保能找到项目根目录的 config 模块
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import DB_PATH
+
+_logger = logging.getLogger(__name__)
+
+# ============================================================
+# 破坏性操作自动备份配置
+# DROP TABLE / DELETE / 清表 等不可逆操作执行前会自动创建带时间戳的备份
+# ============================================================
+# 备份存放目录：与数据库文件同级的专用 backups/ 文件夹
+BACKUP_DIR = os.path.join(os.path.dirname(DB_PATH), 'backups')
+# 保留最近 N 份备份，超出则按修改时间清理最旧的
+MAX_BACKUPS = 10
 
 
 def get_connection():
@@ -24,6 +37,81 @@ def get_connection():
     conn.execute('PRAGMA busy_timeout=10000')  # 锁等待10秒
     conn.execute('PRAGMA foreign_keys=OFF')  # 关闭外键约束（应用层手动管理级联逻辑）
     return conn
+
+
+def backup_database(reason='manual'):
+    """在破坏性操作前自动创建带时间戳的数据库备份。
+
+    采用 SQLite 在线 .backup() API（而非 shutil 文件复制），保证即使在 WAL 模式下
+    且数据库正被写入时，也能获得事务一致的完整快照（无需手动处理 -wal/-shm 旁路文件）。
+    不修改现有 WAL 模式与 busy_timeout 配置。
+
+    本函数为“尽力而为”语义：备份失败时记录错误并返回 None，不抛异常，由调用方
+    决定是否继续。对于真正不可逆的 DROP TABLE，调用方可检查返回值选择中止。
+
+    Args:
+        reason: 触发备份的原因标识（如 'drop_daily_reports'、'clear_price_backtest'），
+                仅保留字母数字/下划线，写入文件名便于追溯。
+
+    Returns:
+        成功返回备份文件绝对路径；失败返回 None。
+    """
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        # 清理 reason 中不安全的字符，避免破坏文件名
+        safe_reason = ''.join(
+            c if (c.isalnum() or c in '-_') else '_' for c in str(reason)
+        )[:40]
+        backup_name = f'db_backup_{timestamp}_{safe_reason}.db'
+        backup_path = os.path.join(BACKUP_DIR, backup_name)
+
+        # SQLite 在线热备份：源库无需关闭，自动处理 WAL，输出为完整一致的单文件
+        source = sqlite3.connect(DB_PATH)
+        dest = sqlite3.connect(backup_path)
+        try:
+            source.backup(dest)
+        finally:
+            dest.close()
+            source.close()
+
+        # 保留最近 MAX_BACKUPS 份，清理更早的备份
+        _prune_old_backups(keep=MAX_BACKUPS)
+
+        msg = f'[备份] 破坏性操作前已创建数据库备份: {backup_name} (原因: {reason})'
+        print(msg)
+        _logger.info(msg)
+        return backup_path
+    except Exception as e:
+        err = f'[备份警告] 数据库备份失败，破坏性操作前未能生成备份: {e}'
+        print(err)
+        _logger.error(err)
+        return None
+
+
+def _prune_old_backups(keep):
+    """保留最近 keep 份备份，按修改时间删除更早的。
+
+    仅清理由 backup_database 生成的 db_backup_*.db 文件，不影响目录内其他文件。
+    """
+    try:
+        backups = [
+            os.path.join(BACKUP_DIR, f)
+            for f in os.listdir(BACKUP_DIR)
+            if f.startswith('db_backup_') and f.endswith('.db')
+        ]
+        if len(backups) <= keep:
+            return
+        # 按修改时间排序，最旧的在前
+        backups.sort(key=lambda p: os.path.getmtime(p))
+        for old_path in backups[: len(backups) - keep]:
+            try:
+                os.remove(old_path)
+                _logger.info(f'[备份] 清理旧备份: {os.path.basename(old_path)}')
+            except OSError:
+                pass
+    except Exception as e:
+        _logger.warning(f'[备份] 清理旧备份时出错: {e}')
 
 
 def init_database():
@@ -159,6 +247,7 @@ def init_database():
             small_net REAL,                  -- 小单净流入
             north_holding_change REAL,       -- 北向资金/港股通持股变化
             margin_balance REAL,             -- 融资融券余额(万元)
+            ths_net_inflow REAL,             -- 同花顺全资金净流入(万元)，辅助指标（018新增）
             UNIQUE(stock_id, trade_date),
             FOREIGN KEY (stock_id) REFERENCES stocks(id)
         )
@@ -626,6 +715,8 @@ def init_database():
         cursor.execute('PRAGMA index_list(ratings_history)')
         indexes = [row[1] for row in cursor.fetchall()]  # row[1] = index name
         if 'idx_ratings_unique' not in indexes:
+            # 破坏性操作前自动备份（仅在首次迁移清理重复数据时触发一次）
+            backup_database('delete_ratings_history_duplicates')
             # 先清理重复数据：每组 (stock_id, rating_date) 保留 id 最大的
             cursor.execute("""
                 DELETE FROM ratings_history
@@ -701,6 +792,80 @@ def init_database():
             FOREIGN KEY (rule_id) REFERENCES alert_rules(id),
             FOREIGN KEY (stock_id) REFERENCES stocks(id),
             UNIQUE(rule_id, stock_id, trigger_date)  -- 幂等约束：同规则同股票同日不重复
+        )
+    """)
+
+    # ============================================================
+    # 26. 五档盘口表 —— 019Y T1：mootdx 实时行情五档买卖盘（增量数据维度）
+    # 每只股票每天保留最新一条快照（INSERT OR REPLACE，盘中重复采集覆盖当日）
+    # ============================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS stock_orderbook (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stock_id INTEGER NOT NULL,
+            trade_date DATE NOT NULL,        -- 采集日期
+            quote_time TEXT,                 -- 快照时间（北京时间 HH:MM:SS）
+            latest_price REAL,               -- 最新价
+            pct_change REAL,                 -- 涨跌幅(%)
+            bid1_price REAL, bid1_vol REAL,
+            bid2_price REAL, bid2_vol REAL,
+            bid3_price REAL, bid3_vol REAL,
+            bid4_price REAL, bid4_vol REAL,
+            bid5_price REAL, bid5_vol REAL,
+            ask1_price REAL, ask1_vol REAL,
+            ask2_price REAL, ask2_vol REAL,
+            ask3_price REAL, ask3_vol REAL,
+            ask4_price REAL, ask4_vol REAL,
+            ask5_price REAL, ask5_vol REAL,
+            source TEXT DEFAULT NULL,        -- 数据来源：'mootdx'（与 raw_capital_flow.capital_source 同风格）
+            fetched_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+            UNIQUE(stock_id, trade_date),
+            FOREIGN KEY (stock_id) REFERENCES stocks(id)
+        )
+    """)
+
+    # ============================================================
+    # 27. 估值数据表 —— 019Y T2：PE/PB/PS/PCF 历史估值（日级低频）
+    # 主源 akshare（stock_value_em），降级 baostock（query_history_k_data_plus）
+    # ============================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS stock_valuation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stock_id INTEGER NOT NULL,
+            trade_date DATE NOT NULL,        -- 估值对应交易日
+            pe_ttm REAL,                     -- 市盈率(TTM)
+            pe REAL,                         -- 市盈率(静态)
+            pb_mrq REAL,                     -- 市净率
+            ps_ttm REAL,                     -- 市销率(TTM)
+            ps REAL,                         -- 市销率(静态)
+            pcf_ncf_ttm REAL,                -- 市现率(TTM)
+            dv_ttm REAL,                     -- 股息率(TTM)
+            total_mv REAL,                   -- 总市值
+            source TEXT DEFAULT NULL,        -- 数据来源：'akshare' / 'baostock'
+            fetched_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+            UNIQUE(stock_id, trade_date),
+            FOREIGN KEY (stock_id) REFERENCES stocks(id)
+        )
+    """)
+
+    # ============================================================
+    # 28. 限售解禁表 —— 019Y T2：个股限售解禁明细（风险因子，事件级）
+    # 数据源 akshare stock_restricted_release_queue_em
+    # 采集时整表按 stock_id 重建（DELETE + INSERT），为当日快照语义
+    # ============================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS stock_restricted_release (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stock_id INTEGER NOT NULL,
+            release_date DATE NOT NULL,      -- 解禁时间
+            release_type TEXT,               -- 解禁类型（如 首发原股东限售股份）
+            release_shares REAL,             -- 解禁数量（股）
+            actual_shares REAL,              -- 实际解禁数量（股）
+            actual_mv REAL,                  -- 实际解禁市值（元）
+            release_ratio REAL,              -- 占解禁前总股本比例
+            source TEXT DEFAULT NULL,        -- 数据来源：'akshare'
+            fetched_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY (stock_id) REFERENCES stocks(id)
         )
     """)
 
@@ -866,6 +1031,20 @@ def _migrate_columns(cursor):
         ('stocks', 'industry', "TEXT DEFAULT ''"),
         # 005: 日报表新增价格建议列
         ('daily_reports', 'price_advice', 'TEXT'),
+        # 018: 资金面表新增同花顺辅助指标列
+        ('raw_capital_flow', 'ths_net_inflow', 'REAL'),
+        # 019E: 资金面表新增估算标记列（0=真实数据, 1=估算兜底仅展示）
+        ('raw_capital_flow', 'is_estimated', 'INTEGER NOT NULL DEFAULT 0'),
+        # 019K: 资金面表新增数据来源标记列（NULL=东方财富真实；'sina_main'=新浪 lscjfb 主力口径顶替，
+        # 'ths_total'=同花顺全部资金口径顶替——019S 起不再产生新顶替行，仅存量行使用，待存量清零后评审简化）
+        ('raw_capital_flow', 'capital_source', 'TEXT DEFAULT NULL'),
+        # 019P: 基本面表新增数据来源标记列（'sina_abstract'/'sina_analysis_indicator'/'em_hk'；NULL=存量旧数据）
+        ('raw_fundamental', 'data_source', 'TEXT DEFAULT NULL'),
+        # B10: 基本面表新增股东增减持标记列（data_adapter 读取，原由 data_collector._save_holder_increase
+        # 运行时动态 ALTER 添加；迁移列表缺失会导致全新库初始化后 data_adapter 读取崩溃，故补登记）
+        ('raw_fundamental', 'holder_increase', 'BOOLEAN'),
+        # 019Y: K线表新增数据来源标记列（'mootdx'=K线降级备用源；NULL=腾讯主源，与资本面 capital_source 同风格）
+        ('raw_kline', 'data_source', 'TEXT DEFAULT NULL'),
     ]
     for table, column, col_type in migrations:
         try:
@@ -936,6 +1115,8 @@ def _migrate_daily_reports_type(cursor):
                key_factors, data_warnings, status, error_msg, markdown_content,
                generated_at, price_advice, 'daily'
         FROM daily_reports""")
+    # 破坏性操作（DROP TABLE）前自动备份
+    backup_database('drop_daily_reports_rebuild')
     cursor.execute('DROP TABLE daily_reports')
     cursor.execute('ALTER TABLE daily_reports_new RENAME TO daily_reports')
     # 重建索引
@@ -962,6 +1143,10 @@ def _ensure_price_backtest_columns(cursor=None):
         'anchor_rating': 'TEXT',  # 匹配到的历史评级值
         'bias_risk': 'TEXT',  # 偏差风险：high/medium/low
         'days_since_rating': 'INTEGER',  # 回测日距最近评级日的天数
+        't5_hit_add': 'INTEGER',  # 补仓区间命中（有持仓网格补仓位，T+5）
+        't20_hit_add': 'INTEGER',  # 补仓区间命中（T+20）
+        't5_hit_hold': 'INTEGER',  # 持有区间命中（未触发止盈且未触发止损，T+5）
+        't20_hit_hold': 'INTEGER',  # 持有区间命中（T+20）
     }
     cursor.execute('PRAGMA table_info(price_backtest_results)')
     existing = {row['name'] for row in cursor.fetchall()}

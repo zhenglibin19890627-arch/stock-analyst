@@ -24,15 +24,15 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import BATCH_TIMEOUT_SECONDS, STOCK_TIMEOUT_SECONDS
 from database.db_manager import get_connection
 
-from modules.advisor import generate_advice
+# 019A: 收敛三表一致逻辑，关键因子/Markdown 构建函数统一从 advisor 导入
+# 避免 daily_report 与 advisor 重复定义导致 drift
+from modules.advisor import _build_key_factors, _build_markdown_single, generate_advice
 
 # FIX-A：日报流程集成数据采集
 from modules.data_collector import collect_stock_data, fetch_capital_flow_batch
@@ -49,40 +49,161 @@ _REPORTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 _scheduler_started = False
 _scheduler_timer = None
 _optimizer_timer = None  # M9: 每周优化定时器
+_capital_retry_timer = None  # 019Q: 资金面延迟补采一次性 Timer（30分钟）
 _atexit_registered = False  # 标记 atexit 钩子是否已注册（供测试验证）
 _generate_lock = threading.Lock()  # 修正项2：防抖保护
 
+# 019X T2：资金流采集三窗调度（错峰拆分，降低单窗口东财请求密度）
+# 窗1(16:10)/窗2(16:40)/窗3(17:10)，每窗采集资金流东财清单的 1/3（按代码排序固定切分）；
+# 窗1/窗2 只采集不生成报告；窗3 采集完成后执行一次完整日报流程。
+_CAPITAL_WINDOW_COUNT = 3
+_CAPITAL_WINDOW_TIMES = ((16, 10), (16, 40), (17, 10))  # 窗1/窗2/窗3 固定钟点
 
-def _scheduler_tick():
-    """定时器回调：每日触发报告生成"""
+
+def _scheduler_tick(window_idx=0):
+    """定时器回调：T2 三窗调度（窗1/窗2 只采集资金流东财清单的1/3，窗3 采集后执行完整日报流程）
+
+    窗间串联：本窗任务开始时预先注册下一窗的一次性 daemon Timer（固定钟点，
+    与 _schedule_capital_retry 同型）；若前窗超时未结束，后窗触发时获取生成锁
+    超时即跳过并记日志，剩余股票由补采链路兜底。
+    """
     global _scheduler_timer
     try:
-        logger.info('定时调度器触发每日报告生成')
-        generate_daily_report()
-
-        # P3-B: 日报生成后挂载预警扫描（异常隔离，不阻塞日报）
-        # 架构师 D1 评审：双层异常隔离，预警扫描失败仅记日志
-        try:
-            from modules.alert_engine import scan_once
-
-            scan_once()
-        except Exception as e:
-            logger.error(f'P3-B 预警扫描异常（不阻塞日报）: {e}', exc_info=True)
-
+        if window_idx < _CAPITAL_WINDOW_COUNT - 1:
+            _register_capital_window(window_idx + 1)
+        _run_capital_window(window_idx)
     except Exception as e:
         logger.error(f'定时调度器执行异常: {e}', exc_info=True)
     finally:
-        # 注册下一次定时（24小时后）
-        _schedule_next()
+        # 窗3 结束后注册次日窗1（16:10）
+        if window_idx >= _CAPITAL_WINDOW_COUNT - 1:
+            _schedule_next()
+
+
+def _split_em_capital_list(a_symbols):
+    """019X T2：资金流东财清单按代码排序固定切分为 1/3 三份（可复现切分）"""
+    sorted_symbols = sorted(a_symbols)
+    n = len(sorted_symbols)
+    if n == 0:
+        return [[], [], []]
+    size = (n + _CAPITAL_WINDOW_COUNT - 1) // _CAPITAL_WINDOW_COUNT
+    return [
+        sorted_symbols[i * size:(i + 1) * size]
+        for i in range(_CAPITAL_WINDOW_COUNT)
+    ]
+
+
+def _run_capital_window(window_idx):
+    """019X T2：单窗任务体。窗1/窗2 只采集资金流东财清单的1/3；
+    窗3 采集完成后执行一次完整日报流程（挂载顺序与现状一致）。
+
+    并发防护：复用 _generate_lock（后窗触发时前窗未结束则跳过并记日志，
+    剩余股票由补采链路兜底）；窗3 的日报流程内部自行获取生成锁，
+    故本处采集完毕立即释放，避免死锁。
+    """
+    try:
+        a_symbols = sorted(s['symbol'] for s in _get_all_stocks() if s['market'] == 'a_stock')
+        third = _split_em_capital_list(a_symbols)[window_idx]
+
+        if not _generate_lock.acquire(timeout=5):
+            logger.warning(
+                f'[资金流采集窗] 第{window_idx + 1}窗触发时前一任务仍在运行'
+                f'（获取生成锁超时），跳过本窗采集，剩余股票由补采链路兜底'
+            )
+            return
+        try:
+            if third:
+                logger.info(
+                    f'[资金流采集窗] 第{window_idx + 1}窗开始采集'
+                    f'（{len(third)}/{len(a_symbols)}只）: {third}'
+                )
+                result = fetch_capital_flow_batch(third)
+                logger.info(f'[资金流采集窗] 第{window_idx + 1}窗采集完成: {result}')
+            else:
+                logger.info(f'[资金流采集窗] 第{window_idx + 1}窗清单为空，跳过采集')
+        except Exception as e:
+            logger.error(f'[资金流采集窗] 第{window_idx + 1}窗采集异常（仅记日志，不阻塞调度）: {e}', exc_info=True)
+        finally:
+            _generate_lock.release()
+    except Exception as e:
+        logger.error(f'[资金流采集窗] 第{window_idx + 1}窗任务异常: {e}', exc_info=True)
+
+    if window_idx >= _CAPITAL_WINDOW_COUNT - 1:
+        _run_full_report_flow()
+
+
+def _register_capital_window(window_idx):
+    """019X T2：注册第 window_idx+1 个资金流采集窗（一次性 daemon Timer，与 _schedule_capital_retry 同型）
+
+    固定钟点触发；若目标钟点已过（前窗超时），尽快补触发（1秒后），
+    保证后窗不因前窗耗时而被无限顺延。
+    """
+    global _scheduler_timer
+    hour, minute = _CAPITAL_WINDOW_TIMES[window_idx]
+    now = datetime.now(_CN_TZ)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    delay = (target - now).total_seconds()
+    if delay <= 0:
+        delay = 1  # 已过固定钟点，尽快补触发
+    _scheduler_timer = threading.Timer(delay, _scheduler_tick, args=(window_idx,))
+    _scheduler_timer.daemon = True
+    _scheduler_timer.start()
+    logger.info(
+        f'下次资金流采集窗{window_idx + 1}/3: {target.strftime("%Y-%m-%d %H:%M")}'
+        f' ({delay:.0f}秒后)'
+    )
+
+
+def _run_full_report_flow():
+    """019X T2：窗3 采集完成后执行一次完整日报流程（挂载顺序与现状完全一致）
+
+    日报生成 → P3-B 预警扫描 → 延迟补采注册 → 指数刷新，各环节异常隔离仅记日志。
+    """
+    logger.info('定时调度器触发每日报告生成')
+    generate_daily_report()
+
+    # P3-B: 日报生成后挂载预警扫描（异常隔离，不阻塞日报）
+    # 架构师 D1 评审：双层异常隔离，预警扫描失败仅记日志
+    try:
+        from modules.alert_engine import scan_once
+
+        scan_once()
+    except Exception as e:
+        logger.error(f'P3-B 预警扫描异常（不阻塞日报）: {e}', exc_info=True)
+
+    # 019Q Task 5：延迟自动补采注册点（D-3 裁定）
+    # generate_daily_report() 返回后、_schedule_next() 前调用；不注册在
+    # generate_daily_report 内部——该函数同时被 app.py 手动 API 与 force 重跑
+    # 调用，内部注册会让手动触发产生 30 分钟延迟副作用（D-3 裁定）。
+    # 缺口数 > 0 且工作日才注册；一次性 daemon Timer(1800)，回调内不再注册
+    # → 天然满足"仍失败不再重试，等待次日批次"。异常隔离仅记日志，不阻塞调度。
+    try:
+        _stocks = _get_all_stocks()
+        _a_symbols = [s['symbol'] for s in _stocks if s['market'] == 'a_stock']
+        _schedule_capital_retry(_a_symbols)
+    except Exception as e:
+        logger.error(f'[资金面补采] 延迟补采注册异常（不阻塞调度）: {e}', exc_info=True)
+
+    # 019T T3（评审 P-3 / R-5 修复）：指数定时刷新挂载点
+    # generate_daily_report() 返回后、_schedule_next() 前调用；指数刷新此前仅
+    # 依赖手动 API（POST /api/index-ratings/refresh），导致 index_kline 长期滞后
+    # （库内止于 08-05，08-06/08-07 缺失）。7 只指数、耗时可忽略；异常隔离只记
+    # 日志，与 P3-B 预警扫描同一挂载模式，不阻塞调度。
+    try:
+        from modules.index_collector import refresh_all
+
+        refresh_all()
+    except Exception as e:
+        logger.error(f'指数定时刷新异常（不阻塞调度）: {e}', exc_info=True)
 
 
 def _schedule_next():
-    """计算到明天同一时间的秒数，注册下一次定时"""
+    """019X T2：窗3 结束后注册次日窗1（16:10）"""
     global _scheduler_timer
     now = datetime.now(_CN_TZ)
-    tomorrow = now.replace(hour=18, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    tomorrow = now.replace(hour=16, minute=10, second=0, microsecond=0) + timedelta(days=1)
     delay = (tomorrow - now).total_seconds()
-    _scheduler_timer = threading.Timer(delay, _scheduler_tick)
+    _scheduler_timer = threading.Timer(delay, _scheduler_tick, args=(0,))
     _scheduler_timer.daemon = True
     _scheduler_timer.start()
     logger.info(f'下次定时报告: {tomorrow.strftime("%Y-%m-%d %H:%M")} ({delay:.0f}秒后)')
@@ -122,22 +243,123 @@ def start_scheduler():
     global _atexit_registered
     _atexit_registered = True
 
-    _schedule_next()
+    now = datetime.now(_CN_TZ)
+    last_window_time = now.replace(hour=17, minute=10, second=0, microsecond=0)
+    if now >= last_window_time:
+        # 019Z: 今天三窗已全部结束（17:10之后启动），排到明天
+        _schedule_next()
+    else:
+        # 019Z: 今天还有窗未到，注册今天的窗1（已过钟点由1秒补触发兜底）
+        _register_capital_window(0)
     _schedule_optimizer_next()  # M9: 启动每周优化定时器
-    logger.info('✅ 每日报告定时调度器已启动（默认每日18:00，每周日20:00自动优化）')
+    logger.info('✅ 每日报告定时调度器已启动（默认每日16:10，每周日20:00自动优化）')
 
 
 def stop_scheduler():
     """停止定时调度器（进程退出时调用）"""
-    global _scheduler_timer, _optimizer_timer, _scheduler_started
+    global _scheduler_timer, _optimizer_timer, _scheduler_started, _capital_retry_timer
     if _scheduler_timer is not None:
         _scheduler_timer.cancel()
         _scheduler_timer = None
     if _optimizer_timer is not None:
         _optimizer_timer.cancel()
         _optimizer_timer = None
+    if _capital_retry_timer is not None:
+        # 019Q Task 5.6：防御性取消未触发的资金面补采 Timer
+        # （daemon 线程进程退出即亡，此处为防御性收尾）
+        _capital_retry_timer.cancel()
+        _capital_retry_timer = None
     _scheduler_started = False
     logger.info('定时调度器已停止')
+
+
+# ================================================================
+# 019Q Task 5：资金面延迟自动补采（D-3 裁定：甲+乙融合）
+# 注册点：_scheduler_tick（generate_daily_report 返回后、_schedule_next 前）
+# 触发条件：缺口数 > 0 且工作日（周一~周五，019G 同型判定）
+# 任务体：_generate_lock 短超时 + 复用 fetch_capital_flow_batch（019E 补采清单入口）
+# 一次性：threading.Timer(1800)、daemon=True（与 _schedule_next 同型，L85-86）
+# ================================================================
+
+
+def _capital_retry_once(a_symbols):
+    """019Q Task 5：延迟补采任务体（一次性，回调内不注册下一次）
+
+    先 _generate_lock.acquire(timeout=5) 防与手动批次并发写库（R-6），拿不到即放弃
+    本轮（手动批次本身含资金面采集，放弃无害）；拿到后调用
+    fetch_capital_flow_batch(a_symbols)——复用 019E 补采清单入口：只有东财真数据
+    （capital_source IS NULL 且非估算）才算"已完成"；sina_main / ths_total 行仍
+    进入补采清单 —— 东财 30 分钟内恢复时可覆盖回补（"东财恢复后自动回补"的实现），
+    新浪重采不降级已有数据（019Q QA F9 实证）。019S：主力净流入链路为东财三层 →
+    新浪 lscjfb 主力口径(sina_main) → 估算兜底（仅展示不参评），ths_total 仅为
+    历史存量（处置后清零），字面量保留仅为防御。异常隔离仅记日志。
+    """
+    if not _generate_lock.acquire(timeout=5):
+        logger.warning('[资金面补采] 获取生成锁超时（可能与手动批次并发），放弃本轮延迟补采')
+        return
+    try:
+        logger.info(f'[资金面补采] 延迟补采开始（30分钟一次性），待采: {a_symbols}')
+        result = fetch_capital_flow_batch(a_symbols)
+        logger.info(f'[资金面补采] 延迟补采完成: {result}')
+    except Exception as e:
+        logger.error(f'[资金面补采] 延迟补采异常（仅记日志，不再重试）: {e}', exc_info=True)
+    finally:
+        _generate_lock.release()
+
+
+def _schedule_capital_retry(a_symbols):
+    """019Q Task 5：延迟自动补采注册（模块级，仅由 _scheduler_tick 调用）
+
+    缺口判定（M-6，必须带 is_estimated 条件）：
+    len(a_symbols) - COUNT(当日 raw_capital_flow WHERE stock_id IN a_symbols
+      AND capital_source IS NULL AND (is_estimated=0 OR is_estimated IS NULL)) > 0
+    估算兜底行 capital_source=NULL（DB 实证）——若缺口 SQL 只判 capital_source IS NULL
+    会把估算行误计为"EM 成功"→ 延迟补采永不触发；必须附加 is_estimated 条件（M-6）。
+    """
+    global _capital_retry_timer
+    now = datetime.now(_CN_TZ)
+    # 工作日（周一~周五，019G 同型判定）才注册；非交易日不注册（R-4 双保险第2道）
+    if now.weekday() >= 5:  # 5=周六, 6=周日
+        logger.info(f'[资金面补采] 非交易日（{now.strftime("%A")}），不注册延迟补采')
+        return
+    if not a_symbols:
+        return
+    if _capital_retry_timer is not None and _capital_retry_timer.is_alive():
+        logger.info('[资金面补采] 已有未触发的延迟补采 Timer，跳过重复注册')
+        return
+
+    today_str = now.strftime('%Y-%m-%d')
+    gap = 0
+    try:
+        placeholders = ','.join('?' for _ in a_symbols)
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            f'SELECT COUNT(DISTINCT rc.stock_id) FROM raw_capital_flow rc '
+            f'JOIN stocks s ON s.id = rc.stock_id '
+            f'WHERE s.symbol IN ({placeholders}) AND s.market = ? AND rc.trade_date = ? '
+            f'AND rc.capital_source IS NULL '
+            f'AND (rc.is_estimated = 0 OR rc.is_estimated IS NULL)',
+            (*a_symbols, 'a_stock', today_str),
+        )
+        real_count = cursor.fetchone()[0]
+        conn.close()
+        gap = len(a_symbols) - real_count
+    except Exception as e:
+        logger.error(f'[资金面补采] 缺口统计异常（不注册）: {e}')
+        return
+
+    if gap <= 0:
+        logger.info(f'[资金面补采] 无缺口（{len(a_symbols)} 只均有真实数据），不注册延迟补采')
+        return
+
+    _capital_retry_timer = threading.Timer(1800, _capital_retry_once, args=(a_symbols,))
+    _capital_retry_timer.daemon = True
+    _capital_retry_timer.start()
+    logger.info(
+        f'[资金面补采] 检测到 {gap}/{len(a_symbols)} 只缺口，30分钟后自动补采'
+        f'（一次性，不再重试；与次日16:10批次无冲突）'
+    )
 
 
 # ================================================================
@@ -219,154 +441,8 @@ def _get_prev_score(stock_id, report_date):
     return row['total_score'] if row else None
 
 
-def _build_key_factors(advice_result):
-    """从 advisor 结果提取关键因子摘要"""
-    factors = {}
-    dims = advice_result.get('dimensions', {})
-
-    for dim_key in ['kline', 'fundamental', 'capital_flow', 'news']:
-        d = dims.get(dim_key, {})
-        if d.get('status') == 'ok':
-            factors[dim_key] = {
-                'score': round(d.get('score', 0), 1),
-                'weight': round(d.get('weight', 0), 4),
-                'top_factors': _pick_top_factors(dim_key, d.get('factors', {})),
-            }
-
-    return factors
-
-
-def _pick_top_factors(dim_key, factors_dict):
-    """提取每个维度最多3个关键因子"""
-    priority = {
-        'kline': [
-            'ma_trend',
-            'rsi_status',
-            'recent_trend',
-            'volume',
-            'boll_position',
-            'dimension_score',
-            'data_completeness',
-        ],
-        'fundamental': [
-            'pe_ratio',
-            'roe',
-            'revenue_growth',
-            'pb_ratio',
-            'net_margin',
-            'debt_ratio',
-            'dimension_score',
-            'data_completeness',
-        ],
-        'capital_flow': [
-            'main_trend',
-            'consecutive',
-            'main_pct',
-            'super_large',
-            'main_avg_5d',
-            'dimension_score',
-            'data_completeness',
-        ],
-        'news': [
-            'avg_sentiment',
-            'positive_ratio',
-            'top_news',
-            'news_activity',
-            'extreme_warning',
-            'dimension_score',
-            'data_completeness',
-        ],
-    }
-    keys = priority.get(dim_key, [])
-    result = {}
-    count = 0
-    for k in keys:
-        if k in factors_dict and factors_dict[k] is not None:
-            val = factors_dict[k]
-            if isinstance(val, str) and len(val) > 50:
-                val = val[:50] + '...'
-            result[k] = val
-            count += 1
-            if count >= 3:
-                break
-    # 补充其他因子
-    for k, v in factors_dict.items():
-        if count >= 4:
-            break
-        if k not in result and not k.startswith('_') and v is not None:
-            val = v
-            if isinstance(val, str) and len(val) > 50:
-                val = val[:50] + '...'
-            result[k] = val
-            count += 1
-    return result
-
-
-def _build_markdown_single(advice_result, prev_score):
-    """构建单只股票的 Markdown 报告片段"""
-    code = advice_result.get('stock_code', '')
-    name = advice_result.get('stock_name', '')
-    engine = advice_result.get('engine_version', 'legacy')
-    total = advice_result.get('total_score', 0)
-    rating = advice_result.get('rating', '?')
-    rating_label = advice_result.get('rating_label', '')
-    action = advice_result.get('action_advice', '')
-
-    engine_tag = '🚀 v5引擎' if engine == 'v5' else '⚙️ 经典引擎（简化版）'
-
-    md = f'### {name} ({code}) — {engine_tag}\n\n'
-
-    # 评分行
-    score_change_str = ''
-    if prev_score is not None:
-        change = total - prev_score
-        arrow = '↑' if change > 0 else ('↓' if change < 0 else '→')
-        score_change_str = f'（较昨日 {arrow} {abs(change):.1f}）'
-    md += f'- **综合评分**：{total:.1f}（{rating}级 · {rating_label}）{score_change_str}\n'
-    md += f'- **操作建议**：{action}\n'
-
-    # 四维评分
-    dims = advice_result.get('dimensions', {})
-    dim_names = {
-        'kline': '技术面',
-        'fundamental': '基本面',
-        'capital_flow': '资金面',
-        'news': '消息面',
-    }
-    dim_scores = []
-    for dk in ['kline', 'fundamental', 'capital_flow', 'news']:
-        d = dims.get(dk, {})
-        score = d.get('score', 0) if d.get('status') == 'ok' else None
-        if score is not None:
-            dim_scores.append(f'{dim_names[dk]} {score:.1f}')
-        else:
-            dim_scores.append(f'{dim_names[dk]} —')
-    md += f'- **四维**：{" | ".join(dim_scores)}\n'
-
-    # 数据完整度（仅v5）
-    if advice_result.get('data_quality'):
-        dq = advice_result['data_quality']
-        md += (
-            f'- **数据完整度**：技术{int(dq.get("technical", 0) * 100)}% '
-            f'基本{int(dq.get("fundamental", 0) * 100)}% '
-            f'资金{int(dq.get("capital", 0) * 100)}% '
-            f'消息{int(dq.get("news", 0) * 100)}%\n'
-        )
-
-    # 降级提示
-    warnings = advice_result.get('data_warnings', [])
-    if warnings:
-        md += f'- **降级提示**：{len(warnings)}条降级规则触发\n'
-
-    # 风险提示
-    risks = advice_result.get('risk_warnings', [])
-    if risks:
-        md += '- **风险提示**：\n'
-        for r in risks[:3]:
-            md += f'  - {r}\n'
-
-    md += '\n'
-    return md
+# 019A: 关键因子/Markdown 构建函数已收敛至 advisor 模块，此处统一导入
+# （_build_key_factors / _build_markdown_single 见文件顶部 import）
 
 
 def _save_report(
@@ -448,20 +524,51 @@ def _save_report(
 # 012-B: 进度追踪 + 超时控制辅助函数
 # ================================================================
 
+# 进度文件并发写锁（线程池内多只股票同时更新 stage 时防互相覆盖）
+_progress_lock = threading.Lock()
+# 进度文件路径（供查询 API 复用）
+_REPORT_PROGRESS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'logs',
+    'report_progress.json',
+)
+
 
 def _update_progress_file(data: dict):
-    """012-B: 更新进度文件 logs/report_progress.json"""
+    """012-B: 更新进度文件 logs/report_progress.json（线程安全）"""
     try:
-        progress_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            'logs',
-            'report_progress.json',
-        )
-        os.makedirs(os.path.dirname(progress_path), exist_ok=True)
-        with open(progress_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.makedirs(os.path.dirname(_REPORT_PROGRESS_PATH), exist_ok=True)
+        with _progress_lock:
+            with open(_REPORT_PROGRESS_PATH, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass  # 进度文件写入失败不阻塞业务
+
+
+def _update_progress_stage(symbol: str, stage: str, current: int = None):
+    """增量更新进度文件的 stage（当前正在做什么）与 last_update。
+
+    由工作线程（_process_single_stock）调用：读现有进度 → 更新 stage → 写回。
+    失败静默，不阻塞采集流程。
+    """
+    try:
+        with _progress_lock:
+            data = {}
+            try:
+                with open(_REPORT_PROGRESS_PATH, encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception:
+                return
+            data['stage'] = stage
+            if symbol:
+                data['current_symbol'] = symbol
+            if current is not None:
+                data['current'] = current
+            data['last_update'] = datetime.now(_CN_TZ).strftime('%Y-%m-%d %H:%M:%S')
+            with open(_REPORT_PROGRESS_PATH, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass  # 进度写入失败不阻塞业务
 
 
 def _process_single_stock(stock, target_date, force, report_type='daily'):
@@ -515,12 +622,18 @@ def _process_single_stock(stock, target_date, force, report_type='daily'):
         }
 
     # FIX-A 改动2：每只股票先采集后分析
+    # 012-B 增强：线程内更新进度 stage（采集阶段），前端进度条可显示"当前在干什么"
+    _update_progress_stage(symbol, '采集数据中')
     collect_stock_data(symbol, market)
+    _update_progress_stage(symbol, '分析评分中')
     # 统一调用 advisor.generate_advice()，由 engine_switcher 自动分流
     advice = generate_advice(stock_id, report_date=target_date)
 
     if not advice.get('success'):
+        _update_progress_stage(symbol, '生成失败')
         raise Exception(advice.get('message', '生成失败'))
+
+    _update_progress_stage(symbol, '写入报告')
 
     # 005: 日报集成价格建议
     from modules.price_advisor import generate_price_advice
@@ -616,7 +729,7 @@ def generate_daily_report(target_date=None, force=False, report_type='daily'):
         fallback_count = 0
         reuse_count = 0
 
-        # === FIX-A 改动1：循环前批量预取A股资金面 ===
+        # === 018: 循环前批量预取A股同花顺辅助指标（不阻断东财逐只采集） ===
         a_symbols = [s['symbol'] for s in stocks if s['market'] == 'a_stock']
         if a_symbols:
             try:
@@ -637,6 +750,7 @@ def generate_daily_report(target_date=None, force=False, report_type='daily'):
                 'current': 0,
                 'current_symbol': '',
                 'current_name': '',
+                'stage': '准备中',
                 'status': 'running',
                 'started_at': started_at_str,
                 'last_update': '',
@@ -665,6 +779,7 @@ def generate_daily_report(target_date=None, force=False, report_type='daily'):
                     'current': idx,
                     'current_symbol': symbol,
                     'current_name': name,
+                    'stage': '开始处理',
                     'status': 'running',
                     'started_at': started_at_str,
                     'last_update': datetime.now(_CN_TZ).strftime('%Y-%m-%d %H:%M:%S'),
@@ -672,46 +787,62 @@ def generate_daily_report(target_date=None, force=False, report_type='daily'):
                 }
             )
 
-            # 单只超时控制
+            # 单只超时控制（019J：daemon 线程 + join(timeout)，替代 executor 上下文管理器
+            # M-1 红线：executor 上下文管理器退出时 __exit__ 调用 shutdown(wait=True)
+            # 会 join 挂死 worker，超时保护形同虚设——本实现超时后立即 continue，不 join 不等待 worker）
             try:
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(
-                        _process_single_stock, stock, target_date, force, report_type
-                    )
+                # box 模式：线程内异常不自动传播，必须显式捕获（否则超时判定会误判）
+                box = {'exc': None}
+
+                def _run_single_stock():
                     try:
-                        result = future.result(timeout=STOCK_TIMEOUT_SECONDS)
-                    except FuturesTimeout:
-                        fail_count += 1
-                        logger.error(f'[日报进度] {symbol} 超时({STOCK_TIMEOUT_SECONDS}s)，跳过')
-                        _save_report(
-                            report_date=target_date,
-                            stock_id=stock_id,
-                            stock_code=symbol,
-                            stock_name=name,
-                            engine_version=None,
-                            total_score=None,
-                            rating=None,
-                            rating_label=None,
-                            prev_score=None,
-                            score_change=None,
-                            key_factors=None,
-                            data_warnings=None,
-                            markdown_content=None,
-                            status='failed',
-                            error_msg=f'采集超时({STOCK_TIMEOUT_SECONDS}s)',
-                            price_advice=None,
-                            report_type=report_type,
-                        )
-                        results.append(
-                            {
-                                'stock_id': stock_id,
-                                'symbol': symbol,
-                                'name': name,
-                                'status': 'failed',
-                                'error': f'采集超时({STOCK_TIMEOUT_SECONDS}s)',
-                            }
-                        )
-                        continue
+                        box['r'] = _process_single_stock(stock, target_date, force, report_type)
+                    except Exception as e:
+                        box['exc'] = e
+
+                t = threading.Thread(target=_run_single_stock, daemon=True)
+                t.start()
+                t.join(timeout=STOCK_TIMEOUT_SECONDS)
+                if t.is_alive():
+                    # 超时：写 failed 记录 + results.append + continue，不等待 worker
+                    # （worker 迟到完成时 _process_single_stock 内部 _save_report
+                    #   DELETE+INSERT 会覆盖 failed 为 ok，数据自愈不丢分）
+                    fail_count += 1
+                    logger.error(f'[日报进度] {symbol} 超时({STOCK_TIMEOUT_SECONDS}s)，跳过')
+                    _save_report(
+                        report_date=target_date,
+                        stock_id=stock_id,
+                        stock_code=symbol,
+                        stock_name=name,
+                        engine_version=None,
+                        total_score=None,
+                        rating=None,
+                        rating_label=None,
+                        prev_score=None,
+                        score_change=None,
+                        key_factors=None,
+                        data_warnings=None,
+                        markdown_content=None,
+                        status='failed',
+                        error_msg=f'采集超时({STOCK_TIMEOUT_SECONDS}s)',
+                        price_advice=None,
+                        report_type=report_type,
+                    )
+                    results.append(
+                        {
+                            'stock_id': stock_id,
+                            'symbol': symbol,
+                            'name': name,
+                            'status': 'failed',
+                            'error': f'采集超时({STOCK_TIMEOUT_SECONDS}s)',
+                        }
+                    )
+                    continue
+
+                # 线程内异常重抛，走外层 except（fail_count+1 + failed 记录，与现状一致）
+                if box.get('exc') is not None:
+                    raise box['exc']
+                result = box['r']
 
                 # 处理成功结果
                 if result.get('reused'):
@@ -789,6 +920,7 @@ def generate_daily_report(target_date=None, force=False, report_type='daily'):
                 'current': total,
                 'current_symbol': '',
                 'current_name': '',
+                'stage': '完成',
                 'status': 'done',
                 'started_at': started_at_str,
                 'last_update': datetime.now(_CN_TZ).strftime('%Y-%m-%d %H:%M:%S'),
@@ -816,6 +948,7 @@ def generate_daily_report(target_date=None, force=False, report_type='daily'):
         summary = {
             'success': True,
             'report_date': target_date,
+            'finished_at': datetime.now(_CN_TZ).strftime('%Y-%m-%d %H:%M:%S'),  # 019D: 批次生成时刻
             'total': len(stocks),
             'success_count': success_count,
             'fail_count': fail_count,
@@ -1000,7 +1133,7 @@ def get_latest_reports():
     cursor.execute(
         """
         SELECT * FROM daily_reports
-        WHERE report_date = ? AND report_type = 'daily'
+        WHERE report_date = ? AND report_type = 'daily' AND status = 'ok'
         ORDER BY total_score DESC
     """,
         (latest_date,),
@@ -1011,7 +1144,7 @@ def get_latest_reports():
         cursor.execute(
             """
             SELECT * FROM daily_reports
-            WHERE report_date = ? AND report_type = 'intraday'
+            WHERE report_date = ? AND report_type = 'intraday' AND status = 'ok'
             ORDER BY total_score DESC
         """,
             (latest_date,),
@@ -1031,7 +1164,7 @@ def get_reports_by_date(report_date):
     cursor.execute(
         """
         SELECT * FROM daily_reports
-        WHERE report_date = ? AND report_type = 'daily'
+        WHERE report_date = ? AND report_type = 'daily' AND status = 'ok'
         ORDER BY total_score DESC
     """,
         (report_date,),
@@ -1042,7 +1175,7 @@ def get_reports_by_date(report_date):
         cursor.execute(
             """
             SELECT * FROM daily_reports
-            WHERE report_date = ? AND report_type = 'intraday'
+            WHERE report_date = ? AND report_type = 'intraday' AND status = 'ok'
             ORDER BY total_score DESC
         """,
             (report_date,),

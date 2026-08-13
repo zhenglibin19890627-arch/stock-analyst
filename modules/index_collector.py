@@ -54,7 +54,18 @@ def fetch_index_kline(index_info: dict) -> pd.DataFrame:
         if market == 'A':
             df = ak.stock_zh_index_daily(symbol=symbol)
         else:
-            df = ak.stock_hk_index_daily_em(symbol=symbol)
+            # 019T T3（评审 P-3）：HK 分支 EM→sina 降级顺序。
+            # stock_hk_index_daily_em 现网不可达（ConnectionError RemoteDisconnected，
+            # 与 019Q 000001 东财挂停同款故障家族）；stock_hk_index_daily_sina 实测可用
+            # （3,190 行至 2026-08-07，列含 date/open/high/low/close/volume/amount）。
+            # sina 多出的 amount 列在下方列投影中被忽略，列名映射天然兼容。
+            try:
+                df = ak.stock_hk_index_daily_em(symbol=symbol)
+            except Exception as e:
+                logger.warning(
+                    f'[指数K线] {index_info["name"]}({symbol}) EM 接口不可用({e})，降级新浪源'
+                )
+                df = ak.stock_hk_index_daily_sina(symbol=symbol)
 
         if df is None or df.empty:
             logger.warning(f'[指数K线] {index_info["name"]}({symbol}) 返回空数据')

@@ -14,12 +14,7 @@
     "688981",
     "002458"
   ],
-  "blacklist": [
-    {
-      "symbol": "HK1024",
-      "tripped_at": "2026-07-31T13:33:58.055706+08:00"
-    }
-  ],
+  "blacklist": [],
   "circuit_breaker": {
     "max_consecutive_failures": 2,
     "cooldown_hours": 24

@@ -41,8 +41,8 @@ echo "  ✓ 使用 Python: $PYTHON_EXE (v$PY_VERSION)"
 $PYTHON_EXE -c "
 import sys
 v = sys.version_info
-if v.major < 3 or (v.major == 3 and v.minor < 8):
-    print('  ! 警告: Python 版本低于 3.8，建议升级')
+if v.major < 3 or (v.major == 3 and v.minor < 12):
+    print('  ! 警告: Python 版本低于 3.12，建议升级')
 " || true
 
 # --- Step 2: 依赖检查 ---

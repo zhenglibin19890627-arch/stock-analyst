@@ -310,6 +310,12 @@ def record_v5_success(stock_id: int):
 
 def _add_to_blacklist(symbol: str, tripped_at: str):
     """将股票添加到 config 的 blacklist（同步写盘）"""
+    # P0-2: 防御空 symbol（stock_id→symbol 解析失败时禁止写入脏数据）
+    if not symbol or not str(symbol).strip():
+        logger.warning('_add_to_blacklist 跳过：symbol 为空，不写入黑名单')
+        return
+    symbol = str(symbol).strip()
+
     config = _load_config()
     blacklist = config.get('blacklist', [])
 

@@ -213,6 +213,10 @@ def _describe_dimension(dim_key, dim_info):
         roe_val = factors.get('roe', '')
         debt = factors.get('debt_ratio', '')
         pe = factors.get('pe_ratio', '')
+        # 019P：趋势文案优先追加（评分理由；改善/平稳入 highlights，恶化走 _detect_risks）
+        fund_trend = factors.get('fund_trend', '')
+        if fund_trend and '恶化' not in fund_trend and '历史数据不足' not in fund_trend:
+            highlights.append(f'基本面趋势:{fund_trend}')
         if '优秀' in roe_val or '良好' in roe_val:
             highlights.append(f'ROE{roe_val.split("(")[0] if "(" in roe_val else roe_val}')
         if debt and '%' in debt:
@@ -405,6 +409,11 @@ def _detect_risks(dimensions):
     if '亏损' in roe_val:
         risks.append(f'ROE{roe_val}，公司处于亏损状态')
 
+    # 019P：基本面趋势恶化 → 追加恶化提示（风险提示；仅展示不进评分）
+    fund_trend = fund_factors.get('fund_trend', '')
+    if fund_trend and '恶化' in fund_trend:
+        risks.append(f'基本面趋势恶化：{fund_trend}')
+
     # 资金面风险
     cap = dimensions.get('capital_flow', {})
     cap_factors = cap.get('factors', {})
@@ -430,8 +439,258 @@ def _detect_risks(dimensions):
 
 
 # ============================================================
+# 五-1、日报关键因子与 Markdown 构建（019A 从 daily_report 收敛至 advisor，单一来源）
+# ============================================================
+
+
+def _pick_top_factors(dim_key, factors_dict):
+    """提取每个维度最多3个关键因子"""
+    priority = {
+        'kline': [
+            'ma_trend',
+            'rsi_status',
+            'recent_trend',
+            'volume',
+            'boll_position',
+            'dimension_score',
+            'data_completeness',
+        ],
+        'fundamental': [
+            # 019P：fund_trend 首位（日报关键因子必显，监理核心诉求可见性落地）
+            'fund_trend',
+            'pe_ratio',
+            'roe',
+            'revenue_growth',
+            'pb_ratio',
+            'net_margin',
+            'debt_ratio',
+            'dimension_score',
+            'data_completeness',
+        ],
+        'capital_flow': [
+            'main_trend',
+            'consecutive',
+            'main_pct',
+            'super_large',
+            'main_avg_5d',
+            'dimension_score',
+            'data_completeness',
+        ],
+        'news': [
+            'avg_sentiment',
+            'positive_ratio',
+            'top_news',
+            'news_activity',
+            'extreme_warning',
+            'dimension_score',
+            'data_completeness',
+        ],
+    }
+    keys = priority.get(dim_key, [])
+    result = {}
+    count = 0
+    for k in keys:
+        if k in factors_dict and factors_dict[k] is not None:
+            val = factors_dict[k]
+            if isinstance(val, str) and len(val) > 50:
+                val = val[:50] + '...'
+            result[k] = val
+            count += 1
+            if count >= 3:
+                break
+    # 补充其他因子
+    for k, v in factors_dict.items():
+        if count >= 4:
+            break
+        if k not in result and not k.startswith('_') and v is not None:
+            val = v
+            if isinstance(val, str) and len(val) > 50:
+                val = val[:50] + '...'
+            result[k] = val
+            count += 1
+    return result
+
+
+def _build_key_factors(advice_result):
+    """从 advisor 结果提取关键因子摘要（019A 收敛至 advisor，单一来源）"""
+    factors = {}
+    dims = advice_result.get('dimensions', {})
+
+    for dim_key in ['kline', 'fundamental', 'capital_flow', 'news']:
+        d = dims.get(dim_key, {})
+        if d.get('status') == 'ok':
+            factors[dim_key] = {
+                'score': round(d.get('score', 0), 1),
+                'weight': round(d.get('weight', 0), 4),
+                'top_factors': _pick_top_factors(dim_key, d.get('factors', {})),
+            }
+
+    return factors
+
+
+def _build_markdown_single(advice_result, prev_score):
+    """构建单只股票的 Markdown 报告片段（019A 收敛至 advisor，单一来源）"""
+    code = advice_result.get('stock_code', '')
+    name = advice_result.get('stock_name', '')
+    engine = advice_result.get('engine_version', 'legacy')
+    total = advice_result.get('total_score', 0)
+    rating = advice_result.get('rating', '?')
+    rating_label = advice_result.get('rating_label', '')
+    action = advice_result.get('action_advice', '')
+
+    engine_tag = '🚀 v5引擎' if engine == 'v5' else '⚙️ 经典引擎（简化版）'
+
+    md = f'### {name} ({code}) — {engine_tag}\n\n'
+
+    # 评分行
+    score_change_str = ''
+    if prev_score is not None:
+        change = total - prev_score
+        arrow = '↑' if change > 0 else ('↓' if change < 0 else '→')
+        score_change_str = f'（较昨日 {arrow} {abs(change):.1f}）'
+    md += f'- **综合评分**：{total:.1f}（{rating}级 · {rating_label}）{score_change_str}\n'
+    md += f'- **操作建议**：{action}\n'
+
+    # 四维评分
+    dims = advice_result.get('dimensions', {})
+    dim_names = {
+        'kline': '技术面',
+        'fundamental': '基本面',
+        'capital_flow': '资金面',
+        'news': '消息面',
+    }
+    dim_scores = []
+    for dk in ['kline', 'fundamental', 'capital_flow', 'news']:
+        d = dims.get(dk, {})
+        score = d.get('score', 0) if d.get('status') == 'ok' else None
+        if score is not None:
+            dim_scores.append(f'{dim_names[dk]} {score:.1f}')
+        else:
+            dim_scores.append(f'{dim_names[dk]} —')
+    md += f'- **四维**：{" | ".join(dim_scores)}\n'
+
+    # 数据完整度（仅v5）
+    if advice_result.get('data_quality'):
+        dq = advice_result['data_quality']
+        md += (
+            f'- **数据完整度**：技术{int(dq.get("technical", 0) * 100)}% '
+            f'基本{int(dq.get("fundamental", 0) * 100)}% '
+            f'资金{int(dq.get("capital", 0) * 100)}% '
+            f'消息{int(dq.get("news", 0) * 100)}%\n'
+        )
+
+    # 降级提示
+    warnings = advice_result.get('data_warnings', [])
+    if warnings:
+        md += f'- **降级提示**：{len(warnings)}条降级规则触发\n'
+
+    # 风险提示
+    risks = advice_result.get('risk_warnings', [])
+    if risks:
+        md += '- **风险提示**：\n'
+        for r in risks[:3]:
+            md += f'  - {r}\n'
+
+    md += '\n'
+    return md
+
+
+# ============================================================
 # 六、数据库写入
 # ============================================================
+
+
+def _save_daily_report_for_advice(stock_id, analysis, prev_score, engine_used, report_date=None):
+    """019A 修复：generate_advice 统一回写 daily_reports 表
+
+    确保每日报告/批量分析/手动刷新/一键分析任一入口触发后，
+    daily_reports 与 analysis_results、ratings_history 三表评分一致。
+    已有日报时 UPDATE 评分字段并保留 markdown_content/price_advice；
+    无日报时 INSERT 新记录。失败不阻塞主流程。
+    """
+    try:
+        total_score = analysis.get('total_score')
+        if total_score is None:
+            return
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        report_date = report_date or datetime.now(_CN_TZ).strftime('%Y-%m-%d')
+        rating = analysis.get('rating', '')
+        rating_label = analysis.get('rating_label', '')
+        score_change = (
+            round(float(total_score) - float(prev_score), 1) if prev_score is not None else None
+        )
+        key_factors = _build_key_factors(analysis)
+        data_warnings = analysis.get('data_warnings', []) or []
+        generated_at = datetime.now(_CN_TZ).isoformat()
+        markdown = _build_markdown_single(analysis, prev_score)
+
+        # 查询是否已有该日该股票 daily 报告
+        cursor.execute(
+            "SELECT id, markdown_content, price_advice FROM daily_reports "
+            "WHERE stock_id=? AND report_date=? AND report_type='daily'",
+            (stock_id, report_date),
+        )
+        existing = cursor.fetchone()
+
+        if existing:
+            cursor.execute(
+                """UPDATE daily_reports
+                   SET engine_version=?, total_score=?, rating=?, rating_label=?,
+                       prev_score=?, score_change=?, key_factors=?, data_warnings=?,
+                       status='ok', error_msg=NULL, generated_at=?, markdown_content=?
+                   WHERE id=?""",
+                (
+                    engine_used,
+                    total_score,
+                    rating,
+                    rating_label,
+                    prev_score,
+                    score_change,
+                    json.dumps(key_factors, ensure_ascii=False) if key_factors else None,
+                    json.dumps(data_warnings, ensure_ascii=False) if data_warnings else None,
+                    generated_at,
+                    markdown,
+                    existing['id'],
+                ),
+            )
+        else:
+            # 与 _save_report 的 daily 语义保持一致：当天无 daily 记录时，
+            # 先删除当天该股票所有记录（含 intraday），避免 daily+intraday 并存
+            cursor.execute(
+                'DELETE FROM daily_reports WHERE report_date=? AND stock_id=?',
+                (report_date, stock_id),
+            )
+            cursor.execute(
+                """INSERT INTO daily_reports
+                   (report_date, stock_id, stock_code, stock_name, engine_version,
+                    total_score, rating, rating_label, prev_score, score_change,
+                    key_factors, data_warnings, status, error_msg, markdown_content,
+                    generated_at, price_advice, report_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', NULL, ?, ?, NULL, 'daily')""",
+                (
+                    report_date,
+                    stock_id,
+                    analysis.get('stock_code', ''),
+                    analysis.get('stock_name', ''),
+                    engine_used,
+                    total_score,
+                    rating,
+                    rating_label,
+                    prev_score,
+                    score_change,
+                    json.dumps(key_factors, ensure_ascii=False) if key_factors else None,
+                    json.dumps(data_warnings, ensure_ascii=False) if data_warnings else None,
+                    markdown,
+                    generated_at,
+                ),
+            )
+        conn.commit()
+        conn.close()
+        logger.info(f'stock_id={stock_id} 建议已同步写入 daily_reports (score={total_score})')
+    except Exception as e:
+        logger.error(f'generate_advice 回写 daily_reports 失败: {e}')
 
 
 def _save_rating(stock_id, analysis, action_advice, is_changed, latest_close):
@@ -817,8 +1076,164 @@ def _build_kline_factors(factors, stock_data, stock_id):
         logger.debug(f'[B20] kline recent_trend 计算失败 stock_id={stock_id}: {e}')
 
 
+# ============================================================
+# 019P：基本面趋势分析（仅展示不进评分，口径双轨制 M-3/A-2）
+# 红线：scoring_engine / config_weights / data_contract 零改动（评分反映当前快照，趋势是派生信息）
+# ============================================================
+_FUND_TREND_THRESHOLD = 1.0  # 019P：|Δ| < 1pct 视为"平稳"（防噪声）
+
+# 019P：环比指标清单（期间/时点型，可直接比较相邻期，"较上期"）
+# (DB列, 中文名, 是否越小越好) —— 负债率下降=改善
+_FUND_TREND_QOQ_METRICS = [
+    ('gross_margin', '毛利率', False),
+    ('net_margin', '净利率', False),
+    ('debt_ratio', '负债率', True),
+    ('current_ratio', '流动比率', False),
+    ('quick_ratio', '速动比率', False),
+]
+
+
+def _fund_trend_state(delta, lower_better=False):
+    """019P：|Δ| < 1pct → 平稳；否则按方向判定改善/恶化"""
+    if delta is None or abs(delta) < _FUND_TREND_THRESHOLD:
+        return '平稳'
+    improved = delta < 0 if lower_better else delta > 0
+    return '改善' if improved else '恶化'
+
+
+def _build_fund_trend(stock_id):
+    """019P（M-3/A-2）：从 raw_fundamental 多期行计算基本面趋势。
+
+    口径双轨制：
+    - 环比仅限期间/时点型指标（毛利率/净利率/资产负债率/流动比率/速动比率，文案"较上期"）
+    - 累计型 ROE 禁止环比（Q1 vs 年报不可比 R-5）→ 仅同比
+      （report_date 前推 1 年匹配同类型报告期，无同期数据跳过该指标）
+    - 增速指标（营收/净利增长）不做环比，表述"增速加快/放缓"（比较相邻两期增速）
+    - 变化阈值：|Δ| < 1pct 视为"平稳"
+    数据不足兜底（R-9）：缺期时跳过对应指标；全缺输出"历史数据不足，暂无趋势判断"，不崩溃。
+    混合来源比较接受（存量旧期 analysis_indicator + 新期 abstract，同新浪域可比，文档化）。
+
+    Returns:
+        (summary: str, details: list[str], direction: str)
+        direction: 'improve' / 'worsen' / 'flat' / 'insufficient'
+    """
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        rows = c.execute(
+            'SELECT report_date, roe, gross_margin, net_margin, debt_ratio, current_ratio, '
+            'quick_ratio, revenue_growth, profit_growth FROM raw_fundamental '
+            'WHERE stock_id = ? AND report_date != "" AND report_date IS NOT NULL '
+            'ORDER BY report_date DESC LIMIT 8',
+            (stock_id,),
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        logger.debug(f'[019P] fund_trend 查询失败 stock_id={stock_id}: {e}')
+        return '历史数据不足，暂无趋势判断', [], 'insufficient'
+
+    rows = [dict(r) for r in rows]
+    if not rows:
+        return '历史数据不足，暂无趋势判断', [], 'insufficient'
+
+    latest = rows[0]
+    latest_date = str(latest.get('report_date') or '')[:10]
+    details = []
+    improve_cnt = 0
+    worsen_cnt = 0
+
+    def _fmt(v):
+        try:
+            return f'{float(v):.2f}'
+        except (ValueError, TypeError):
+            return str(v)
+
+    # ---- 1. 环比指标（期间/时点型，"较上期"）----
+    for col, label, lower_better in _FUND_TREND_QOQ_METRICS:
+        cur = latest.get(col)
+        if cur is None:
+            continue
+        prev = None
+        for r in rows[1:]:
+            if r.get(col) is not None:
+                prev = r[col]
+                break
+        if prev is None:
+            continue
+        delta = float(cur) - float(prev)
+        state = _fund_trend_state(delta, lower_better)
+        if state == '改善':
+            improve_cnt += 1
+        elif state == '恶化':
+            worsen_cnt += 1
+        details.append(f'{label}较上期{state}({_fmt(prev)}%→{_fmt(cur)}%)')
+
+    # ---- 2. ROE 仅同比（累计型禁止环比 R-5）----
+    roe_cur = latest.get('roe')
+    if roe_cur is not None and latest_date:
+        target = None
+        try:
+            y, m, d = int(latest_date[:4]), latest_date[5:7], latest_date[8:10]
+            target = f'{y - 1:04d}-{m}-{d}'
+        except (ValueError, TypeError, IndexError):
+            target = None
+        if target:
+            for r in rows:
+                if str(r.get('report_date') or '')[:10] == target and r.get('roe') is not None:
+                    prev_roe = float(r['roe'])
+                    state = _fund_trend_state(float(roe_cur) - prev_roe, False)
+                    if state == '改善':
+                        improve_cnt += 1
+                    elif state == '恶化':
+                        worsen_cnt += 1
+                    details.append(f'ROE同比{state}({_fmt(prev_roe)}%→{_fmt(roe_cur)}%)')
+                    break
+
+    # ---- 3. 增速指标（营收/净利增长）：表述"增速加快/放缓"（比较相邻两期增速）----
+    for col, label in (('revenue_growth', '营收增速'), ('profit_growth', '净利增速')):
+        cur = latest.get(col)
+        if cur is None:
+            continue
+        prev = None
+        for r in rows[1:]:
+            if r.get(col) is not None:
+                prev = r[col]
+                break
+        if prev is None:
+            continue
+        delta = float(cur) - float(prev)
+        if abs(delta) < _FUND_TREND_THRESHOLD:
+            state = '平稳'
+        else:
+            state = '加快' if delta > 0 else '放缓'
+            if delta > 0:
+                improve_cnt += 1
+            else:
+                worsen_cnt += 1
+        details.append(f'{label}{state}({_fmt(prev)}%→{_fmt(cur)}%)')
+
+    if not details:
+        return '历史数据不足，暂无趋势判断', [], 'insufficient'
+
+    # ---- 4. 汇总（多数投票 + 阈值）----
+    if improve_cnt > worsen_cnt:
+        direction = 'improve'
+        summary = '基本面较上期改善'
+    elif worsen_cnt > improve_cnt:
+        direction = 'worsen'
+        summary = '基本面较上期恶化'
+    else:
+        direction = 'flat'
+        summary = '基本面较上期平稳'
+
+    if details and direction in ('improve', 'worsen'):
+        summary += '（' + '、'.join(details[:3]) + '）'
+    return summary, details, direction
+
+
 def _build_fundamental_factors(factors, stock_data, stock_id):
-    """基本面因子：pe_ratio / roe / pb_ratio / revenue_growth / debt_ratio / net_margin"""
+    """基本面因子：pe_ratio / roe / pb_ratio / revenue_growth / debt_ratio / net_margin
+    019P：追加 fund_trend（趋势汇总，仅展示不进评分）"""
     pe = stock_data.pe_ttm
     if pe is not None:
         factors['pe_ratio'] = f'{pe:.2f}'
@@ -859,6 +1274,17 @@ def _build_fundamental_factors(factors, stock_data, stock_id):
     except Exception as e:
         logger.debug(f'[B20] fundamental net_margin 读取失败 stock_id={stock_id}: {e}')
 
+    # 019P（M-3/A-2）：趋势因子（仅展示不进评分）
+    # 数据源：raw_fundamental 多期行（abstract 写 8 期 + 存量回补后天然具备）
+    try:
+        trend_summary, trend_details, _trend_dir = _build_fund_trend(stock_id)
+        if trend_summary:
+            factors['fund_trend'] = trend_summary
+            if trend_details:
+                factors['fund_trend_detail'] = '；'.join(trend_details[:3])
+    except Exception as e:
+        logger.debug(f'[019P] fund_trend 计算失败 stock_id={stock_id}: {e}')
+
 
 def _build_capital_factors(factors, stock_data, stock_id):
     """资金面因子：main_trend / main_pct / super_large / main_avg_5d / consecutive"""
@@ -871,9 +1297,12 @@ def _build_capital_factors(factors, stock_data, stock_id):
     try:
         conn = get_connection()
         c = conn.cursor()
+        # 019E-R2：过滤估算行（is_estimated=1），确保评分仅使用真实数据
         rows = c.execute(
             'SELECT trade_date, main_net_inflow, main_net_inflow_pct, super_large_net '
-            'FROM raw_capital_flow WHERE stock_id=? ORDER BY trade_date DESC LIMIT 5',
+            'FROM raw_capital_flow WHERE stock_id=? '
+            'AND (is_estimated = 0 OR is_estimated IS NULL) '
+            'ORDER BY trade_date DESC LIMIT 5',
             (stock_id,),
         ).fetchall()
         conn.close()
@@ -1041,6 +1470,10 @@ def generate_advice(stock_id, report_date=None):
 
     # 10. 写入数据库
     _save_rating(stock_id, analysis, action, is_changed, latest_close_info)
+
+    # 019A: 统一回写 daily_reports，确保三表/三处展示一致
+    # 每日报告/批量分析/手动刷新/一键分析任一入口触发后，daily_reports 同步更新
+    _save_daily_report_for_advice(stock_id, analysis, prev_score, engine_used, report_date)
 
     if is_changed or (prev_score is not None and abs(analysis['total_score'] - prev_score) >= 5):
         # RATING-ALIGN-004：change_log 统一用归一化后的评级，避免新旧档位字符串不同导致误记
