@@ -33,11 +33,14 @@ def install():
     if not os.path.exists(bat_path):
         print('[FAIL] 未找到 service_start.bat:', bat_path)
         return 1
-    # 登录时启动：服务（隐藏）+ 系统托盘图标（复用 manage_service.bat 的 Python 检测）
+    # 登录时启动：服务（隐藏）+ 系统托盘图标
+    # 注意：必须用绝对路径调用 manage_service.bat —— 启动器位于启动文件夹，
+    # %~dp0 展开为启动文件夹路径，无法定位 scripts/ 下的管理脚本（自启失败根因）
+    manage_bat = os.path.join(scripts_dir, 'manage_service.bat')
     content = (
         '@echo off\r\n'
-        'call "%~dp0manage_service.bat" start\r\n'
-        'call "%~dp0manage_service.bat" tray\r\n'
+        f'call "{manage_bat}" start\r\n'
+        f'call "{manage_bat}" tray\r\n'
         'exit /b 0\r\n'
     )
     target = _entry_path()
