@@ -183,7 +183,7 @@ stock_analyst/
 ├── static/                 # 前端静态资源（css/ js/，自 2026-08-13 从 index.html 内联拆出）
 ├── scripts/                # 运维/迁移脚本
 ├── tests/                  # pytest 单元/冒烟测试（隔离临时库，不触网）
-├── docs/                   # 项目文档（knowledge_base 知识库、PROJECT_INDEX.md 索引）
+├── docs/                   # 项目文档（需求/任务书/验收/评审/PM上下文/知识库，见 docs/PROJECT_INDEX.md）
 ├── reports/                # 每日报告与验收/自验文档
 ├── backups/                # 数据库备份（db_backup_*.db）
 ├── logs/                   # 运行日志（app.log 等）
