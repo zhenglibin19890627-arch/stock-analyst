@@ -884,7 +884,25 @@ def generate_daily_report(target_date=None, force=False, report_type='daily'):
                 }
             )
             try:
-                batch_result = fetch_capital_flow_batch(a_symbols)
+                # EM 回退逐只采集阶段可能耗时 30 分钟+，逐只更新进度文件
+                # （否则前端动效长时间停在"资金面批量预取中"像卡住）
+                def _prefetch_progress(idx, prefetch_total, sym):
+                    _update_progress_file(
+                        {
+                            'date': target_date,
+                            'total': prefetch_total,
+                            'current': idx + 1,
+                            'current_symbol': sym,
+                            'current_name': '',
+                            'stage': f'资金面批量预取中（EM逐只 {idx + 1}/{prefetch_total}）',
+                            'status': 'running',
+                            'started_at': started_at_str,
+                            'last_update': datetime.now(_CN_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+                            'finished_at': None,
+                        }
+                    )
+
+                batch_result = fetch_capital_flow_batch(a_symbols, progress_cb=_prefetch_progress)
                 logger.info(f'[日报] 资金面批量预取: {batch_result}')
             except Exception as e:
                 logger.warning(f'[日报] 资金面批量预取失败(不阻断): {e}')

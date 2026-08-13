@@ -2395,7 +2395,7 @@ def _try_ths_rank_backup():
         return None
 
 
-def _em_batch_collect(symbols, log_prefix='EM回退'):
+def _em_batch_collect(symbols, log_prefix='EM回退', progress_cb=None):
     """
     019C/019E 共享：EM 逐只采集循环（错峰/分批/退避/冷却/熔断/软超时六项机制）。
     直接沿用共享常量 _EM_INTER_DELAY_RANGE ~ _EM_FALLBACK_TOTAL_CAP_SECONDS
@@ -2404,6 +2404,8 @@ def _em_batch_collect(symbols, log_prefix='EM回退'):
     Args:
         symbols: list[str] 待采集 A 股代码列表
         log_prefix: str 日志前缀（'EM回退' / '资金面补采'，QA 依赖区分）
+        progress_cb: 可选进度回调 progress_cb(idx, total, symbol)，
+                     每只股票开始采集前调用（供日报进度文件逐只更新，动效不再长时间静止）
 
     Returns:
         dict: {'success_count': n, 'fail_count': n, 'source': str}
@@ -2416,8 +2418,15 @@ def _em_batch_collect(symbols, log_prefix='EM回退'):
     timed_out = False
     circuit_broken = False
     remaining = list(symbols)
+    total = len(remaining)
 
     for idx, sym in enumerate(remaining):
+        # 进度回调：每只开始前通知（EM 逐只阶段可能耗时 30 分钟+，前端需可见进展）
+        if progress_cb:
+            try:
+                progress_cb(idx, total, sym)
+            except Exception:
+                pass  # 进度回调失败不影响采集
         # --- 6. 整体软超时检查（每只开始前） ---
         elapsed = time.time() - start_ts
         if elapsed > _EM_FALLBACK_TOTAL_CAP_SECONDS:
@@ -2523,7 +2532,7 @@ def _em_batch_collect(symbols, log_prefix='EM回退'):
     }
 
 
-def fetch_capital_flow_batch(a_stock_symbols):
+def fetch_capital_flow_batch(a_stock_symbols, progress_cb=None):
     """
     018改造：同花顺批量预取 — 仅写入辅助指标 ths_net_inflow。
     同花顺"净额"= 全部资金净流入（总主动买入-总主动卖出），非主力净流入。
@@ -2534,6 +2543,8 @@ def fetch_capital_flow_batch(a_stock_symbols):
 
     Args:
         a_stock_symbols: list[str]，A 股代码列表（如 ['600276','000333',...]）
+        progress_cb: 可选进度回调（EM 回退逐只采集阶段每只调用），
+                     用于日报进度文件逐只更新
 
     Returns:
         dict: {'success_count': n, 'fail_count': n, 'source': '同花顺批量(辅助指标)'}
@@ -2558,7 +2569,7 @@ def fetch_capital_flow_batch(a_stock_symbols):
     if df is None:
         # FIX-B：THS不可用时回退EM逐只采集（019C六项机制增强，已提取为_em_batch_collect共享函数）
         logger.warning('[同花顺批量] 批量源不可用（含重试+备选均失败），回退EM逐只采集（019C增强）')
-        return _em_batch_collect(a_stock_symbols, log_prefix='EM回退')
+        return _em_batch_collect(a_stock_symbols, log_prefix='EM回退', progress_cb=progress_cb)
 
     # 同花顺股票代码列可能为 int64（000333→333）或字符串，统一规整为6位字符串
     def _norm_code(v):
@@ -2684,7 +2695,9 @@ def fetch_capital_flow_batch(a_stock_symbols):
             f'[资金面补采] 触发来源={_trigger_source}，'
             f'补采清单({len(supplement_symbols)}/{len(a_stock_symbols)}只): {supplement_symbols}'
         )
-        supplement_result = _em_batch_collect(supplement_symbols, log_prefix='资金面补采')
+        supplement_result = _em_batch_collect(
+            supplement_symbols, log_prefix='资金面补采', progress_cb=progress_cb
+        )
         return {
             'success_count': success_count + supplement_result['success_count'],
             'fail_count': fail_count + supplement_result['fail_count'],

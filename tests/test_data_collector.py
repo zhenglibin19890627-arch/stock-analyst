@@ -505,3 +505,37 @@ class TestForecastCollection:
         status, msg = dc.collect_forecast(1, 'HK3690', 'hk_stock')
         assert status == 'skipped'
         assert '港股' in msg
+
+
+# ============================================================
+# EM 回退逐只采集的进度回调（日报动效逐只更新）
+# ============================================================
+
+
+class TestEmBatchProgressCallback:
+    """fetch_capital_flow_batch → _em_batch_collect 的 progress_cb 透传与逐只调用"""
+
+    def test_progress_cb_called_per_symbol(self, monkeypatch):
+        """THS 失败回退 EM 时，每只股票开始前回调一次（顺序正确）"""
+        calls = []
+        monkeypatch.setattr(dc, '_fetch_capital_flow_ths_batch', lambda: None)
+        monkeypatch.setattr(dc, 'fetch_capital_flow', lambda sym, m: ('success', 'mock'))
+        monkeypatch.setattr(dc, '_EM_INTER_DELAY_RANGE', (0.001, 0.002))
+        monkeypatch.setattr(dc, '_EM_BATCH_GAP_RANGE', (0.001, 0.002))
+
+        result = dc.fetch_capital_flow_batch(
+            ['600276', '300146', '000333'],
+            progress_cb=lambda i, t, s: calls.append((i, t, s)),
+        )
+        assert result['success_count'] == 3
+        assert calls == [(0, 3, '600276'), (1, 3, '300146'), (2, 3, '000333')]
+
+    def test_no_progress_cb_ok(self, monkeypatch):
+        """不传回调时照常工作（向后兼容）"""
+        monkeypatch.setattr(dc, '_fetch_capital_flow_ths_batch', lambda: None)
+        monkeypatch.setattr(dc, 'fetch_capital_flow', lambda sym, m: ('success', 'mock'))
+        monkeypatch.setattr(dc, '_EM_INTER_DELAY_RANGE', (0.001, 0.002))
+        monkeypatch.setattr(dc, '_EM_BATCH_GAP_RANGE', (0.001, 0.002))
+
+        result = dc.fetch_capital_flow_batch(['600276'])
+        assert result['success_count'] == 1
