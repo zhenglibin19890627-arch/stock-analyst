@@ -136,6 +136,34 @@ def test_report_endpoints(client):
         _assert_ok(client.get(path))
 
 
+class _Locked:
+    """模拟被占用的生成锁（acquire 返回 False 触发防抖拒绝）"""
+
+    def acquire(self, timeout=0):
+        return False
+
+    def release(self):
+        pass
+
+
+def test_report_generate_debounce_returns_message(client, monkeypatch):
+    """防抖拒绝（任务进行中）应返回 200+message，而非 500 KeyError。
+
+    回归：盘中快报/每日报告在任务进行中触发时，路由曾直接索引
+    result['report_date'] 导致 KeyError，掩盖真实原因（'report_date'）。
+    """
+    import modules.daily_report as daily_report
+
+    monkeypatch.setattr(daily_report, '_generate_lock', _Locked())
+
+    for path in ['/api/daily-report/generate', '/api/daily-report/generate-intraday']:
+        resp = client.post(path, json={})
+        assert resp.status_code == 200, f'{path}: status={resp.status_code} body={resp.data[:300]}'
+        data = resp.get_json()
+        assert data['success'] is False
+        assert '进行中' in data['message'], f'{path}: message={data.get("message")}'
+
+
 # ---- backtest / export / index / alerts 蓝图 ----
 
 def test_backtest_endpoints(client):

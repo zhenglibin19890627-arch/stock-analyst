@@ -35,6 +35,10 @@ def api_daily_report_generate():
 
     try:
         result = generate_daily_report(target_date, force=force)
+        if not result.get('success'):
+            # 防抖拒绝（任务进行中）/ 无自选股 等业务性失败：原样返回，
+            # 前端有对应的"进行中/失败原因"提示分支（勿直接索引缺失键）
+            return jsonify(result)
         return jsonify(
             {
                 'success': result['success'],
@@ -60,6 +64,10 @@ def api_daily_report_generate_intraday():
 
     try:
         result = generate_daily_report(report_type='intraday')
+        if not result.get('success'):
+            # 防抖拒绝（任务进行中）/ 无自选股 等业务性失败：原样返回，
+            # 前端有对应的"进行中/失败原因"提示分支（勿直接索引缺失键）
+            return jsonify(result)
         return jsonify(
             {
                 'success': result['success'],
