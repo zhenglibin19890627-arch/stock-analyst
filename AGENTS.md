@@ -111,6 +111,7 @@ curl http://127.0.0.1:5000/api/health
 | 模块 | 职责 |
 |------|------|
 | `data_collector.py` | **核心采集**：获取 A股/港股基本面、技术面、消息面、资金面数据（akshare）。 |
+| `backfill_scheduler.py` | 数据完整性驱动的持续补采调度器（缺口检测 + 周期重试 + 自动退避，app.py 启动时注册）。 |
 | `data_contract.py` | v5.0 标准数据契约（StockData），业务逻辑仅依赖此契约，禁耦合具体数据源。 |
 | `data_adapter.py` | SQLite 真实数据 ↔ StockData 契约的适配层。 |
 | `analysis_engine.py` | 模块2：旧版四维分析引擎（量化因子打分，输出 0-100）。 |
@@ -177,12 +178,16 @@ stock_analyst/
 ├── database/               # 数据库管理
 │   └── db_manager.py
 ├── modules/                # 业务模块（见模块地图）
-├── templates/              # Flask 页面模板
+├── blueprints/             # API 路由蓝图（按业务域拆分）
+├── templates/              # Flask 页面模板（仅 index.html 骨架）
+├── static/                 # 前端静态资源（css/ js/，自 2026-08-13 从 index.html 内联拆出）
 ├── scripts/                # 运维/迁移脚本
-├── docs/                   # 项目文档（任务书、验收报告、知识库）
+├── tests/                  # pytest 单元/冒烟测试（隔离临时库，不触网）
+├── docs/                   # 项目文档（knowledge_base 知识库、PROJECT_INDEX.md 索引）
 ├── reports/                # 每日报告与验收/自验文档
+├── backups/                # 数据库备份（db_backup_*.db）
 ├── logs/                   # 运行日志（app.log 等）
-└── test_*.py               # 验证脚本
+└── test_*.py               # 补充验证脚本
 ```
 
 ---

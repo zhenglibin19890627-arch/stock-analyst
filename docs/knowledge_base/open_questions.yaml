@@ -1,10 +1,10 @@
 # v5.0 遗留待决问题
 # 格式：人类可读 YAML，待决策后更新status为resolved
-# 更新时间：2026-07-18
+# 更新时间：2026-08-13（按代码实况复核 D01-D06，见各条 resolution 说明）
 
 meta:
   version: "5.0-revised"
-  last_updated: "2026-07-18"
+  last_updated: "2026-08-13"
 
 open_questions:
   - id: D01
@@ -12,20 +12,23 @@ open_questions:
     current_handling: "降级策略描述为'中性值填充'，实际填充留给引擎层"
     suggested_value: 0.0
     decision_timing: "评分引擎开发时确认"
-    status: open
+    status: resolved
+    resolution: "已落地为 0.0：modules/scoring_engine.py NEUTRAL_SENTIMENT=0.0，NEWS 维度'情绪'子项为 C 类 keep_default，缺失时以 0.0 填充"
 
   - id: D02
     question: "main_net_inflow中性填充值具体为多少？"
     current_handling: "同D01，留给引擎层"
     suggested_value: "0.0万元"
     decision_timing: "评分引擎开发时确认"
-    status: open
+    status: resolved
+    resolution: "不填充：CAPITAL 维度'主力资金'子项为 A 类归零型（019T T2 决策），缺失=无信息、权重归零并重归一化，无中性值"
 
   - id: D03
     question: "AnalysisResult.sentiment_score 与 DataQuality.news 命名不一致"
     current_handling: "沿用契约原设计，sentiment_score对应消息面得分"
     decision_timing: "评分引擎开发时统一"
-    status: open
+    status: resolved
+    resolution: "保留契约命名不变：sentiment_score 即消息面得分（modules/data_contract.py AnalysisResult），不改名以免破坏已有 API 兼容"
 
   - id: D04
     question: "港股→人民币汇率源：v5.0固定0.92，何时切换为实时汇率？"
@@ -38,9 +41,11 @@ open_questions:
     current_handling: "自由str，未约束"
     decision_timing: "评分引擎实现时"
     status: open
+    note: "2026-08-13 复核：AnalysisResult.rating 仍为自由 str，未约束为 Literal；如需收紧需同步评估 normalize_rating 的历史兼容路径"
 
   - id: D06
     question: "data_quality是否需要加权完整度（按子项权重加权而非简单计数）？"
     current_handling: "未实现加权完整度，仅简单字段计数"
     decision_timing: "评分引擎需按子项权重加权时扩展"
     status: deferred
+    note: "2026-08-13 复核：DataQuality 仍为字段计数；维度内降级已实现子项级权重调整，加权完整度无阻塞性需求，延后到 v6"
