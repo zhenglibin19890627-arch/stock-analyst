@@ -3609,24 +3609,41 @@ def fetch_capital_flow(symbol, market):
 
                 # 019E M-7：EM 写入显式携带 is_estimated=0（防御估算→真实覆盖时标记归位）
                 # 019K Task 3：EM 写入显式携带 capital_source=NULL（顶替行被 EM 覆盖后来源归位）
+                # 020G：UPDATE + INSERT OR IGNORE（保留同花顺辅助字段 ths_net_inflow，
+                # 与 westock/新浪层同模式；INSERT OR REPLACE 会整行替换冲掉它）
                 cursor.execute(
-                    """
-                    INSERT OR REPLACE INTO raw_capital_flow
-                    (stock_id, trade_date, main_net_inflow, main_net_inflow_pct,
-                     super_large_net, large_net, medium_net, small_net, is_estimated, capital_source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
-                """,
+                    'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=?, '
+                    'super_large_net=?, large_net=?, medium_net=?, small_net=?, '
+                    'is_estimated=0, capital_source=NULL '
+                    'WHERE stock_id=? AND trade_date=?',
                     (
-                        stock_id,
-                        trade_date,
                         main_net,
                         main_net_pct,
                         super_large,
                         large,
                         medium,
                         small,
+                        stock_id,
+                        trade_date,
                     ),
                 )
+                if cursor.rowcount == 0:
+                    cursor.execute(
+                        'INSERT OR IGNORE INTO raw_capital_flow '
+                        '(stock_id, trade_date, main_net_inflow, main_net_inflow_pct, '
+                        'super_large_net, large_net, medium_net, small_net, is_estimated, capital_source) '
+                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)',
+                        (
+                            stock_id,
+                            trade_date,
+                            main_net,
+                            main_net_pct,
+                            super_large,
+                            large,
+                            medium,
+                            small,
+                        ),
+                    )
                 # 019N: saved_count 仅计主字段 main 非 None 的行（假成功修正）
                 if main_net is not None:
                     saved_count += 1
@@ -3677,23 +3694,38 @@ def fetch_capital_flow(symbol, market):
 
                         # 019E M-7：EM 写入显式携带 is_estimated=0
                         # 019K Task 3：EM 写入显式携带 capital_source=NULL（顶替行被 EM 覆盖后来源归位）
+                        # 020G：UPDATE + INSERT OR IGNORE（保留 ths_net_inflow）
                         cursor.execute(
-                            """
-                            INSERT OR REPLACE INTO raw_capital_flow
-                            (stock_id, trade_date, main_net_inflow,
-                             super_large_net, large_net, medium_net, small_net, is_estimated, capital_source)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL)
-                        """,
+                            'UPDATE raw_capital_flow SET main_net_inflow=?, super_large_net=?, '
+                            'large_net=?, medium_net=?, small_net=?, main_net_inflow_pct=NULL, '
+                            'is_estimated=0, capital_source=NULL '
+                            'WHERE stock_id=? AND trade_date=?',
                             (
-                                stock_id,
-                                trade_date,
                                 main_net,
                                 super_large_net,
                                 large_net,
                                 medium_net,
                                 small_net,
+                                stock_id,
+                                trade_date,
                             ),
                         )
+                        if cursor.rowcount == 0:
+                            cursor.execute(
+                                'INSERT OR IGNORE INTO raw_capital_flow '
+                                '(stock_id, trade_date, main_net_inflow, '
+                                'super_large_net, large_net, medium_net, small_net, is_estimated, capital_source) '
+                                'VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL)',
+                                (
+                                    stock_id,
+                                    trade_date,
+                                    main_net,
+                                    super_large_net,
+                                    large_net,
+                                    medium_net,
+                                    small_net,
+                                ),
+                            )
                         # 019N: saved_count 仅计主字段 main 非 None 的行
                         if main_net is not None:
                             saved_count += 1
@@ -3741,24 +3773,40 @@ def fetch_capital_flow(symbol, market):
 
                     # 019E M-7：EM 写入显式携带 is_estimated=0
                     # 019K Task 3：EM 写入显式携带 capital_source=NULL（顶替行被 EM 覆盖后来源归位）
+                    # 020G：UPDATE + INSERT OR IGNORE（保留 ths_net_inflow）
                     cursor.execute(
-                        """
-                        INSERT OR REPLACE INTO raw_capital_flow
-                        (stock_id, trade_date, main_net_inflow, main_net_inflow_pct,
-                         super_large_net, large_net, medium_net, small_net, is_estimated, capital_source)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
-                    """,
+                        'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=?, '
+                        'super_large_net=?, large_net=?, medium_net=?, small_net=?, '
+                        'is_estimated=0, capital_source=NULL '
+                        'WHERE stock_id=? AND trade_date=?',
                         (
-                            stock_id,
-                            trade_date,
                             main_net,
                             main_net_pct,
                             super_large,
                             large,
                             medium,
                             small,
+                            stock_id,
+                            trade_date,
                         ),
                     )
+                    if cursor.rowcount == 0:
+                        cursor.execute(
+                            'INSERT OR IGNORE INTO raw_capital_flow '
+                            '(stock_id, trade_date, main_net_inflow, main_net_inflow_pct, '
+                            'super_large_net, large_net, medium_net, small_net, is_estimated, capital_source) '
+                            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)',
+                            (
+                                stock_id,
+                                trade_date,
+                                main_net,
+                                main_net_pct,
+                                super_large,
+                                large,
+                                medium,
+                                small,
+                            ),
+                        )
                     # 019N: saved_count 仅计主字段 main 非 None 的行
                     if main_net is not None:
                         saved_count += 1
