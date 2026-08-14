@@ -75,6 +75,13 @@ python app.py
 
 > 注：`start.bat` 会优先使用 `C:\Users\zlb19\AppData\Local\Programs\Python\Python312\python.exe`，缺失时回退到系统 PATH 中的 python。
 
+### 服务自愈（Watchdog）
+
+- Windows 计划任务 **`StockAnalyst Watchdog`** 每 5 分钟静默检查一次 `127.0.0.1:5000`，服务不在则用 pythonw 无窗口方式自动拉起（`scripts/watchdog.py`，带端口守卫，幂等）。
+- 效果：注销/关机后重新登录、服务被误杀、窗口被误关，均会在 5 分钟内自动恢复，无需人工干预；托盘图标仅作状态显示，服务存续不依赖它。
+- 查询/删除任务：`schtasks /query /tn "StockAnalyst Watchdog"` / `schtasks /delete /tn "StockAnalyst Watchdog" /f`。
+- 注意：该任务运行在登录会话内，注销后服务随会话停止（下次登录 5 分钟内自动恢复）；如需注销后仍常驻，需升级为 SYSTEM 级任务（管理员权限），但会与托盘/start.bat 的端口释放逻辑冲突，默认不启用。
+
 ---
 
 ## 5. 验证命令
@@ -181,7 +188,7 @@ stock_analyst/
 ├── blueprints/             # API 路由蓝图（按业务域拆分）
 ├── templates/              # Flask 页面模板（仅 index.html 骨架）
 ├── static/                 # 前端静态资源（css/ js/，自 2026-08-13 从 index.html 内联拆出）
-├── scripts/                # 运维/迁移脚本
+├── scripts/                # 运维脚本（托盘 tray.py / 服务安装 / 看门狗 watchdog.py）
 ├── tests/                  # pytest 单元/冒烟测试（隔离临时库，不触网）
 ├── docs/                   # 项目文档（需求/任务书/验收/评审/PM上下文/知识库，见 docs/PROJECT_INDEX.md）
 ├── reports/                # 每日分析报告（运行产物，不入库；验收报告见 docs/reports/）
