@@ -3461,6 +3461,7 @@ def fetch_capital_flow(symbol, market):
     stock_id = get_stock_id(symbol, market)
     if not stock_id:
         return 'failed', f'数据库中未找到股票 {symbol}'
+    global _EM_CONSECUTIVE_FAIL_COUNT  # 020B：逐只链路复用进程级东财连续失败计数（熔断传播）
 
     warnings = []
     saved_count = 0
@@ -3576,6 +3577,8 @@ def fetch_capital_flow(symbol, market):
             conn.commit()
             conn.close()
             source = '东方财富(个股历史)'
+            _EM_CONSECUTIVE_FAIL_COUNT = 0  # 020B：东财成功，重置连续失败计数
+            _em_clear_ban()
             logger.info(
                 f'[{symbol}] 资金面保存成功: {saved_count}天有效数据, 跳过 {skipped} 天异常数据'
             )
@@ -3641,6 +3644,8 @@ def fetch_capital_flow(symbol, market):
                 conn.commit()
                 conn.close()
                 source = '东方财富(push2)'
+                _EM_CONSECUTIVE_FAIL_COUNT = 0  # 020B
+                _em_clear_ban()
             else:
                 warnings.append('东方财富push2资金流向数据为空')
         except Exception as e:
@@ -3704,6 +3709,8 @@ def fetch_capital_flow(symbol, market):
                 conn.commit()
                 conn.close()
                 source = 'akshare(备用)'
+                _EM_CONSECUTIVE_FAIL_COUNT = 0  # 020B
+                _em_clear_ban()
                 logger.info(
                     f'[{symbol}] akshare备用源成功: {saved_count}天有效数据, 跳过 {skipped} 天异常数据'
                 )
@@ -3712,6 +3719,12 @@ def fetch_capital_flow(symbol, market):
         except Exception as e:
             warnings.append(f'akshare备用源失败: {e}')
             logger.warning(f'[{symbol}] akshare备用源失败: {e}')
+
+    # ============================================================
+    # 020B：记录"东财三层失败"标志（westock 成功与否不影响此判定——westock 能成功
+    # 恰恰说明东财不可用），用于熔断累计。
+    # ============================================================
+    em_failed_this_stock = saved_count == 0
 
     # ============================================================
     # 020A：腾讯自选股（westock）资金面备用层 — 东财三层全失败后、新浪之前
@@ -3770,6 +3783,13 @@ def fetch_capital_flow(symbol, market):
     # 019E Task 2.6（M-4）：拆除提前 return，改为标志位继续执行估算降级链路
     em_all_failed = (saved_count == 0)
     est_source = ''
+    # 020B：东财三层失败的股票累计熔断计数（含 westock 顶替成功的股票），
+    # 达到阈值进入冷却——后续股票跳过东财直连（019Z 机制原先只在批量回退循环生效，
+    # 手动报告生成的逐只链路此前每只都要空烧 4 轮重试 ≈5 分钟）。
+    if em_failed_this_stock:
+        _EM_CONSECUTIVE_FAIL_COUNT += 1
+        if _EM_CONSECUTIVE_FAIL_COUNT >= _EM_CIRCUIT_BREAK_N:
+            _em_record_ban()
     if em_all_failed:
         logger.warning(
             f'[{symbol}] 东方财富三层全失败（push2his/push2/akshare），'
