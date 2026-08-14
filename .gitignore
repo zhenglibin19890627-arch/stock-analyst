@@ -26,5 +26,8 @@ backups/
 .reasonix/
 .reasonix_tmp/
 
+# QA 截图（可能含个人持仓界面，不入库）
+screenshots/
+
 # 一次性诊断/生成脚本残留
 _tmp_*.py
