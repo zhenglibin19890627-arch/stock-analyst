@@ -12,6 +12,7 @@
 import os
 import socket
 import subprocess
+import sys
 import threading
 
 from PIL import Image, ImageDraw
@@ -20,6 +21,20 @@ SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 MANAGE_BAT = os.path.join(SCRIPTS_DIR, 'manage_service.bat')
 SYSTEM_URL = 'http://127.0.0.1:5000'
 PORT = 5000
+
+# 会话内托盘互斥体：防止看门狗/登录自启重复拉起产生多个图标。
+# 句柄须保持进程级引用，避免被 GC 提前关闭。
+_TRAY_MUTEX = None
+
+
+def _tray_already_running() -> bool:
+    """Windows 命名互斥体检测：已有托盘实例时返回 True。"""
+    global _TRAY_MUTEX
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    _TRAY_MUTEX = kernel32.CreateMutexW(None, False, 'Local\\StockAnalystTray')
+    return kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
 
 
 def _service_running():
@@ -60,6 +75,10 @@ def _open_system(icon=None, item=None):
 
 
 def main():
+    # 会话内互斥：已有托盘实例则直接退出（看门狗每分钟会拉起，重复调用安全）
+    if _tray_already_running():
+        sys.exit(0)
+
     import pystray
 
     def _refresh_icon_loop(icon):

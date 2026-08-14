@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 """Stock Analyst 服务看门狗（Watchdog）
 
-由 Windows 计划任务每 5 分钟调用一次（pythonw 静默运行）：
-  1. 检查 127.0.0.1:5000 是否已有服务监听 → 有则直接退出（幂等）
-  2. 无则以 pythonw 分离方式拉起 app.py（无窗口，随系统存续）
+由 Windows 计划任务每分钟调用一次（pythonw 静默运行）：
+  1. 检查 127.0.0.1:5000 是否已有服务监听 → 无则以 pythonw 分离方式拉起 app.py
+  2. 确保托盘图标进程存活（tray.py 内含会话互斥体，重复拉起安全）
 
 设计要点：
   - 全程无控制台窗口，不会误关
@@ -30,11 +29,8 @@ def _service_running() -> bool:
         return False
 
 
-def main() -> int:
-    if _service_running():
-        return 0  # 服务正常，无需动作
-
-    pyw = PYTHONW_EXE if os.path.exists(PYTHONW_EXE) else 'pythonw'
+def _spawn_detached(args):
+    """pythonw 分离式静默拉起（无窗口，不随本进程退出）。"""
     flags = (
         subprocess.CREATE_NO_WINDOW
         | subprocess.DETACHED_PROCESS
@@ -42,7 +38,7 @@ def main() -> int:
     )
     try:
         subprocess.Popen(
-            [pyw, os.path.join(PROJECT_DIR, 'app.py')],
+            args,
             cwd=PROJECT_DIR,
             creationflags=flags,
             close_fds=True,
@@ -50,9 +46,22 @@ def main() -> int:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return 0
     except OSError:
-        return 1
+        pass
+
+
+def _ensure_tray():
+    """确保托盘图标进程存活（tray.py 内含会话互斥体，已运行时新实例秒退）。"""
+    pyw = PYTHONW_EXE if os.path.exists(PYTHONW_EXE) else 'pythonw'
+    _spawn_detached([pyw, os.path.join(SCRIPTS_DIR, 'tray.py')])
+
+
+def main() -> int:
+    if not _service_running():
+        pyw = PYTHONW_EXE if os.path.exists(PYTHONW_EXE) else 'pythonw'
+        _spawn_detached([pyw, os.path.join(PROJECT_DIR, 'app.py')])
+    _ensure_tray()
+    return 0
 
 
 if __name__ == '__main__':
