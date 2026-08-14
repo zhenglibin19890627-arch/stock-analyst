@@ -2747,9 +2747,18 @@ def _em_batch_collect(symbols, log_prefix='EM回退', progress_cb=None):
                         f'[{log_prefix}] {sym} 成功，连续失败计数重置'
                         f'({_EM_CONSECUTIVE_FAIL_COUNT}→0)'
                     )
-                _EM_CONSECUTIVE_FAIL_COUNT = 0  # 7. 计数重置（R-3：含同日跳过）
+                # 020D：仅当成功来自东财源时才重置计数/解除熔断——
+                # westock/新浪顶替成功不等于"东财恢复"，否则会形成
+                # "westock 成功→解除熔断→下一只又挨东财 4 轮重试"的乒乓循环。
+                if '东方财富' in (result[1] or ''):
+                    _EM_CONSECUTIVE_FAIL_COUNT = 0  # 7. 计数重置（R-3：含同日跳过）
+                    _em_clear_ban()  # 019Z：东财恢复即解除熔断冷却
+                else:
+                    logger.info(
+                        f'[{log_prefix}] {sym} 非东财源成功（{result[1]}），'
+                        '熔断冷却保持生效'
+                    )
                 cooldown_done = False  # 成功后重置冷却标记
-                _em_clear_ban()  # 019Z：东财恢复即解除熔断冷却
             else:
                 em_fail += 1
                 _EM_CONSECUTIVE_FAIL_COUNT += 1
