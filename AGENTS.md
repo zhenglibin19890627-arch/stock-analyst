@@ -150,6 +150,7 @@ curl http://127.0.0.1:5000/api/health
 - **WAL 模式 + busy_timeout=10s**：写操作遇锁等待 10 秒。**严禁**开启 `FLASK_DEBUG=True`（会启动 Flask 双进程，导致数据库锁冲突）。
 - **外键约束关闭**（`PRAGMA foreign_keys=OFF`）：级联删除由应用层手动管理（见 `db_manager.get_connection`）。改库结构时须同步维护应用层级联逻辑。
 - **衍生表同步**：数据纠错后须同步刷新衍生表，存在"安全锁"机制，避免状态不一致。
+- **每日报告不变量**：`daily_reports` 每股每天至多一份有效报告（`daily` 顶替 `intraday`，`UNIQUE(report_date, stock_id, report_type)`）；回测中心"评级有效性/价格建议命中率"的依据是 `ratings_history`（`UNIQUE(stock_id, rating_date)` + `INSERT OR REPLACE`，每股每天一条），改动报告或评级写入逻辑时须保持该不变量。
 
 ### 7.2 持仓风控阈值（config.py，禁止随意放宽）
 

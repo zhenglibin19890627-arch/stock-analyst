@@ -1,5 +1,17 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-14] 数据修复：每天仅一份最终报告（回测依据统一）
+
+### 背景
+- 需求：每天的最终报告只有一份，且是回测中心"评级有效性报告 / 价格建议命中率"的依据。
+- 盘点结论：写入路径已有保护（daily 生成时清掉当天 intraday；ratings_history `UNIQUE(stock_id, rating_date)` + `INSERT OR REPLACE`），问题仅存在于 013 迁移前的历史存量数据。
+
+### 数据修复（备份：db_backup_20260814_170133_enforce_single_daily_report.db）
+- 删除被 daily 顶替的历史 intraday 行 **106 行**（08-13/08-11/08-06/08-04/07-31）。
+- 归一化旧状态 `success` → `ok` **27 行**（07-24 的报告此前因状态值不符而被所有读取路径"隐形"）。
+- 校验：daily+intraday 共存 = 0；每股每天 ok 报告恰好 1 份；ratings_history / price_backtest_results / backtest_results（真实行）均无重复。
+- 说明：08-10 有 3 只股票当日生成失败（仅 failed 标记、无 ok 报告），可重跑当日报告补齐。
+
 ## [2026-08-14] 服务自愈看门狗 + 掉线根因修复
 
 ### 背景
