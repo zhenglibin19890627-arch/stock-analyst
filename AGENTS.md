@@ -22,7 +22,7 @@
 |------|------|
 | 语言 | Python 3.12+ |
 | Web 框架 | Flask（单进程，`FLASK_DEBUG=False`） |
-| 数据源 | akshare（公开行情/财务数据） |
+| 数据源 | akshare + 腾讯自选股(westock)/新浪/东财多源容错（公开行情/财务/资金面） |
 | 数据存储 | SQLite3（WAL 模式，应用层管理级联） |
 | 数据校验 | pydantic |
 | 数据处理 | pandas / numpy |

@@ -2309,6 +2309,146 @@ def _rotate_em_host(url):
             return url.replace(base, f'//{_random.randint(1, 99)}.{base[2:]}')
     return url
 
+
+# ============================================================
+# 020A：腾讯自选股（westock）资金面备用层
+# 数据源为腾讯自选股（社区实测不封 IP），主力净流入口径 = 超大单+大单（与东财同概念，
+# 探针实测 600276：MainNetFlow == JumboNetFlow + BlockNetFlow，精确相等）。
+# 交付方式：npm CLI（westock-data-clawhub@1.0.4 版本锁定）经腾讯共享签名网关；
+# 探针审计结论：CLI 仅访问 proxy.finance.qq.com 单域名，无其他网络行为。
+# 位置：东财三层 → 腾讯 westock → 新浪主力口径 → 估算兜底。
+# 共享通道存在失效可能 → 连续失败进入冷却 + 失败自动降级，不阻塞主链路。
+# ============================================================
+_WESTOCK_PACKAGE = 'westock-data-clawhub@1.0.4'
+_WESTOCK_TIMEOUT_SECONDS = 45    # npx 冷启动较慢，超时放宽
+_WESTOCK_COOLDOWN_SECONDS = 1800  # 连续失败后的冷却时长（30 分钟）
+_WESTOCK_COOLDOWN_FAIL_N = 3     # 连续失败 N 次进入冷却
+_WESTOCK_COOLDOWN_UNTIL = 0.0    # 冷却截止时间戳
+_WESTOCK_CONSECUTIVE_FAIL = 0    # 连续失败计数
+
+
+def _westock_cooldown_active():
+    """westock 层是否处于冷却期。"""
+    return time.time() < _WESTOCK_COOLDOWN_UNTIL
+
+
+def _westock_record_failure():
+    """记录 westock 层失败；连续失败达阈值进入冷却。"""
+    global _WESTOCK_CONSECUTIVE_FAIL, _WESTOCK_COOLDOWN_UNTIL
+    _WESTOCK_CONSECUTIVE_FAIL += 1
+    if _WESTOCK_CONSECUTIVE_FAIL >= _WESTOCK_COOLDOWN_FAIL_N:
+        _WESTOCK_COOLDOWN_UNTIL = time.time() + _WESTOCK_COOLDOWN_SECONDS
+        logger.warning(
+            f'[westock] 连续失败 {_WESTOCK_CONSECUTIVE_FAIL} 次，'
+            f'进入冷却 {_WESTOCK_COOLDOWN_SECONDS // 60} 分钟（期间跳过该层）'
+        )
+        _WESTOCK_CONSECUTIVE_FAIL = 0
+
+
+def _westock_reset():
+    """westock 层成功后重置连续失败计数。"""
+    global _WESTOCK_CONSECUTIVE_FAIL
+    _WESTOCK_CONSECUTIVE_FAIL = 0
+
+
+def _westock_cli_query(command, codes, date_str=''):
+    """调用 westock CLI（npx 子进程），返回 Markdown 输出文本；失败返回 None。"""
+    import shutil
+    import subprocess as _sp
+
+    if not shutil.which('npx') and not shutil.which('npm'):
+        logger.warning('[westock] 本机未安装 npx/node，跳过腾讯自选股资金面层')
+        return None
+    # npx 在 Windows 上是 npx.cmd 批处理，CreateProcess 不能直接执行，须经 cmd /c 包装
+    cmd = ['cmd', '/c', 'npx', '-y', _WESTOCK_PACKAGE, command, codes]
+    if date_str:
+        cmd += ['--date', date_str]
+    try:
+        proc = _sp.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=_WESTOCK_TIMEOUT_SECONDS,
+            creationflags=_sp.CREATE_NO_WINDOW,
+        )
+    except (_sp.TimeoutExpired, OSError) as e:
+        logger.warning(f'[westock] CLI 调用失败: {e}')
+        return None
+    out = (proc.stdout or '').strip()
+    if proc.returncode != 0 or not out:
+        logger.warning(
+            f'[westock] CLI 返回码={proc.returncode}，无有效输出'
+            f'（stderr 摘要: {(proc.stderr or "")[:120]}）'
+        )
+        return None
+    return out
+
+
+def _parse_westock_markdown(text):
+    """解析 westock CLI 的 Markdown 表格输出，返回第一张表第一行数据 {列名: 值}。"""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip().startswith('|')]
+    if len(lines) < 2:
+        return None
+    headers = [h.strip() for h in lines[0].strip('|').split('|')]
+    # 过滤分隔行（|---|:--:|---|）
+    data_lines = [ln for ln in lines[1:] if not set(ln) <= set('|-: ')]
+    if not data_lines:
+        return None
+    cells = [c.strip() for c in data_lines[0].strip('|').split('|')]
+    if len(cells) != len(headers):
+        return None
+    return dict(zip(headers, cells))
+
+
+def _fetch_capital_flow_westock(symbol, market):
+    """
+    020A：腾讯自选股资金面备用层（A股 asfund / 港股 hkfund）。
+    返回单日 dict {trade_date, main_net_inflow, super_large_net, large_net,
+    medium_net, small_net} 或 None。
+    - A股返回四档分解（主力=超大+大，与东财同口径）；港股仅主力净额+总额。
+    - 金额元→万元（与 raw_capital_flow 全库口径一致）；港股为万港元。
+    """
+    if _westock_cooldown_active():
+        logger.info(f'[{symbol}] westock 冷却期，跳过腾讯自选股资金面层')
+        return None
+    prefix, code = _get_tencent_prefix(symbol, market)
+    command = 'hkfund' if market == 'hk_stock' else 'asfund'
+    wcode = f'{prefix}{code}'
+    try:
+        text = _westock_cli_query(command, wcode)
+        if not text:
+            _westock_record_failure()
+            return None
+        row = _parse_westock_markdown(text)
+        if not row:
+            logger.warning(f'[{symbol}] westock 输出无法解析: {text[:150]}')
+            _westock_record_failure()
+            return None
+        main_net = _safe_float_wan(row.get('MainNetFlow'))
+        jumbo = _safe_float_wan(row.get('JumboNetFlow'))
+        block = _safe_float_wan(row.get('BlockNetFlow'))
+        mid = _safe_float_wan(row.get('MidNetFlow'))
+        small = _safe_float_wan(row.get('SmallNetFlow'))
+        if all(v is None for v in (main_net, jumbo, block, mid, small)):
+            logger.warning(f'[{symbol}] westock 返回字段全空，不采用')
+            _westock_record_failure()
+            return None
+        _westock_reset()
+        return {
+            'trade_date': row.get('EndDate') or '',
+            'main_net_inflow': main_net,
+            'super_large_net': jumbo,
+            'large_net': block,
+            'medium_net': mid,
+            'small_net': small,
+        }
+    except Exception as e:
+        logger.warning(f'[{symbol}] westock 资金面层失败: {e}')
+        _westock_record_failure()
+        return None
+
 # ============================================================
 # 019Q：新浪资金流（lscjfb 主力口径）常量与模块级超时包装
 # _call_with_timeout 复制自 019I 嵌套版（_fetch_capital_flow_ths_batch 内部 L1424-1436），
@@ -2737,7 +2877,7 @@ def fetch_capital_flow_batch(a_stock_symbols, progress_cb=None):
                     'SELECT 1 FROM raw_capital_flow WHERE stock_id=? AND trade_date=? '
                     'AND main_net_inflow IS NOT NULL '
                     'AND (is_estimated = 0 OR is_estimated IS NULL) '
-                    "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main'))",
+                    "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main','westock'))",
                     (sid, today_str),
                 )
                 if cursor_sup.fetchone():
@@ -3348,7 +3488,7 @@ def fetch_capital_flow(symbol, market):
     cursor_pre.execute(
         'SELECT COUNT(*) AS cnt FROM raw_capital_flow WHERE stock_id = ? AND trade_date = ? '
         'AND main_net_inflow IS NOT NULL AND (is_estimated = 0 OR is_estimated IS NULL) '
-        "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main'))",
+        "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main','westock'))",
         (stock_id, today_str_pre),
     )
     pre_cnt = cursor_pre.fetchone()['cnt']
@@ -3574,6 +3714,54 @@ def fetch_capital_flow(symbol, market):
             logger.warning(f'[{symbol}] akshare备用源失败: {e}')
 
     # ============================================================
+    # 020A：腾讯自选股（westock）资金面备用层 — 东财三层全失败后、新浪之前
+    # A股 asfund / 港股 hkfund，主力口径=超大+大（与东财同概念，社区实测不封 IP）。
+    # 写库 is_estimated=0、capital_source='westock'；东财恢复后仍可覆盖回补
+    # （防覆盖/补采清单 SQL 的 NOT IN 列表已含 'westock'）。
+    # ============================================================
+    if saved_count == 0:
+        try:
+            w_row = _fetch_capital_flow_westock(symbol, market)
+            if w_row:
+                w_date = (
+                    w_row['trade_date']
+                    or datetime.now(_CN_TZ).strftime('%Y-%m-%d')
+                )
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO raw_capital_flow
+                    (stock_id, trade_date, main_net_inflow,
+                     super_large_net, large_net, medium_net, small_net, is_estimated, capital_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'westock')
+                    """,
+                    (
+                        stock_id,
+                        w_date,
+                        w_row['main_net_inflow'],
+                        w_row['super_large_net'],
+                        w_row['large_net'],
+                        w_row['medium_net'],
+                        w_row['small_net'],
+                    ),
+                )
+                conn.commit()
+                conn.close()
+                if w_row['main_net_inflow'] is not None:
+                    saved_count = 1
+                source = '腾讯自选股(westock)'
+                logger.info(
+                    f'[{symbol}] 腾讯自选股资金面成功: '
+                    f'主力净流入={w_row["main_net_inflow"]}万, date={w_date}'
+                )
+            else:
+                warnings.append('腾讯自选股资金面层无数据')
+        except Exception as e:
+            warnings.append(f'腾讯自选股资金面层失败: {e}')
+            logger.warning(f'[{symbol}] 腾讯自选股资金面层失败: {e}')
+
+    # ============================================================
     # 019E Task 2：估算兜底（仅展示用，不参与评分）
     # EM 三层全失败时，降级到估算源（新浪/腾讯/网易）写入当日 1 行。
     # 估算值通过 is_estimated=1 标记，data_adapter/advisor SQL 层过滤确保不进入评分。
@@ -3673,7 +3861,7 @@ def fetch_capital_flow(symbol, market):
                         cursor.execute(
                             'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=?, is_estimated=1 '
                             'WHERE stock_id=? AND trade_date=? '
-                            "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main'))",
+                            "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main','westock'))",
                             (main_net, main_net_pct, stock_id, trade_date),
                         )
                         if cursor.rowcount == 0:
@@ -3712,7 +3900,7 @@ def fetch_capital_flow(symbol, market):
                         cursor.execute(
                             'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=?, is_estimated=1 '
                             'WHERE stock_id=? AND trade_date=? '
-                            "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main'))",
+                            "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main','westock'))",
                             (main_net, main_net_pct, stock_id, trade_date),
                         )
                         if cursor.rowcount == 0:
@@ -3751,7 +3939,7 @@ def fetch_capital_flow(symbol, market):
                         cursor.execute(
                             'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=?, is_estimated=1 '
                             'WHERE stock_id=? AND trade_date=? '
-                            "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main'))",
+                            "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main','westock'))",
                             (main_net, main_net_pct, stock_id, trade_date),
                         )
                         if cursor.rowcount == 0:
