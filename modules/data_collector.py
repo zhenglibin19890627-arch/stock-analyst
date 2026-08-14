@@ -3799,23 +3799,39 @@ def fetch_capital_flow(symbol, market):
                 )
                 conn = get_connection()
                 cursor = conn.cursor()
+                # 020F：UPDATE + INSERT OR IGNORE（与新浪层同模式）——
+                # INSERT OR REPLACE 会整行替换，冲掉同花顺批量预取的辅助字段 ths_net_inflow
                 cursor.execute(
-                    """
-                    INSERT OR REPLACE INTO raw_capital_flow
-                    (stock_id, trade_date, main_net_inflow,
-                     super_large_net, large_net, medium_net, small_net, is_estimated, capital_source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'westock')
-                    """,
+                    'UPDATE raw_capital_flow SET main_net_inflow=?, super_large_net=?, '
+                    'large_net=?, medium_net=?, small_net=?, is_estimated=0, capital_source=? '
+                    'WHERE stock_id=? AND trade_date=?',
                     (
-                        stock_id,
-                        w_date,
                         w_row['main_net_inflow'],
                         w_row['super_large_net'],
                         w_row['large_net'],
                         w_row['medium_net'],
                         w_row['small_net'],
+                        'westock',
+                        stock_id,
+                        w_date,
                     ),
                 )
+                if cursor.rowcount == 0:
+                    cursor.execute(
+                        'INSERT OR IGNORE INTO raw_capital_flow '
+                        '(stock_id, trade_date, main_net_inflow, super_large_net, large_net, '
+                        'medium_net, small_net, is_estimated, capital_source) '
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'westock')",
+                        (
+                            stock_id,
+                            w_date,
+                            w_row['main_net_inflow'],
+                            w_row['super_large_net'],
+                            w_row['large_net'],
+                            w_row['medium_net'],
+                            w_row['small_net'],
+                        ),
+                    )
                 conn.commit()
                 conn.close()
                 if w_row['main_net_inflow'] is not None:
