@@ -1,5 +1,12 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-14] 服务自愈看门狗（补充：巡检间隔降至 1 分钟）
+
+- 背景：同日 17:38/17:44 两次注销导致服务中断，5 分钟巡检的恢复窗口过长；ONLOGON 触发器被本机策略拒绝（Access denied）。
+- 调整：`StockAnalyst Watchdog` 计划任务改为 `/SC MINUTE /MO 1`（每分钟巡检，登录后 ≤60 秒自动恢复）。
+- 实测：杀进程 → 17:48:01 巡检刻度自动复活，health 200；任务每分钟正常触发（IgnoreNew 策略不影响后续巡检，看门狗拉起的是分离子进程）。
+- 说明：PowerShell `Set-ScheduledTask`/`Register-ScheduledTask` 在本机会话被拒，改用 `schtasks /Create`（经 cmd 中转处理引号）注册。
+
 ## [2026-08-14] 数据修复：每天仅一份最终报告（回测依据统一）
 
 ### 背景

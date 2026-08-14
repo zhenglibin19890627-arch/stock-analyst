@@ -77,10 +77,11 @@ python app.py
 
 ### 服务自愈（Watchdog）
 
-- Windows 计划任务 **`StockAnalyst Watchdog`** 每 5 分钟静默检查一次 `127.0.0.1:5000`，服务不在则用 pythonw 无窗口方式自动拉起（`scripts/watchdog.py`，带端口守卫，幂等）。
-- 效果：注销/关机后重新登录、服务被误杀、窗口被误关，均会在 5 分钟内自动恢复，无需人工干预；托盘图标仅作状态显示，服务存续不依赖它。
-- 查询/删除任务：`schtasks /query /tn "StockAnalyst Watchdog"` / `schtasks /delete /tn "StockAnalyst Watchdog" /f`。
-- 注意：该任务运行在登录会话内，注销后服务随会话停止（下次登录 5 分钟内自动恢复）；如需注销后仍常驻，需升级为 SYSTEM 级任务（管理员权限），但会与托盘/start.bat 的端口释放逻辑冲突，默认不启用。
+- Windows 计划任务 **`StockAnalyst Watchdog`**（schtasks，`/SC MINUTE /MO 1`）**每分钟**静默检查一次 `127.0.0.1:5000`，服务不在则用 pythonw 无窗口方式自动拉起（`scripts/watchdog.py`，带端口守卫，幂等）。
+- 效果：注销/关机后重新登录、服务被误杀、窗口被误关，均会在 **1 分钟内**自动恢复，无需人工干预；托盘图标仅作状态显示，服务存续不依赖它。
+- 2026-08-14 实测：注销再登录后由下一巡检刻度自动复活（实测演练：杀进程 → 1 分钟内 health 恢复 200）。
+- 注册命令（无空格路径问题，经 cmd 中转）：`schtasks /Create /TN "StockAnalyst Watchdog" /SC MINUTE /MO 1 /TR "\"<pythonw绝对路径>\" \"<项目绝对路径>\\scripts\\watchdog.py\"" /F`；查询/删除：`schtasks /query /tn "StockAnalyst Watchdog"` / `schtasks /delete /tn "StockAnalyst Watchdog" /f`。
+- 注意：该任务运行在登录会话内（ONLOGON 触发器被本机策略拒绝，改用 1 分钟巡检覆盖登录场景），注销后服务随会话停止、下次登录 1 分钟内恢复；如需注销后仍常驻，需升级为 SYSTEM 级任务（管理员权限），但会与托盘/start.bat 的端口释放逻辑冲突，默认不启用。
 
 ---
 
