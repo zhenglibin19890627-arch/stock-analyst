@@ -1,5 +1,9 @@
 # Stock Analyst — 智能个股分析与评级系统
 
+![banner](docs/banner.png)
+
+![tests](https://github.com/zhenglibin19890627-arch/stock-analyst/actions/workflows/tests.yml/badge.svg)
+
 面向 A 股（及港股）个人投资者的本地价值投资分析工具。零代码、一键启动、浏览器即用。
 
 ## 核心能力
