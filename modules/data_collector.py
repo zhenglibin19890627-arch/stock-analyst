@@ -2277,20 +2277,67 @@ _EM_BAN_UNTIL = 0.0          # 熔断冷却截止时间戳（0=未熔断）
 _EM_BAN_TTL_SECONDS = 7200   # 冷却时长（2 小时）
 _EM_LAST_REQUEST_TS = 0.0    # 东财全局最小请求间隔记录
 _EM_MIN_INTERVAL_SECONDS = 0.5  # 东财请求全局最小间隔（社区阈值：<5 次/秒）
+# 020C：熔断状态持久化文件（重启后仍记忆"东财不可用"，避免每轮从头挨 4 轮重试）
+_EM_BAN_STATE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs', 'em_ban_state.json'
+)
+
+
+def _em_ban_state_load():
+    """从持久化文件读取熔断截止时间戳（不存在/过期返回 0）。"""
+    try:
+        with open(_EM_BAN_STATE_FILE, encoding='utf-8') as f:
+            data = json.load(f)
+            until = float(data.get('until', 0))
+            if until > time.time():
+                return until
+    except (OSError, ValueError, TypeError):
+        pass
+    return 0.0
+
+
+def _em_ban_state_save(until):
+    """写入熔断截止时间戳（尽力而为，失败不影响主流程）。"""
+    try:
+        with open(_EM_BAN_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump({'until': until}, f)
+    except OSError:
+        pass
+
+
+def _em_ban_state_clear():
+    """清除持久化熔断状态。"""
+    try:
+        os.remove(_EM_BAN_STATE_FILE)
+    except OSError:
+        pass
 
 
 def _em_banned() -> bool:
-    """东财是否处于熔断冷却期（True=跳过东财直连，直接走备用源）。"""
-    return time.time() < _EM_BAN_UNTIL
+    """东财是否处于熔断冷却期（True=跳过东财直连，直接走备用源）。
+
+    020C：内存状态未熔断时回查持久化文件——重启后仍记忆当日熔断，
+    不再从头挨 4 轮 × 30~60s 的空等。
+    """
+    global _EM_BAN_UNTIL
+    if time.time() < _EM_BAN_UNTIL:
+        return True
+    persisted = _em_ban_state_load()
+    if persisted:
+        _EM_BAN_UNTIL = persisted
+        logger.info(f'[东财熔断] 从持久化状态恢复冷却期（至 {persisted:.0f}）')
+        return True
+    return False
 
 
 def _em_record_ban():
     """记录东财熔断冷却窗口（批量回退循环熔断触发时调用）。"""
     global _EM_BAN_UNTIL
     _EM_BAN_UNTIL = time.time() + _EM_BAN_TTL_SECONDS
+    _em_ban_state_save(_EM_BAN_UNTIL)
     logger.warning(
         f'[东财熔断] 进入冷却期 {_EM_BAN_TTL_SECONDS // 3600} 小时，'
-        '期间跳过东财资金面直连（push2his/push2/akshare），直接走新浪/估算备用源'
+        '期间跳过东财资金面直连（push2his/push2/akshare），直接走备用源（已持久化）'
     )
 
 
@@ -2300,6 +2347,7 @@ def _em_clear_ban():
     if _EM_BAN_UNTIL:
         logger.info('[东财熔断] 采集成功，解除冷却期')
     _EM_BAN_UNTIL = 0.0
+    _em_ban_state_clear()
 
 
 def _rotate_em_host(url):
