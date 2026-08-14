@@ -206,6 +206,7 @@ def _http_get_em(url, params=None, timeout=15, max_retries=None):
     """
     system_proxies = _urlreq.getproxies()
     last_error = None
+    global _EM_LAST_REQUEST_TS  # 019Z：全局最小请求间隔
     # 代理健康检查：仅当开关开启且存在系统代理时才检查（EM_USE_PROXY=False 时零触碰）
     proxy_available = bool(EM_USE_PROXY) and bool(system_proxies) and _proxy_health.is_available()
     rounds = max_retries if max_retries else _EM_RETRY_ROUNDS
@@ -213,6 +214,13 @@ def _http_get_em(url, params=None, timeout=15, max_retries=None):
     timeout_tuple = (5, 10) if timeout == 15 else timeout
 
     for attempt in range(rounds):
+        # 019Z：第 3 轮起尝试 push2/push2his 编号子域轮换（不同边缘节点可绕部分 WAF 拦截）
+        req_url = url
+        if attempt >= 2 and 'push2' in url and 'eastmoney.com' in url:
+            req_url = _rotate_em_host(url)
+            if req_url != url:
+                logger.info(f'东方财富第{attempt + 1}轮尝试编号子域: {req_url.split("/")[2]}')
+
         order = []
         if proxy_available:
             order = [('proxy', True), ('direct', False)]
@@ -225,6 +233,10 @@ def _http_get_em(url, params=None, timeout=15, max_retries=None):
                 if attempt > 0 or label == 'direct':
                     _delay = _random.uniform(1.5, 3.5)
                     time.sleep(_delay)
+                # 019Z：东财全局最小请求间隔（社区阈值 <5 次/秒）
+                _wait = _EM_MIN_INTERVAL_SECONDS - (time.time() - _EM_LAST_REQUEST_TS)
+                if _wait > 0:
+                    time.sleep(_wait)
                 session = requests.Session()
                 session.trust_env = use_proxy
                 session.headers.update(
@@ -234,17 +246,20 @@ def _http_get_em(url, params=None, timeout=15, max_retries=None):
                         'Accept-Language': 'zh-CN,zh;q=0.8',
                     }
                 )
-                if use_proxy:
-                    resp = session.get(
-                        url, params=params, timeout=timeout_tuple, proxies=system_proxies
-                    )
-                else:
-                    resp = session.get(
-                        url,
-                        params=params,
-                        timeout=timeout_tuple,
-                        proxies={'http': None, 'https': None},
-                    )
+                try:
+                    if use_proxy:
+                        resp = session.get(
+                            req_url, params=params, timeout=timeout_tuple, proxies=system_proxies
+                        )
+                    else:
+                        resp = session.get(
+                            req_url,
+                            params=params,
+                            timeout=timeout_tuple,
+                            proxies={'http': None, 'https': None},
+                        )
+                finally:
+                    _EM_LAST_REQUEST_TS = time.time()
                 resp.raise_for_status()
                 logger.info(f'东方财富{label}成功（第{attempt + 1}轮）')
                 if use_proxy:
@@ -2252,6 +2267,49 @@ _EM_CIRCUIT_BREAK_N = 5                # 熔断触发：连续失败只数
 _EM_FALLBACK_TOTAL_CAP_SECONDS = 600   # 回退循环整体软超时（秒）
 
 # ============================================================
+# 019Z：东财"当日熔断冷却"状态（进程级）
+# 批量回退循环触发熔断后，冷却窗口内所有东财资金面请求直接跳过（走新浪/估算），
+# 避免每只股票空耗 4 轮 × 30~60s 重试（约 2.5 分钟/只 × 29 只 ≈ 70 分钟无谓等待）。
+# 依据社区实测（a-stock-data SKILL 2026-06）：东财临时封禁通常"几分钟到几小时"，
+# 冷却 2 小时后自动恢复尝试；期间任意一次东财成功即提前解除。
+# ============================================================
+_EM_BAN_UNTIL = 0.0          # 熔断冷却截止时间戳（0=未熔断）
+_EM_BAN_TTL_SECONDS = 7200   # 冷却时长（2 小时）
+_EM_LAST_REQUEST_TS = 0.0    # 东财全局最小请求间隔记录
+_EM_MIN_INTERVAL_SECONDS = 0.5  # 东财请求全局最小间隔（社区阈值：<5 次/秒）
+
+
+def _em_banned() -> bool:
+    """东财是否处于熔断冷却期（True=跳过东财直连，直接走备用源）。"""
+    return time.time() < _EM_BAN_UNTIL
+
+
+def _em_record_ban():
+    """记录东财熔断冷却窗口（批量回退循环熔断触发时调用）。"""
+    global _EM_BAN_UNTIL
+    _EM_BAN_UNTIL = time.time() + _EM_BAN_TTL_SECONDS
+    logger.warning(
+        f'[东财熔断] 进入冷却期 {_EM_BAN_TTL_SECONDS // 3600} 小时，'
+        '期间跳过东财资金面直连（push2his/push2/akshare），直接走新浪/估算备用源'
+    )
+
+
+def _em_clear_ban():
+    """东财任意请求成功后解除熔断冷却。"""
+    global _EM_BAN_UNTIL
+    if _EM_BAN_UNTIL:
+        logger.info('[东财熔断] 采集成功，解除冷却期')
+    _EM_BAN_UNTIL = 0.0
+
+
+def _rotate_em_host(url):
+    """东财 push2/push2his 编号子域轮换（1~99）：不同边缘节点可绕部分 WAF 拦截。"""
+    for base in ('//push2.eastmoney.com/', '//push2his.eastmoney.com/'):
+        if base in url:
+            return url.replace(base, f'//{_random.randint(1, 99)}.{base[2:]}')
+    return url
+
+# ============================================================
 # 019Q：新浪资金流（lscjfb 主力口径）常量与模块级超时包装
 # _call_with_timeout 复制自 019I 嵌套版（_fetch_capital_flow_ths_batch 内部 L1424-1436），
 # 提升为模块级并新增 timeout 参数（M-3/D-4/M-10）；既有 THS 嵌套版零改动（避免回归面扩大）。
@@ -2447,6 +2505,7 @@ def _em_batch_collect(symbols, log_prefix='EM回退', progress_cb=None):
                 f'>={_EM_CIRCUIT_BREAK_N}），'
                 f'终止本轮回退，剩余 {len(unprocessed)} 只未采集: {unprocessed}'
             )
+            _em_record_ban()  # 019Z：进入冷却期，后续东财资金面请求直接走备用源
             em_fail += len(unprocessed)
             circuit_broken = True
             break
@@ -2502,6 +2561,7 @@ def _em_batch_collect(symbols, log_prefix='EM回退', progress_cb=None):
                     )
                 _EM_CONSECUTIVE_FAIL_COUNT = 0  # 7. 计数重置（R-3：含同日跳过）
                 cooldown_done = False  # 成功后重置冷却标记
+                _em_clear_ban()  # 019Z：东财恢复即解除熔断冷却
             else:
                 em_fail += 1
                 _EM_CONSECUTIVE_FAIL_COUNT += 1
@@ -2774,7 +2834,12 @@ def _fetch_capital_flow_em_individual(symbol, market):
     使用 _http_get_em 实现直连+代理智能回退+多轮重试。
     返回 list[dict]（含120天历史数据）或 None。
     支持A股和港股（通过secid区分）。
+    019Z：东财熔断冷却期内直接返回 None（跳过 4 轮空等，链路自动落新浪/估算）。
     """
+    if _em_banned():
+        logger.warning(f'{symbol} 东财处于熔断冷却期，跳过个股资金流向直连（走备用源）')
+        return None
+
     # 获取secid（A股: 0/1.代码, 港股: 116.5位代码）
     secid = _get_em_secid(symbol, market)
 
@@ -2845,7 +2910,11 @@ def _get_em_secid(symbol, market):
 
 
 def _fetch_capital_flow_em(symbol, market):
-    """从东方财富 push2 接口获取资金流向数据"""
+    """从东方财富 push2 接口获取资金流向数据（019Z：熔断冷却期内直接跳过）。"""
+    if _em_banned():
+        logger.warning(f'{symbol} 东财处于熔断冷却期，跳过 push2 资金流向直连（走备用源）')
+        return None
+
     secid = _get_em_secid(symbol, market)
     url = 'https://push2.eastmoney.com/api/qt/stock/fflow/daykline/get'
     params = {
@@ -3438,8 +3507,8 @@ def fetch_capital_flow(symbol, market):
             warnings.append(f'东方财富push2获取失败: {e}')
             logger.warning(f'[{symbol}] 东方财富push2获取失败: {e}')
 
-    # === 备用数据源2：akshare内置接口（最后降级方案，仅A股）===
-    if saved_count == 0 and market == 'a_stock':
+    # === 备用数据源2：akshare内置接口（最后降级方案，仅A股；019Z：东财熔断冷却期同样跳过）===
+    if saved_count == 0 and market == 'a_stock' and not _em_banned():
         try:
             logger.info(f'[{symbol}] 尝试akshare备用数据源...')
             df_ak = ak.stock_individual_fund_flow(stock=symbol, market=_get_em_market_code(symbol))
