@@ -2947,7 +2947,7 @@
 
         // 雷达图
         html += '<div class="radar-card">';
-        html += '<div class="card-title" style="font-size:15px;margin-bottom:8px;">四维评分雷达图</div>';
+        html += '<div class="card-title" style="font-size:14px;margin-bottom:2px;">四维评分雷达图</div>';
         html += '<div id="radarChart"></div>';
         html += '</div>';
 
@@ -2955,7 +2955,7 @@
 
         // 3. 四维评分详情（2×2网格，紧跟首屏评分卡后）
         html += '<div class="card dim-detail-card">';
-        html += '<div class="card-title" style="font-size:16px;">四维评分详情</div>';
+        html += '<div class="card-title" style="font-size:15px;margin-bottom:6px;">四维评分详情</div>';
         html += '<div class="dim-grid">';
         html += _renderDimensionCard('kline', '技术面', dims.kline || dims.technical);
         html += _renderDimensionCard('fundamental', '基本面', dims.fundamental);
@@ -2969,7 +2969,7 @@
 
         // 5. 投资建议详情
         html += '<div class="advice-card">';
-        html += '<div class="card-title" style="font-size:16px;margin-bottom:16px;">📝 投资建议详情</div>';
+        html += '<div class="card-title" style="font-size:15px;margin-bottom:10px;">📝 投资建议详情</div>';
 
         if (adviseData.advice_detail) {
             // U7(#5): 综合文本（历史快照 markdown_content）中的「数据完整度」行

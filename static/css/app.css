@@ -698,11 +698,11 @@
         .radar-card {
             background: white;
             border-radius: 12px;
-            padding: 12px 14px;
+            padding: 10px 12px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.06);
         }
-        .radar-card .card-title { margin-bottom: 4px; }
-        #radarChart { width: 100%; height: 190px; }
+        .radar-card .card-title { margin-bottom: 2px; }
+        #radarChart { width: 100%; height: 170px; }
 
         .kline-card {
             background: white;
@@ -722,21 +722,21 @@
         .dim-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;  /* 桌面端强制 2×2 网格 */
-            gap: 10px;
-            margin-bottom: 12px;
+            gap: 8px;
+            margin-bottom: 10px;
         }
         @media (max-width: 768px) {
             .dim-grid { grid-template-columns: 1fr; }  /* 移动端单列 */
         }
         .dim-detail-card {
-            padding: 14px;
-            margin-bottom: 12px;
+            padding: 10px;
+            margin-bottom: 10px;
         }
-        .dim-detail-card .card-title { margin-bottom: 8px; }
+        .dim-detail-card .card-title { margin-bottom: 6px; }
         .dim-card {
             background: white;
             border-radius: 10px;
-            padding: 12px;
+            padding: 10px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.06);
             position: relative;
             width: 100%;
@@ -745,9 +745,9 @@
         /* 右上角权重小字 */
         .dim-card .dim-weight-corner {
             position: absolute;
-            top: 10px;
-            right: 10px;
-            font-size: 11px;
+            top: 8px;
+            right: 8px;
+            font-size: 10px;
             color: #aaa;
             font-weight: 500;
         }
@@ -755,24 +755,24 @@
         .dim-card .dim-top {
             display: flex;
             align-items: baseline;
-            gap: 8px;
-            margin-bottom: 4px;
+            gap: 6px;
+            margin-bottom: 3px;
         }
         .dim-card .dim-score-big {
-            font-size: 30px;
+            font-size: 26px;
             font-weight: 800;
             line-height: 1;
         }
-        .dim-card .dim-name { font-size: 14px; font-weight: 700; color: #333; }
+        .dim-card .dim-name { font-size: 13px; font-weight: 700; color: #333; }
         /* ② 中部：状态标签 */
-        .dim-card .dim-mid { margin-bottom: 4px; }
+        .dim-card .dim-mid { margin-bottom: 3px; }
         .dim-status-badge {
             display: inline-flex;
             align-items: center;
-            gap: 4px;
-            padding: 2px 10px;
+            gap: 3px;
+            padding: 2px 8px;
             border-radius: 20px;
-            font-size: 12px;
+            font-size: 11px;
             font-weight: 600;
         }
         .dim-badge-health { background: #e8f5e9; color: #2e7d32; }
@@ -805,30 +805,30 @@
         .advice-card {
             background: white;
             border-radius: 12px;
-            padding: 24px;
-            margin-bottom: 20px;
+            padding: 14px;
+            margin-bottom: 12px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.06);
         }
-        .advice-section { margin-bottom: 16px; }
+        .advice-section { margin-bottom: 10px; }
         .advice-section-title {
-            font-size: 15px;
+            font-size: 14px;
             font-weight: 700;
-            margin-bottom: 8px;
+            margin-bottom: 6px;
             color: #333;
         }
         .advice-detail-text {
-            font-size: 14px;
+            font-size: 13px;
             color: #444;
-            line-height: 1.8;
-            padding: 12px 16px;
+            line-height: 1.6;
+            padding: 8px 12px;
             background: #f8f9fa;
             border-radius: 8px;
             border-left: 3px solid #1a73e8;
         }
         .risk-list { list-style: none; }
         .risk-list li {
-            padding: 6px 0;
-            font-size: 14px;
+            padding: 4px 0;
+            font-size: 13px;
             color: #c62828;
         }
         .risk-list li:before { content: "⚠ "; }
