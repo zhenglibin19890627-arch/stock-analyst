@@ -114,8 +114,7 @@
     var ROUTES = {
         '#holdings':    { view: 'view-holdings',    label: '持仓管理', init: function() { loadPortfolioGroups(); } },
         '#watchlist':   { view: 'view-watchlist',   label: '自选股',   init: function() { loadStocks(); } },
-        '#trades':      { view: 'view-trades',      label: '交易流水', init: function() { loadAllTrades(); } },
-        '#adjustments': { view: 'view-adjustments', label: '成本修正', init: function() { loadAllAdjustments(); } },
+        '#trades':      { view: 'view-trades',      label: '流水与成本修正', init: function() { loadAllTrades(); loadAllAdjustments(); } },
         '#report':      { view: 'view-report',      label: '分析报告', init: function() { /* 由 viewReport() 驱动 */ } },
         '#daily':       { view: 'view-daily',       label: '每日报告', init: function() { loadLatestDailyReport(); } },
         '#dashboard':   { view: 'view-dashboard',   label: '总览看板', init: function() { loadDashboard(); } },
@@ -124,8 +123,9 @@
     var DEFAULT_ROUTE = '#holdings';
     var _viewLoaded = {}; // 记录各视图是否已首次加载
 
-    /** 导航到指定路由 */
+    /** 导航到指定路由（旧 #adjustments 哈希自动归并到 #trades） */
     function navigateTo(hash) {
+        if (hash === '#adjustments') hash = '#trades';
         if (!ROUTES[hash]) hash = DEFAULT_ROUTE;
         window.location.hash = hash;
     }
@@ -133,6 +133,10 @@
     /** hashchange 事件处理：切换视图 + 高亮 Tab */
     function handleHashChange() {
         var hash = window.location.hash || DEFAULT_ROUTE;
+        if (hash === '#adjustments') {
+            window.location.hash = '#trades'; // 旧链接兼容，触发一次重定向
+            return;
+        }
         if (!ROUTES[hash]) hash = DEFAULT_ROUTE;
         var route = ROUTES[hash];
 

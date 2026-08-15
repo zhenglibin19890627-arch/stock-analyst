@@ -16,8 +16,7 @@
     <div class="topnav-tabs">
         <button class="topnav-tab" data-route="#holdings" onclick="navigateTo('#holdings')">💼 持仓管理</button>
         <button class="topnav-tab" data-route="#watchlist" onclick="navigateTo('#watchlist')">📋 自选股</button>
-        <button class="topnav-tab" data-route="#trades" onclick="navigateTo('#trades')">📝 交易流水</button>
-        <button class="topnav-tab" data-route="#adjustments" onclick="navigateTo('#adjustments')">✎ 成本修正</button>
+        <button class="topnav-tab" data-route="#trades" onclick="navigateTo('#trades')">📝 流水与成本修正</button>
         <button class="topnav-tab" data-route="#report" onclick="navigateTo('#report')">📊 分析报告</button>
         <button class="topnav-tab" data-route="#daily" onclick="navigateTo('#daily')">📅 每日报告</button>
         <button class="topnav-tab" data-route="#dashboard" onclick="navigateTo('#dashboard')">📈 总览看板</button>
@@ -286,7 +285,7 @@
 
 <!-- P2 看板专用样式 -->
 
-<!-- ========== 视图：交易流水 ========== -->
+<!-- ========== 视图：交易流水与成本修正（合并页） ========== -->
 <div id="view-trades" class="view">
     <div class="card">
         <div class="card-title">📝 全部交易流水 <span style="font-size:13px;color:#888;font-weight:normal;">（买卖/分红记录，支持筛选）</span></div>
@@ -305,10 +304,7 @@
             <div class="empty">暂无交易流水，请在持仓管理中添加</div>
         </div>
     </div>
-</div>
 
-<!-- ========== 视图：成本修正 ========== -->
-<div id="view-adjustments" class="view">
     <div class="card">
         <div class="card-title">✎ 成本修正历史 <span style="font-size:13px;color:#888;font-weight:normal;">（审计追溯，所有修正留痕）</span></div>
         <div class="form-row" style="margin-bottom:12px;">
