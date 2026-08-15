@@ -2795,6 +2795,7 @@
 
     // ========== P0: 个股分析报告页面 ==========
     var _reportStockId = null;
+    var _reportTechDetail = null; // 020R-36：技术指标明细（供技术面卡渲染）
     var _radarChart = null;
     var _klineChart = null;
 
@@ -3082,6 +3083,8 @@
         html += '</div><!-- /report-top-grid -->';
 
         // 3. 四维评分详情（2×2网格，紧跟首屏评分卡后）
+        // 020R-36：技术指标明细并入技术面卡内（_reportTechDetail 供 _renderDimensionCard 使用）
+        _reportTechDetail = adviseData.technical_detail || null;
         html += '<div class="card dim-detail-card">';
         html += '<div class="card-title" style="font-size:15px;margin-bottom:6px;">四维评分详情</div>';
         html += '<div class="dim-grid">';
@@ -3090,10 +3093,6 @@
         html += _renderDimensionCard('capital_flow', '资金面', dims.capital_flow || dims.capital);
         html += _renderDimensionCard('news', '消息面', dims.news || dims.sentiment);
         html += '</div>';
-        // 020R-35：技术指标明细（均线/MACD/RSI/KDJ/布林/量能，来自后端实时计算）
-        if (adviseData.technical_detail) {
-            html += _renderTechDetail(adviseData.technical_detail);
-        }
         html += '</div>';
 
         // 4. K线图卡片已移除（020R：用户裁定报告页不再平铺K线卡片；
@@ -4231,7 +4230,10 @@
         var dimLabelTip = dimLabelTips[key] || '';
 
         var factorsHtml = '';
-        if (topFactors.length === 0) {
+        if (key === 'kline' && _reportTechDetail) {
+            // 020R-36：技术指标明细并入技术面卡（均线/MACD/RSI/KDJ/布林/量能 + 近期走势）
+            factorsHtml = _renderTechRows(_reportTechDetail, factors);
+        } else if (topFactors.length === 0) {
             factorsHtml = '<span style="color:#bbb;font-size:12px;">暂无关键因子</span>';
         } else {
             topFactors.forEach(function(item) {
@@ -4262,54 +4264,51 @@
     }
 
     /**
-     * 020R-35：技术指标明细块（六类指标：均线系统/MACD趋势/RSI/KDJ/布林带/量能）
+     * 020R-35/36：技术指标明细——状态语义着色
      */
-    function _renderTechDetail(td) {
-        function _stateColor(state) {
-            if (!state) return '#666';
-            if (['超买', '触及上轨'].indexOf(state) >= 0) return '#f39c12';
-            if (['超卖', '触及下轨'].indexOf(state) >= 0) return '#1a73e8';
-            if (['多头排列', '上轨区', '中轨上方', '中性偏强'].indexOf(state) >= 0) return '#e74c3c';
-            if (['空头排列', '下轨区', '中轨下方', '偏弱'].indexOf(state) >= 0) return '#27ae60';
-            if (state.indexOf('多头') >= 0 || state.indexOf('金叉') >= 0) return '#e74c3c';
-            if (state.indexOf('空头') >= 0 || state.indexOf('死叉') >= 0) return '#27ae60';
-            if (state.indexOf('放量') >= 0) return '#e67e22';
-            return '#666';
+    function _techStateColor(state) {
+        if (!state) return '#666';
+        if (['超买', '触及上轨'].indexOf(state) >= 0) return '#f39c12';
+        if (['超卖', '触及下轨'].indexOf(state) >= 0) return '#1a73e8';
+        if (['多头排列', '上轨区', '中轨上方', '中性偏强'].indexOf(state) >= 0) return '#e74c3c';
+        if (['空头排列', '下轨区', '中轨下方', '偏弱'].indexOf(state) >= 0) return '#27ae60';
+        if (state.indexOf('多头') >= 0 || state.indexOf('金叉') >= 0) return '#e74c3c';
+        if (state.indexOf('空头') >= 0 || state.indexOf('死叉') >= 0) return '#27ae60';
+        if (state.indexOf('放量') >= 0) return '#e67e22';
+        return '#666';
+    }
+
+    /**
+     * 020R-36：技术指标明细行（并入技术面卡内）——六类指标 + 近期走势
+     */
+    function _renderTechRows(td, factors) {
+        function _row(label, body, state) {
+            var color = _techStateColor(state);
+            return '<div class="factor-row">' +
+                '<span class="factor-label">' + label + '</span>' +
+                '<span class="factor-val"><span style="color:#333;font-weight:400;">' + (body || '—') + '</span>' +
+                (state ? ' <span style="color:' + color + ';font-weight:700;">' + state + '</span>' : '') +
+                '</span></div>';
         }
-        function _item(title, body, state) {
-            var color = _stateColor(state);
-            return '<div style="flex:1;min-width:150px;background:#f8f9fa;border:1px solid #eee;border-radius:8px;padding:8px 10px;">' +
-                '<div style="font-size:11px;color:#888;margin-bottom:4px;">' + title + '</div>' +
-                '<div style="font-size:12px;color:#333;line-height:1.5;">' + (body || '—') + '</div>' +
-                (state ? '<div style="font-size:12px;font-weight:700;color:' + color + ';margin-top:2px;">' + state + '</div>' : '') +
-                '</div>';
-        }
-        var html = '<div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;padding-top:12px;border-top:1px dashed #e0e0e0;">';
-        html += '<div style="width:100%;font-size:13px;font-weight:700;color:#555;margin-bottom:2px;">📈 技术指标明细' +
-            (td.latest_date ? ' <span style="font-weight:400;color:#999;font-size:12px;">（K线截至 ' + td.latest_date + '）</span>' : '') + '</div>';
-        // 1) 均线系统
-        html += _item('均线系统',
+        var html = '<div style="font-size:11px;color:#999;margin-bottom:2px;">技术指标明细' +
+            (td.latest_date ? '（K线截至 ' + td.latest_date + '）' : '') + '</div>';
+        html += _row('均线系统',
             (td.ma5 != null ? ('MA5 ' + td.ma5 + ' · MA10 ' + td.ma10 + ' · MA20 ' + td.ma20) : null),
             td.ma_state);
-        // 2) MACD 趋势
-        html += _item('MACD 趋势',
+        html += _row('MACD趋势',
             (td.macd_dif != null ? ('DIF ' + td.macd_dif + ' · DEA ' + td.macd_dea + ' · 柱 ' + (td.macd_hist >= 0 ? '+' : '') + td.macd_hist) : null),
             td.macd_state);
-        // 3) RSI(14) 超买超卖
-        html += _item('RSI(14) 超买超卖', (td.rsi14 != null ? String(td.rsi14) : null), td.rsi_state);
-        // 4) KDJ 超买超卖
-        html += _item('KDJ 超买超卖',
-            (td.kdj_k != null ? ('K ' + td.kdj_k + ' · D ' + td.kdj_d + ' · J ' + td.kdj_j) : null),
-            td.kdj_state);
-        // 5) 布林带波动
-        html += _item('布林带波动',
+        html += _row('RSI(14)', (td.rsi14 != null ? String(td.rsi14) : null), td.rsi_state);
+        html += _row('KDJ', (td.kdj_k != null ? ('K ' + td.kdj_k + ' · D ' + td.kdj_d + ' · J ' + td.kdj_j) : null), td.kdj_state);
+        html += _row('布林带',
             (td.boll_position != null
-                ? ('位置 ' + td.boll_position + '% · 上' + td.boll_upper + ' / 中' + td.boll_mid + ' / 下' + td.boll_lower)
+                ? ('位置 ' + td.boll_position + '% · 上' + td.boll_upper + '/中' + td.boll_mid + '/下' + td.boll_lower)
                 : null),
             td.boll_state);
-        // 6) 量能配合
-        html += _item('量能配合', (td.vol_ratio != null ? ('量比 ' + td.vol_ratio) : null), td.vol_state);
-        html += '</div>';
+        html += _row('量能', (td.vol_ratio != null ? ('量比 ' + td.vol_ratio) : null), td.vol_state);
+        if (factors && factors.recent_trend) {
+            html += _row('近期走势', String(factors.recent_trend), null);
+        }
         return html;
     }
 
