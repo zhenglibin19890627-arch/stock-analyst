@@ -4534,13 +4534,15 @@
             if (t.length > 40) t = t.slice(0, 40) + '…';
             html += _row('重要新闻', '<span style="color:#333;font-weight:400;">' + t + '</span>');
         }
-        // 2) 股东行为（权重 30%）
+        // 2) 股东行为（权重 30%）：020R-44 三态显示
         if (nd.holder === true) {
             html += _row('股东行为', _fv('增持', '增持·利好'));
         } else if (nd.holder === false) {
-            html += _row('股东行为', _fv('未增持', '未增持/减持'));
+            html += _row('股东行为',
+                '<span style="color:#27ae60;font-weight:600;">近30天无增持</span>');
         } else {
-            html += _row('股东行为', '<span style="color:#999;">数据缺失</span>');
+            html += _row('股东行为',
+                '<span style="color:#999;">数据缺失（接口不可用或港股未采集）</span>');
         }
         return html;
     }

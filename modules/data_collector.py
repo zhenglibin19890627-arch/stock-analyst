@@ -1506,8 +1506,10 @@ def fetch_holder_increase(symbol: str, preloaded_df=None):
 
     B11-API-DEDUP：支持预加载数据(preloaded_df)和模块级缓存，避免批量时重复调用全市场接口。
 
-    Returns:
-        True=有增持, False=有减持, None=无记录或接口不可用
+    020R-44 三态语义：
+        True  = 近30天有增持（利好）
+        False = 近30天无增持（含：有减持、或30天内/全市场无任何披露记录）
+        None  = 接口不可用/返回空（数据缺失，评分时该项权重归零）
     """
     global _holder_cache, _holder_cache_time
 
@@ -1535,7 +1537,9 @@ def fetch_holder_increase(symbol: str, preloaded_df=None):
         # 过滤本股票
         sub = df[df[code_col].str.contains(symbol, na=False)]
         if sub.empty:
-            return None
+            # 020R-44：全市场无该股任何披露记录 → 视为近30天无增持（False），
+            # 与「接口失败(None)」区分开
+            return False
         # 过滤近30天
         date_col = '变动日期'
         if date_col not in sub.columns:
@@ -1543,7 +1547,8 @@ def fetch_holder_increase(symbol: str, preloaded_df=None):
         cutoff = (datetime.now(_CN_TZ) - timedelta(days=30)).strftime('%Y-%m-%d')
         sub = sub[sub[date_col].astype(str) >= cutoff]
         if sub.empty:
-            return None
+            # 020R-44：30天内无变动 → 近30天无增持（False）
+            return False
         # 判断方向：通过 '变动股数' 正负判断（正=增持，负=减持）
         shares_col = '变动股数'
         if shares_col not in sub.columns:
@@ -1559,7 +1564,7 @@ def fetch_holder_increase(symbol: str, preloaded_df=None):
             # 既有增持又有减持，按最近一笔判断
             latest_shares = sub.iloc[0][shares_col]
             return float(latest_shares) > 0 if latest_shares is not None else None
-        return None
+        return False
     except Exception as e:
         logger.warning(f'[B10 股东增减持 {symbol}] 接口失败(静默降级): {e}')
         return None
