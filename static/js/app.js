@@ -1051,17 +1051,21 @@
             const hasEstimated = capital.success && capital.data && capital.data.some(d => d.is_estimated === 1);
             const hasThsFallback = capital.success && capital.data && capital.data.some(d => d.capital_source === 'ths_total');
             const hasSinaMain = capital.success && capital.data && capital.data.some(d => d.capital_source === 'sina_main');
+            const hasWestock = capital.success && capital.data && capital.data.some(d => d.capital_source === 'westock');
             const sourceNotes = [];
             if (hasEstimated) sourceNotes.push('含估算兜底数据');
             if (hasThsFallback) sourceNotes.push('同花顺顶替（全部资金口径）');
             if (hasSinaMain) sourceNotes.push('新浪顶替（主力口径）');
-            const capitalSourceLabel = sourceNotes.length ? '来源：东方财富（' + sourceNotes.join('、') + '）' : '来源：东方财富';
+            // 020N：资金面行级来源标注（东财/腾讯逐行混合时诚实标注）
+            const capitalBaseSource = hasWestock ? '来源：东方财富/腾讯自选股' : '来源：东方财富';
+            const capitalSourceLabel = sourceNotes.length ? capitalBaseSource + '（' + sourceNotes.join('、') + '）' : capitalBaseSource;
             html += '<h4 style="margin: 24px 0 8px;">资金面数据（最近10条）<span style="font-size:12px;color:#999;font-weight:normal;">　' + capitalSourceLabel + '</span></h4>';
             if (capital.success && capital.count > 0) {
-                html += '<table><thead><tr><th>日期</th><th>主力净流入</th><th>主力净流入占比</th><th>超大单</th><th>大单</th><th title="同花顺全部资金净流入（总主动买入-总主动卖出），辅助指标">同花顺净额<sup style="color:#999">辅</sup></th></tr></thead><tbody>';
+                html += '<table><thead><tr><th>日期</th><th>主力净流入</th><th>主力净流入占比</th><th>超大单</th><th>大单</th><th>中单</th><th>小单</th></tr></thead><tbody>';
                 capital.data.forEach(d => {
                     const color = d.main_net_inflow > 0 ? '#e74c3c' : '#27ae60';
-                    const thsColor = d.ths_net_inflow > 0 ? '#e74c3c' : d.ths_net_inflow < 0 ? '#27ae60' : '#999';
+                    const medColor = d.medium_net > 0 ? '#e74c3c' : d.medium_net < 0 ? '#27ae60' : '#999';
+                    const smColor = d.small_net > 0 ? '#e74c3c' : d.small_net < 0 ? '#27ae60' : '#999';
                     // 019E Task 4.1：估算行追加标注（仅资金面表格，评分卡片不标注）
                     // 019K Task 4：THS 顶替行追加“同花顺”标注（口径提示：全部资金净流入，非主力）
                     // 019S：ths_total 已无新增行（存量 27 行按方案 b 处置），
@@ -1070,10 +1074,13 @@
                     const estTag = d.is_estimated === 1 ? '<sup style="color:#e67e22;font-size:11px">估算</sup>' : '';
                     const thsTag = d.capital_source === 'ths_total' ? '<sup style="color:#1a73e8;font-size:11px">同花顺</sup>' : '';
                     const sinaTag = d.capital_source === 'sina_main' ? '<sup style="color:#8e44ad;font-size:11px">新浪</sup>' : '';
-                    html += `<tr><td>${d.trade_date}</td><td style="color:${color}">${d.main_net_inflow ?? '—'}${estTag}${thsTag}${sinaTag}</td><td>${d.main_net_inflow_pct ?? '—'}%</td><td>${d.super_large_net ?? '—'}</td><td>${d.large_net ?? '—'}</td><td style="color:${thsColor}">${d.ths_net_inflow ?? '—'}</td></tr>`;
+                    html += `<tr><td>${d.trade_date}</td><td style="color:${color}">${d.main_net_inflow ?? '—'}${estTag}${thsTag}${sinaTag}</td><td>${d.main_net_inflow_pct ?? '—'}%</td><td>${d.super_large_net ?? '—'}</td><td>${d.large_net ?? '—'}</td><td style="color:${medColor}">${d.medium_net ?? '—'}</td><td style="color:${smColor}">${d.small_net ?? '—'}</td></tr>`;
                 });
                 html += '</tbody></table>';
-                html += '<div style="font-size:12px;color:#999;margin-top:4px;">主力净流入来源：东方财富（超大单+大单）；同花顺净额为辅助指标（全部资金净流入），两者口径不同，可用于判断主力与散户行为背离</div>';
+                // 020N：原「同花顺净额」辅助列不再展示——同花顺历史接口无法获取，缺失日无法补齐；
+                // 且东财/腾讯四档净额互补恒等（超大+大+中+小≡0，散户=被动方口径），
+                // 无法合成同花顺「净额」口径，为避免误导按用户裁定移除以保证口径真实。
+                html += '<div style="font-size:12px;color:#999;margin-top:4px;">主力净流入来源：东方财富/腾讯（超大单+大单）；超大/大/中/小四档净额来自同一数据源、逐日完整，四档合计为零（散户为被动方口径）</div>';
             } else {
                 html += '<div class="alert alert-warning">暂无资金面数据，请先点击"采集数据"</div>';
             }
