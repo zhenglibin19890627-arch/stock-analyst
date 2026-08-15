@@ -674,12 +674,13 @@ def _build_data_freshness(stock_id):
     return {'lines': lines, 'has_issue': has_issue}
 
 
-def _process_single_stock(stock, target_date, force, report_type='daily'):
+def _process_single_stock(stock, target_date, force, report_type='daily', skip_collect=False):
     """012-B: 单只股票处理（供 ThreadPoolExecutor 调用）
 
     将原 for 循环体内的逻辑封装为独立函数。
     返回值与原有 results.append 结构一致。
     013: report_type 透传至 _save_report，并限定复用检查范围。
+    020J: skip_collect=True 跳过采集（历史报告重生成，纯分析重算）。
     """
     stock_id = stock['id']
     symbol = stock['symbol']
@@ -726,8 +727,12 @@ def _process_single_stock(stock, target_date, force, report_type='daily'):
 
     # FIX-A 改动2：每只股票先采集后分析
     # 012-B 增强：线程内更新进度 stage（采集阶段），前端进度条可显示"当前在干什么"
-    _update_progress_stage(symbol, '采集数据中')
-    collect_stock_data(symbol, market)
+    # 020J：skip_collect=True 跳过采集（历史报告重生成：数据已回填完毕，纯分析）
+    if not skip_collect:
+        _update_progress_stage(symbol, '采集数据中')
+        collect_stock_data(symbol, market)
+    else:
+        logger.info(f'[{symbol}] skip_collect：跳过采集，直接重新分析')
     _update_progress_stage(symbol, '数据检查中')
     # 数据完整度检查：报告生成前检查各维度数据新鲜度/来源，
     # 检查结果随报告输出（data_warnings + markdown），让报告说明数据完整度情况
@@ -811,13 +816,15 @@ def _process_single_stock(stock, target_date, force, report_type='daily'):
     }
 
 
-def generate_daily_report(target_date=None, force=False, report_type='daily'):
+def generate_daily_report(target_date=None, force=False, report_type='daily', skip_collect=False):
     """生成每日分析报告
 
     Args:
         target_date: 报告日期(YYYY-MM-DD)，默认今天
         force: 强制全量刷新，忽略已有结果
         report_type: 报告类型 'daily'(盘后日报) / 'intraday'(盘中快报)
+        skip_collect: 020J：跳过全部采集（同花顺预取 + 逐只采集），纯用库内已有数据重新分析。
+            用于数据回填后的历史报告重生成（数据已采集完毕，避免重复打外部接口）。
     Returns:
         dict: 生成结果汇总
     """
@@ -867,8 +874,11 @@ def generate_daily_report(target_date=None, force=False, report_type='daily'):
         )
 
         # === 018: 循环前批量预取A股同花顺辅助指标（不阻断东财逐只采集） ===
+        # 020J：skip_collect=True（历史报告重生成）跳过预取，纯用库内数据
+        if skip_collect:
+            logger.info('[日报] skip_collect：跳过同花顺资金面批量预取')
         a_symbols = [s['symbol'] for s in stocks if s['market'] == 'a_stock']
-        if a_symbols:
+        if a_symbols and not skip_collect:
             _update_progress_file(
                 {
                     'date': target_date,
@@ -963,7 +973,9 @@ def generate_daily_report(target_date=None, force=False, report_type='daily'):
 
                 def _run_single_stock():
                     try:
-                        box['r'] = _process_single_stock(stock, target_date, force, report_type)
+                        box['r'] = _process_single_stock(
+                            stock, target_date, force, report_type, skip_collect
+                        )
                     except Exception as e:
                         box['exc'] = e
 

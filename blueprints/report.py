@@ -32,9 +32,10 @@ def api_daily_report_generate():
     data = request.get_json(silent=True) or {}
     target_date = data.get('date')
     force = data.get('force', False)  # B15-T2: 强制刷新选项
+    skip_collect = data.get('skip_collect', False)  # 020J: 历史重生成跳过采集，纯分析
 
     try:
-        result = generate_daily_report(target_date, force=force)
+        result = generate_daily_report(target_date, force=force, skip_collect=skip_collect)
         if not result.get('success'):
             # 防抖拒绝（任务进行中）/ 无自选股 等业务性失败：原样返回，
             # 前端有对应的"进行中/失败原因"提示分支（勿直接索引缺失键）

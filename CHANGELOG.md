@@ -1,5 +1,12 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-15] 报告重生成支持跳过采集（020J：skip_collect）
+
+- 背景：数据回填完成后需重生成历史报告，但 `_process_single_stock` 写死"先采集后分析"，历史 8 天重生成会重复打外部接口（每轮 3-4 分钟）。
+- 落地：`generate_daily_report` / `_process_single_stock` 新增 `skip_collect` 参数（默认 False，行为零变化）；True 时跳过同花顺批量预取与逐只采集，纯用库内已有数据重新分析。API `POST /api/daily-report/generate` 新增 `skip_collect` 请求字段。
+- 兼容性：18:00 定时调度、intraday 端点、CLI、tests 等既有调用点均走默认值，不受影响。
+- 验证：py_compile/ruff 通过；08-06～08-13 共 7 天历史报告以 `{date, force, skip_collect}` 全部重生成成功，回测评级历史（ratings_history）同步修正。
+
 ## [2026-08-15] 资金面历史回填补强：腾讯 --date 逐日层 + 新浪窗口扩大（020I）
 
 - 背景：020H 上线首日实测发现两类补不上：港股历史缺口（新浪 lscjfb 仅 A股）与超出新浪 5 日窗口的旧缺口（如 000977 的 08-06）。
