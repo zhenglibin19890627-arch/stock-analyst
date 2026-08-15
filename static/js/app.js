@@ -443,10 +443,10 @@
                         var costDisplay = s.cost_price != null
                             ? '<span style="font-weight:600;">' + s.cost_price.toFixed(2) + '</span>'
                             : '<span style="color:#999;font-size:12px;">--</span>';
-                        // 持仓数量显示（无持仓显示 0）
-                        var qtyDisplay = s.quantity != null
+                        // 持仓数量显示（无持仓或数量为 0 显示 '--'）
+                        var qtyDisplay = (s.quantity != null && s.quantity > 0)
                             ? s.quantity.toLocaleString('zh-CN')
-                            : '<span style="color:#999;font-size:12px;">0</span>';
+                            : '<span style="color:#999;font-size:12px;">--</span>';
                         // 市值显示（无持仓或无价格显示 '--'）
                         var mvDisplay = '<span style="color:#999;font-size:12px;">--</span>';
                         if (s.market_value != null) {
