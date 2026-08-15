@@ -853,12 +853,11 @@
             margin-bottom: 12px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.06);
         }
-        /* 020R-15/16：综合分析卡 + 维度亮点卡 两列等宽并排 */
+        /* 020R-15/16/18：综合分析卡 + 维度亮点卡 两列等宽等高并排（stretch 默认） */
         .advice-two-col {
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 12px;
-            align-items: start;
             margin-bottom: 12px;
         }
         .advice-two-col .advice-card { margin-bottom: 0; }
