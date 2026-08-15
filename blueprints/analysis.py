@@ -9,6 +9,39 @@ from database.db_manager import get_connection
 
 bp = Blueprint('analysis', __name__)
 
+
+def _technical_detail_for_stock(stock_id):
+    """020R-35：从 raw_kline 全量计算技术指标明细（均线/MACD/RSI/KDJ/布林/量能）。
+
+    纯展示层增强：失败或数据不足时返回 None，不影响报告主流程。
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT trade_date, close, high, low, volume FROM raw_kline '
+            'WHERE stock_id = ? ORDER BY trade_date ASC',
+            (stock_id,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        if len(rows) < 20:
+            return None
+
+        from modules.technical_detail import compute_technical_detail
+
+        closes = [float(r['close'] or 0) for r in rows]
+        highs = [float(r['high'] or 0) for r in rows]
+        lows = [float(r['low'] or 0) for r in rows]
+        volumes = [float(r['volume'] or 0) for r in rows]
+        latest_date = str(rows[-1]['trade_date'])[:10]
+        return compute_technical_detail(closes, highs, lows, volumes, latest_date)
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning(f'技术指标明细计算失败 stock_id={stock_id}: {e}')
+        return None
+
+
 @bp.route('/api/stocks/<int:stock_id>/analyze', methods=['POST'])
 def api_analyze_stock(stock_id):
     """执行四维分析引擎评分（统一走 advisor.generate_advice 入口，与每日报告一致）"""
@@ -341,6 +374,9 @@ def api_get_report_latest(stock_id):
     if result.get('price_advice', {}).get('action_suggestion'):
         result['position_advice'] = result['price_advice']['action_suggestion']
 
+    # 020R-35：技术指标明细（均线/MACD/RSI/KDJ/布林/量能，供四维评分详情技术面展示）
+    result['technical_detail'] = _technical_detail_for_stock(stock_id)
+
     return jsonify(result)
 
 
@@ -365,6 +401,8 @@ def api_advise_stock(stock_id):
 
             _CN_TZ = timezone(_td(hours=8), name='Asia/Shanghai')
             result['generated_at'] = datetime.now(_CN_TZ).isoformat()
+            # 020R-35：技术指标明细（均线/MACD/RSI/KDJ/布林/量能）
+            result['technical_detail'] = _technical_detail_for_stock(stock_id)
         return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'message': f'建议生成失败: {e!s}'}), 500

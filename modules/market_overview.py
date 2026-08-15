@@ -20,7 +20,9 @@ logger = logging.getLogger(__name__)
 
 _CN_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
 
-EM_URL = 'https://push2.eastmoney.com/api/qt/clist/get'
+EM_URL = 'https://{host}/api/qt/clist/get'
+# 东财 push2 主机轮换：单主机被限流时切换编号主机（020R-34）
+EM_HOSTS = ['push2.eastmoney.com', '82.push2.eastmoney.com', 'push2his.eastmoney.com']
 EM_FIELDS = 'f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205,f124'
 EM_BASE_PARAMS = {
     'pz': '100',
@@ -36,6 +38,10 @@ EM_BASE_PARAMS = {
     'rt': '52975239',
 }
 
+# 刷新失败冷却：连续失败后 10 分钟内不再硬闯东财，直接回放上次快照（020R-34）
+REFRESH_COOLDOWN_SECONDS = 600
+_last_failure_at = None
+
 
 def _num(v):
     """东财字段 → float（'-'/''/None → None）。"""
@@ -47,36 +53,53 @@ def _num(v):
         return None
 
 
-def _request_page(page_no, use_proxy):
+def _request_page(page_no, host, use_proxy):
     params = dict(EM_BASE_PARAMS)
     params['pn'] = str(page_no)
     params['_'] = str(int(time.time() * 1000))
     kwargs = {}
     if not use_proxy:
         kwargs['proxies'] = {'http': None, 'https': None}
-    return requests.get(EM_URL, params=params, timeout=(5, 20), **kwargs)
+    return requests.get(EM_URL.format(host=host), params=params, timeout=(5, 20), **kwargs)
 
 
 def _request_page_robust(page_no):
-    """单页请求：直连优先（2 次），失败回退系统代理（2 次），再失败抛异常。"""
+    """单页请求：主机轮换 × (直连 2 次 → 系统代理 2 次)，全失败抛异常。"""
     last_err = None
-    for use_proxy in (False, True):
-        for attempt in range(2):
-            try:
-                resp = _request_page(page_no, use_proxy)
-                resp.raise_for_status()
-                data = resp.json()
-                if not data or not data.get('data'):
-                    raise RuntimeError('东财返回空 data')
-                return data
-            except Exception as e:  # noqa: BLE001
-                last_err = e
-                logger.warning(
-                    '[行业资金流] 第%s页 %s 第%s次失败: %s',
-                    page_no, '代理' if use_proxy else '直连', attempt + 1, e,
-                )
-                time.sleep(1.5)
+    for host in EM_HOSTS:
+        for use_proxy in (False, True):
+            for attempt in range(2):
+                try:
+                    resp = _request_page(page_no, host, use_proxy)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if not data or not data.get('data'):
+                        raise RuntimeError('东财返回空 data')
+                    return data
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+                    logger.warning(
+                        '[行业资金流] 第%s页 %s %s 第%s次失败: %s',
+                        page_no, host, '代理' if use_proxy else '直连', attempt + 1, e,
+                    )
+                    time.sleep(1.5)
     raise last_err if last_err else RuntimeError('行业资金流请求失败')
+
+
+def _mark_failure():
+    """记录一次刷新失败时间（供冷却判断）。"""
+    global _last_failure_at
+    _last_failure_at = datetime.now(_CN_TZ)
+
+
+def refresh_in_cooldown():
+    """刷新失败后冷却中？返回剩余秒数，否则 None。"""
+    if _last_failure_at is None:
+        return None
+    elapsed = (datetime.now(_CN_TZ) - _last_failure_at).total_seconds()
+    if elapsed < REFRESH_COOLDOWN_SECONDS:
+        return int(REFRESH_COOLDOWN_SECONDS - elapsed)
+    return None
 
 
 def fetch_industry_fund_flow():
@@ -147,8 +170,12 @@ def save_industry_fund_flow(items, trade_date):
 
 
 def refresh_industry_fund_flow():
-    """抓取并落库 → (items, trade_date, updated_at)。"""
-    items, updated_at = fetch_industry_fund_flow()
+    """抓取并落库 → (items, trade_date, updated_at)；失败记录冷却时间后抛出。"""
+    try:
+        items, updated_at = fetch_industry_fund_flow()
+    except Exception as e:  # noqa: BLE001
+        _mark_failure()
+        raise
     trade_date = updated_at[:10] if updated_at else datetime.now(_CN_TZ).strftime('%Y-%m-%d')
     save_industry_fund_flow(items, trade_date)
     return items, trade_date, updated_at
