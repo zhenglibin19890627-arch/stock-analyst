@@ -2896,7 +2896,6 @@
                 if (s < 0) return 'pa-warning';
                 return '';
             }
-            paSideHtml += '<div class="pa-side-stack">';
             paSideHtml += '<div class="pa-side-card">';
             if (pa.available) {
                 paSideHtml += '<div class="card-title" style="font-size:15px;margin-bottom:8px;color:#e65100;">💰 价格建议' +
@@ -2984,7 +2983,6 @@
                         '数据不足，暂无价格建议' +
                         (pa.reason ? '（' + pa.reason + '）' : '') + '</div>';
             }
-            paSideHtml += '</div>';
         }
 
         html += '<div class="report-top-grid">';
