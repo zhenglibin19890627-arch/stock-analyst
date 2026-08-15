@@ -90,6 +90,7 @@ python app.py
 ```bash
 # 标准验证命令（在项目根目录运行）
 python -m pytest tests/
+python scripts/check_redlines.py   # 红线自动核验（021A，随 pytest 执行）
 ruff check .
 mypy app.py config.py modules
 ```
@@ -143,7 +144,9 @@ curl http://127.0.0.1:5000/api/health
 
 ## 7. 关键风险边界（红线）
 
-> 以下边界涉及数据安全与系统稳定性，修改前必须充分评估，优先向用户确认。
+> ⚠️ **红线定义的单一事实来源是 [docs/RED_LINES.md](docs/RED_LINES.md)**（2026-08-16 红线治理 021A 起生效）。
+> 以下为精简摘要；冲突时以 RED_LINES.md 为准。自动核验：`python scripts/check_redlines.py`（随 pytest 执行）。
+> 红线变更须走 RED_LINES.md §6 豁免登记流程。以下边界涉及数据安全与系统稳定性，修改前必须充分评估，优先向用户确认。
 
 ### 7.1 数据库操作（SQLite）
 
@@ -204,7 +207,7 @@ stock_analyst/
 ## 9. 代理工作约定
 
 1. **修改前先读**：动任何模块前，先读其文件头 docstring 与相关 `config.py` 配置。
-2. **保留红线**：不碰 `advisor.generate_advice`，不随意放宽风控阈值，不开 `FLASK_DEBUG`。
+2. **保留红线**：以 [docs/RED_LINES.md](docs/RED_LINES.md) 为准——不碰 `advisor.generate_advice`（B24），不随意放宽风控阈值，不开 `FLASK_DEBUG`；任何触碰受保护对象的变更须走 RED_LINES.md §6 豁免登记流程。
 3. **数据库变更**：涉及表结构/清数据，先备份 `stock_analyst.db`，并同步应用层级联逻辑。
 4. **零代码用户优先**：所有方案须保证用户能 `python app.py` 一键启动并浏览器访问，避免引入额外运维负担。
 5. **中文交付**：项目文档、报告、注释以中文为准。

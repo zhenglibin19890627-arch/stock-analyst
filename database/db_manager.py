@@ -736,8 +736,12 @@ def init_database():
         cursor.execute('PRAGMA index_list(ratings_history)')
         indexes = [row[1] for row in cursor.fetchall()]  # row[1] = index name
         if 'idx_ratings_unique' not in indexes:
-            # 破坏性操作前自动备份（仅在首次迁移清理重复数据时触发一次）
-            backup_database('delete_ratings_history_duplicates')
+            # 破坏性操作前自动备份（仅在首次迁移清理重复数据时触发一次）；
+            # 备份失败必须中止（红线 R11，021B 起）——异常由外层 except 捕获并告警
+            if backup_database('delete_ratings_history_duplicates') is None:
+                raise RuntimeError(
+                    '[B12迁移] 破坏性操作前备份失败，中止重复数据清理以保护数据（红线 R11）'
+                )
             # 先清理重复数据：每组 (stock_id, rating_date) 保留 id 最大的
             cursor.execute("""
                 DELETE FROM ratings_history
@@ -1171,8 +1175,11 @@ def _migrate_daily_reports_type(cursor):
                key_factors, data_warnings, status, error_msg, markdown_content,
                generated_at, price_advice, 'daily'
         FROM daily_reports""")
-    # 破坏性操作（DROP TABLE）前自动备份
-    backup_database('drop_daily_reports_rebuild')
+    # 破坏性操作（DROP TABLE）前自动备份；备份失败必须中止（红线 R11，021B 起）
+    if backup_database('drop_daily_reports_rebuild') is None:
+        raise RuntimeError(
+            '[013迁移] 破坏性操作前备份失败，中止表重建以保护数据（红线 R11）'
+        )
     cursor.execute('DROP TABLE daily_reports')
     cursor.execute('ALTER TABLE daily_reports_new RENAME TO daily_reports')
     # 重建索引

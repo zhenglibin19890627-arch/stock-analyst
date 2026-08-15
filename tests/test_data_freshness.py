@@ -135,7 +135,17 @@ class TestDataFreshness:
         assert any('新浪顶替' in line for line in r['lines'])
 
     def test_kline_stale_flag(self, db):
-        """K线滞后 5 天 → ⚠️"""
+        """K线滞后 5 天（相对全市场最新交易日）→ ⚠️
+
+        021A 更新：020R-19 起滞后基准改为"全市场 K 线日期最大值"
+        （休市日数据至最新交易日即视为最新）。需另一只股票提供更新
+        的交易日基准，本股票的 5 天前 K 线才构成滞后。
+        """
+        conn = db.get_connection()
+        conn.execute("INSERT INTO stocks (symbol, market, name) VALUES ('600000', 'a_stock', '基准股')")
+        conn.commit()
+        conn.close()
+        _insert_kline(db, 2, _days_ago(0))  # 市场最新交易日 = 今天
         _insert_kline(db, 1, _days_ago(5))
         _insert_fundamental(db, 1, '2026-06-30')
         _insert_capital(db, 1, _days_ago(1))

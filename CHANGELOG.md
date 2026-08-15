@@ -1,5 +1,29 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-16] 红线治理二期：提案 P1~P5 全部落地（021B）
+
+- P1 行为锁迁移：R13/R14/R15（generate_advice / _build_capital_factors / fetch_capital_flow）从"函数体文本锁"改为"签名锁 + 行为契约锁"——`tests/test_redlines.py` 新增 3 项签名锁定测试（inspect 校验），写库不变量与输出契约由既有 test_advisor/test_scoring_engine/test_data_collector 覆盖；行为级变更仍须 RED_LINES.md §6 豁免登记。
+- P2 备份守卫：`db_manager.py` 013 迁移（DROP daily_reports）与 B12 迁移（DELETE ratings_history）调用点检查 `backup_database()` 返回值，备份失败抛错中止破坏性操作（红线 R11 从"机制存在"升级为"失败必中止"）。
+- P3 依赖治理确认：westock npm CLI 的 Node 可用性守卫（`_westock_cli_query` 检测 npx/npm，不可用优雅跳过落回新浪/估算）已存在，纳入红线核验（westock_node_guard）+ RED_LINES R17 登记。
+- P4 核验扩充：check_redlines.py 新增 7 项检查——R3 westock EndDate 精确匹配 / R3 新浪 lscjfb opendate 精确匹配 / R4 周末守卫 / R8 业务模块无直接 akshare 耦合 / R8 StockData 契约存在 / R11 备份失败中止守卫 / R17 westock Node 守卫，总计 27 项。
+- P5 CI 门禁：`.github/workflows/tests.yml` 在 pytest 后新增「红线自动核验」步骤。
+- RED_LINES.md 升级 v1.1：§4 行为锁化、§7 覆盖清单、§8 提案状态全部更新为已落地。
+- 验证：pytest 418 passed；check_redlines 27/27 通过；ruff 通过。
+
+## [2026-08-16] 红线治理：统一文档 + 自动核验 + 存量测试清零（021A）
+
+- 背景：红线清单分散 4+ 处且版本漂移（行号引用失效、"8 包"过时、"三处 if False"已名存实亡）；6 个存量测试失败长期挂着（测试门禁失灵），红线却靠人肉 grep 核验。
+- 统一文档：新增 `docs/RED_LINES.md` —— 红线定义唯一事实来源（治理原则/红线分类 R1~R22/豁免登记表/修订提案 P1~P5/依赖白名单/已作废红线），锚点全部为语义锚点（函数签名/唯一约束/过滤表达式），不用行号。
+- 自动核验（行为锁）：新增 `scripts/check_redlines.py`（20 项检查，只读不触网）与 `tests/test_redlines.py`（随 pytest 执行）；`AGENTS.md` §5/§7/§9 同步更新指向。
+- 存量测试清零（408→415 passed，0 failed）：
+  - `test_backfill_scheduler.py`：fixture 对齐 020H 新语义（交易日历并集 + ths 维度）；fake_collect 补 `missing_cap_dates` 关键字参数（此前 TypeError 被吞、部分用例"意外通过"）；同花顺批量调用网络隔离。
+  - `test_data_collector.py`：`_TradingDayDateTime` 把 datetime.now() 固定为交易日，规避 019G 周末守卫（周末跑测试必挂的环境依赖）。
+  - `test_data_freshness.py`：K线滞后测试对齐 020R-19"全市场最新交易日"基准（需基准股提供最新日历日）。
+- 修复并发编辑产生的语法错误：`data_adapter.py` `_read_stock_info` docstring 与 `conn = get_connection()` 被误合并到一行（SyntaxError，服务重启即崩溃），已恢复为两行。
+- 020R-45 并发护航：`load_stockdata_from_db` 已先行接入 `_read_holder_structure` 调用点但函数未定义（NameError，v5 引擎加载全断），补最小实现（读 `holder_structure` 最新一期，无数据→None→契约权重归零型降级，带表缺失容错）——如与 020R-45 最终实现冲突以最终版本为准。
+- 修订提案（RED_LINES.md §8，待决策）：P1 文本锁→行为锁迁移；P2 破坏性操作调用点检查备份返回值；P3 依赖白名单 11 项 + npm CLI 治理；P4 核验自动化扩充；P5 CI 门禁。
+- 验证：`python scripts/check_redlines.py` 20/20 通过；`python -m pytest tests/` 415 passed 0 failed；py_compile 通过。
+
 ## [2026-08-15] 股东行为三态语义（020R-44）
 
 - 用户确认：股东行为数据"真实没有"（接口正常，自选股近30天无增减持披露），要求三态区分。

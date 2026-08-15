@@ -318,6 +318,30 @@ def _read_stock_info(stock_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def _read_holder_structure(stock_id: int) -> dict | None:
+    """020R-45：读取最新一期股东人数/机构持仓（资金面-筹码结构）。
+
+    注：本函数为 020R-45 并发开发期间的最小实现（load_stockdata_from_db
+    已先行接入调用点）；读 holder_structure 最新一期，无数据返回 None，
+    契约侧两个新字段缺失 → 权重归零型降级（与 data_contract 定义一致）。
+    如与 020R-45 最终实现冲突，以最终版本为准。
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            'SELECT stat_date, holder_count, holder_count_change_pct, total_shares, '
+            'inst_shares, inst_ratio, inst_report_date FROM holder_structure '
+            'WHERE stock_id=? ORDER BY stat_date DESC LIMIT 1',
+            (stock_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception as e:  # noqa: BLE001 —— 表缺失/字段漂移时降级为 None（契约侧权重归零）
+        logger.warning(f'[020R-45] 读取 holder_structure 失败 stock_id={stock_id}: {e}')
+        return None
+    finally:
+        conn.close()
+
+
 # ================================================================
 # 四、主函数：组装 StockData
 # ================================================================

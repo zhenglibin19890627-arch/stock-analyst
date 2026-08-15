@@ -28,6 +28,19 @@ from modules import data_collector as dc
 from modules.data_contract import StockData
 from modules.mock_data_provider import MockDataProvider
 
+
+class _TradingDayDateTime(datetime):
+    """021A：把 dc.datetime.now() 固定为交易日（周五 2026-08-14 15:00），
+    规避 fetch_capital_flow_batch 的 019G 周末守卫对测试的影响——
+    守卫在真实周末（周六/周日）会让批量接口直接返回 skipped，
+    导致"回退 EM 逐只 + progress_cb"路径在周末无法被测试覆盖。
+    """
+    FIXED = datetime(2026, 8, 14, 15, 0, tzinfo=timezone(_td(hours=8)))
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.FIXED
+
 # ============================================================
 # 一、港股代码归一化 _normalize_hk_symbol
 # ============================================================
@@ -519,6 +532,8 @@ class TestEmBatchProgressCallback:
     def test_progress_cb_called_per_symbol(self, monkeypatch):
         """THS 失败回退 EM 时，每只股票开始前回调一次（顺序正确）"""
         calls = []
+        # 021A：固定为交易日，规避 019G 周末守卫（真实周末会直接 skipped 不走 EM 回退）
+        monkeypatch.setattr(dc, 'datetime', _TradingDayDateTime)
         monkeypatch.setattr(dc, '_fetch_capital_flow_ths_batch', lambda: None)
         monkeypatch.setattr(dc, 'fetch_capital_flow', lambda sym, m: ('success', 'mock'))
         monkeypatch.setattr(dc, '_EM_INTER_DELAY_RANGE', (0.001, 0.002))
@@ -533,6 +548,8 @@ class TestEmBatchProgressCallback:
 
     def test_no_progress_cb_ok(self, monkeypatch):
         """不传回调时照常工作（向后兼容）"""
+        # 021A：固定为交易日，规避 019G 周末守卫
+        monkeypatch.setattr(dc, 'datetime', _TradingDayDateTime)
         monkeypatch.setattr(dc, '_fetch_capital_flow_ths_batch', lambda: None)
         monkeypatch.setattr(dc, 'fetch_capital_flow', lambda sym, m: ('success', 'mock'))
         monkeypatch.setattr(dc, '_EM_INTER_DELAY_RANGE', (0.001, 0.002))

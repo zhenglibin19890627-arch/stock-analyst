@@ -23,3 +23,6 @@ jobs:
 
       - name: 运行测试
         run: python -m pytest tests/ -q
+
+      - name: 红线自动核验（021A，单一事实来源 docs/RED_LINES.md）
+        run: python scripts/check_redlines.py
