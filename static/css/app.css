@@ -829,7 +829,7 @@
         /* 020Q: 价格建议紧凑卡片（键值行：标签左灰、数值右对齐、限宽不铺满） */
         .pa-kv-wrap {
             max-width: 440px;
-            border: 1px solid #e5e7eb;
+            border: 1px solid #b6bcc6;
             border-radius: 8px;
             overflow: hidden;
             margin-bottom: 10px;
@@ -841,18 +841,18 @@
             justify-content: space-between;
             align-items: center;
             gap: 12px;
-            padding: 5px 12px;
-            border-bottom: 1px solid #f2f3f5;
+            padding: 6px 12px;
+            border-bottom: 1px solid #d9dde3;
         }
         .pa-kv-row:last-child { border-bottom: none; }
-        .pa-kv-label { color: #8a8f98; font-size: 12px; white-space: nowrap; }
-        .pa-kv-value { color: #333; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
-        .pa-kv-action { background: #fff7ef; }
-        .pa-kv-action .pa-kv-value { color: #e65100; }
-        .pa-kv-wrap .pa-up { color: #d32f2f; font-weight: 700; }
-        .pa-kv-wrap .pa-down { color: #388e3c; font-weight: 700; }
+        .pa-kv-label { color: #525a66; font-weight: 500; font-size: 12px; white-space: nowrap; }
+        .pa-kv-value { color: #22262b; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+        .pa-kv-action { background: #fff3e2; }
+        .pa-kv-action .pa-kv-value { color: #d35400; }
+        .pa-kv-wrap .pa-up { color: #c62828; font-weight: 700; }
+        .pa-kv-wrap .pa-down { color: #2e7d32; font-weight: 700; }
         .pa-kv-wrap .pa-up-light { color: #ef5350; font-weight: 600; }
-        .pa-kv-wrap .pa-warning { color: #ff9800; font-weight: 700; }
+        .pa-kv-wrap .pa-warning { color: #e65100; font-weight: 700; }
         .price-advice-disclaimer {
             font-size: 12px;
             color: #999;
@@ -860,7 +860,7 @@
             line-height: 1.6;
         }
         /* 020Q: 网格计划紧凑窄表（表头灰底、价位右对齐、档位/仓位居中、说明靠左） */
-        .pa-grid-title { margin: 10px 0 6px; font-size: 13px; font-weight: 600; color: #333; }
+        .pa-grid-title { margin: 10px 0 6px; font-size: 13px; font-weight: 600; color: #22262b; }
         .pa-grid-table {
             width: 100%;
             max-width: 440px;
@@ -870,26 +870,26 @@
             background: #fff;
         }
         .pa-grid-table th {
-            background: #f7f8fa;
-            color: #8a8f98;
+            background: #e8ebf0;
+            color: #3d4450;
             font-weight: 600;
             font-size: 12px;
-            padding: 5px 8px;
-            border: 1px solid #e5e7eb;
+            padding: 6px 8px;
+            border: 1px solid #b6bcc6;
             text-align: center;
         }
         .pa-grid-table td {
-            padding: 4px 8px;
-            border: 1px solid #eef0f3;
-            color: #333;
+            padding: 5px 8px;
+            border: 1px solid #c9ced6;
+            color: #22262b;
         }
-        .pa-grid-table td:nth-child(1) { text-align: center; width: 12%; color: #999; font-size: 12px; }
+        .pa-grid-table td:nth-child(1) { text-align: center; width: 12%; color: #5c6470; font-size: 12px; }
         .pa-grid-table td:nth-child(2) { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
         .pa-grid-table td:nth-child(3) { text-align: center; width: 15%; }
         .pa-grid-table td:nth-child(4) { text-align: left; }
-        .pa-grid-table .pa-buy { color: #1976d2; }
-        .pa-grid-table .pa-reduce { color: #ff9800; }
-        .pa-grid-table .pa-add { color: #7b1fa2; }
+        .pa-grid-table .pa-buy { color: #1565c0; }
+        .pa-grid-table .pa-reduce { color: #e65100; }
+        .pa-grid-table .pa-add { color: #6a1b9a; }
         .pa-capital-signal {
             margin-top: 8px; padding: 6px 12px;
             background: #fff3e0; border-radius: 4px; font-size: 13px;
