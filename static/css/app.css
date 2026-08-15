@@ -625,7 +625,8 @@
 
         .report-top-grid {
             display: grid;
-            grid-template-columns: 300px 1fr;
+            grid-template-columns: 300px minmax(400px, 480px);
+            justify-content: start;
             gap: 12px;
             margin-bottom: 12px;
         }
@@ -702,7 +703,7 @@
             box-shadow: 0 2px 8px rgba(0,0,0,0.06);
         }
         .radar-card .card-title { margin-bottom: 2px; }
-        #radarChart { width: 100%; height: 170px; }
+        #radarChart { width: 100%; height: 230px; }
 
         .kline-card {
             background: white;

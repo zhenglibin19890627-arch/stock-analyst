@@ -4062,7 +4062,7 @@
             radar: {
                 indicator: indicator,
                 shape: 'polygon',
-                radius: '72%',
+                radius: '70%',
                 splitNumber: 4,
                 axisName: { color: '#444', fontSize: 12, fontWeight: 600 },
                 splitLine: { lineStyle: { color: '#e0e0e0' } },
