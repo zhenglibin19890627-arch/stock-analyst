@@ -133,6 +133,23 @@ def _news_detail_for_stock(stock_id):
         return None
 
 
+def _enrich_data_warnings(result, stock_id):
+    """020R-41：advise/analyze 响应补齐「数据完整度」行（与每日报告路径同口径）。
+
+    刷新报告原先只有引擎降级提示（如资金面提示），数据滞后等完整度行丢失；
+    此处按 daily_report._build_data_freshness 追加，保证两条路径一致。
+    """
+    try:
+        from modules.daily_report import _build_data_freshness
+
+        freshness = _build_data_freshness(stock_id)
+        result['data_warnings'] = list(result.get('data_warnings') or []) + [
+            f'数据完整度：{line}' for line in (freshness.get('lines') or [])
+        ]
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning(f'数据完整度行补充失败 stock_id={stock_id}: {e}')
+
+
 @bp.route('/api/stocks/<int:stock_id>/analyze', methods=['POST'])
 def api_analyze_stock(stock_id):
     """执行四维分析引擎评分（统一走 advisor.generate_advice 入口，与每日报告一致）"""
@@ -148,6 +165,8 @@ def api_analyze_stock(stock_id):
             # 009补充：动态操作建议覆盖旧建议，避免矛盾
             if result.get('price_advice', {}).get('action_suggestion'):
                 result['position_advice'] = result['price_advice']['action_suggestion']
+            # 020R-41：补齐数据完整度行（与每日报告路径一致）
+            _enrich_data_warnings(result, stock_id)
         return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'message': f'分析失败: {e!s}'}), 500
@@ -185,6 +204,8 @@ def api_refresh_full(stock_id):
             result['price_advice'] = generate_price_advice(stock_id, result)
             if result.get('price_advice', {}).get('action_suggestion'):
                 result['position_advice'] = result['price_advice']['action_suggestion']
+            # 020R-41：补齐数据完整度行（与每日报告路径一致）
+            _enrich_data_warnings(result, stock_id)
 
         return jsonify(result)
     except Exception as e:
@@ -498,6 +519,8 @@ def api_advise_stock(stock_id):
 
             _CN_TZ = timezone(_td(hours=8), name='Asia/Shanghai')
             result['generated_at'] = datetime.now(_CN_TZ).isoformat()
+            # 020R-41：补齐数据完整度行（与每日报告路径一致）
+            _enrich_data_warnings(result, stock_id)
             # 020R-35：技术指标明细（均线/MACD/RSI/KDJ/布林/量能）
             result['technical_detail'] = _technical_detail_for_stock(stock_id)
             # 020R-37：基本面指标明细（估值/盈利/成长/现金流/财务健康）

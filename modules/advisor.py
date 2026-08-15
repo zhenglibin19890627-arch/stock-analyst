@@ -622,7 +622,18 @@ def _save_daily_report_for_advice(stock_id, analysis, prev_score, engine_used, r
             round(float(total_score) - float(prev_score), 1) if prev_score is not None else None
         )
         key_factors = _build_key_factors(analysis)
-        data_warnings = analysis.get('data_warnings', []) or []
+        data_warnings = list(analysis.get('data_warnings', []) or [])
+        # 020R-41：刷新报告/一键分析路径补齐「数据完整度」行（与每日报告路径一致），
+        # 避免覆盖 daily_reports 后完整度提示丢失（原路径只有引擎降级提示）
+        try:
+            from modules.daily_report import _build_data_freshness
+
+            freshness = _build_data_freshness(stock_id)
+            data_warnings = data_warnings + [
+                f'数据完整度：{line}' for line in (freshness.get('lines') or [])
+            ]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f'[020R-41] 数据完整度行补充失败 stock_id={stock_id}: {e}')
         generated_at = datetime.now(_CN_TZ).isoformat()
         markdown = _build_markdown_single(analysis, prev_score)
 
