@@ -3076,7 +3076,8 @@
         // 4. K线图卡片已移除（020R：用户裁定报告页不再平铺K线卡片；
         // K线数据仍可在「数据」页查看，评分雷达/详情/建议紧接展示）
 
-        // 5. 综合分析卡（markdown 渲染）+ 维度亮点卡（020R-14：投资建议详情拆为两卡）
+        // 5. 综合分析卡（markdown 渲染）+ 维度亮点卡（020R-15：两列并排）
+        html += '<div class="advice-two-col">';
         html += '<div class="advice-card md-card">';
         html += '<div class="card-title" style="font-size:15px;margin-bottom:10px;">📝 综合分析</div>';
 
@@ -3150,6 +3151,7 @@
             }
             html += '</div>';
         }
+        html += '</div><!-- /advice-two-col -->';
 
         container.innerHTML = html;
 
