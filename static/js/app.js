@@ -3570,7 +3570,7 @@
 
         // ---- 1.5 操作建议卡片（评级×持仓盈亏 自动生成） ----
         html += '<div class="card" style="margin-bottom:20px;">';
-        html += '<div class="card-title">📌 操作建议 <span style="font-size:13px;color:#888;font-weight:normal;">（按最新评级×持仓盈亏自动生成，点击个股查看报告）</span></div>';
+        html += '<div class="card-title">📌 操作建议 <span style="font-size:13px;color:#888;font-weight:normal;">（按操作紧急程度分级，点击个股查看报告）</span></div>';
         html += '<div id="dashAdviceList" style="display:flex;flex-wrap:wrap;gap:8px;"><span style="color:#999;font-size:13px;">计算中...</span></div>';
         html += '<div style="margin-top:10px;font-size:12px;color:#aaa;">以上建议由评分模型自动生成，仅供参考，不构成投资建议。</div>';
         html += '</div>';
@@ -3682,7 +3682,8 @@
 
     /**
      * 📌 操作建议卡片：按「评级 × 持仓盈亏」矩阵自动生成（与 advisor._determine_action 口径一致）。
-     * 展示优先级：风险动作（止损/减仓）> 机会动作（买入/加仓）> 持有/观望 > 待评分。
+     * 按操作紧急程度分级展示：🔴紧急处理（止损/减仓）→ 🟠考虑行动（买入/加仓/考虑减仓）→
+     * 🟡保持关注（观望类）→ ⚪继续持有 → ⏳待评分；紧急级内亏损幅度大的排前。
      */
     function dashRenderAdvice(stocks) {
         var dom = document.getElementById('dashAdviceList');
@@ -3712,13 +3713,21 @@
             '考虑减仓': '#27ae60', '减仓': '#27ae60', '建议止损': '#27ae60',
             '关注': '#f39c12', '待评分': '#f39c12'
         };
-        // 展示优先级（数字越小越靠前）
-        var ACTION_PRIORITY = {
-            '建议止损': 0, '减仓': 0, '考虑减仓': 1,
-            '买入': 2, '加仓': 2, '关注': 3,
-            '持有': 4, '继续持有': 4, '持有观望': 4, '观望': 4, '回避': 4,
+        // 操作紧急程度分级（数字越小越紧急）
+        var ACTION_LEVEL = {
+            '建议止损': 1, '减仓': 1,
+            '考虑减仓': 2, '买入': 2, '加仓': 2,
+            '持有观望': 3, '关注': 3, '观望': 3, '回避': 3,
+            '持有': 4, '继续持有': 4,
             '待评分': 5
         };
+        var LEVELS = [
+            { key: 1, icon: '🔴', label: '紧急处理', desc: '持仓出现止损/减仓信号，建议尽快评估' },
+            { key: 2, icon: '🟠', label: '考虑行动', desc: '评级支持买入/加仓/减仓的方向性操作' },
+            { key: 3, icon: '🟡', label: '保持关注', desc: '观望类建议，等待更明确的信号' },
+            { key: 4, icon: '⚪', label: '继续持有', desc: '评级与盈亏支持持仓不动' },
+            { key: 5, icon: '⏳', label: '待评分', desc: '暂无评分报告，建议先一键分析' }
+        ];
 
         var items = [];
         stocks.forEach(function(st, idx) {
@@ -3728,13 +3737,24 @@
             var key = hasPos ? (profitable ? '1-1' : '1-0') : '0';
             var action = '待评分';
             if (rating && MATRIX[rating]) action = MATRIX[rating][key] || '观望';
-            items.push({ st: st, action: action, idx: idx });
+            // 盈亏百分比（用于紧急级内排序：亏损幅度大的排前）
+            var pnlPct = null;
+            if (st.quantity != null && st.quantity > 0 && st.cost_price && st.unrealized_pnl != null) {
+                pnlPct = st.unrealized_pnl / (st.cost_price * st.quantity) * 100;
+            }
+            items.push({ st: st, action: action, idx: idx, pnlPct: pnlPct });
         });
 
         items.sort(function(a, b) {
-            var pa = ACTION_PRIORITY[a.action] != null ? ACTION_PRIORITY[a.action] : 9;
-            var pb = ACTION_PRIORITY[b.action] != null ? ACTION_PRIORITY[b.action] : 9;
-            if (pa !== pb) return pa - pb;
+            var la = ACTION_LEVEL[a.action] != null ? ACTION_LEVEL[a.action] : 9;
+            var lb = ACTION_LEVEL[b.action] != null ? ACTION_LEVEL[b.action] : 9;
+            if (la !== lb) return la - lb;
+            if (la === 1) {
+                // 紧急级内：亏损幅度大的排前
+                var aP = a.pnlPct != null ? a.pnlPct : 0;
+                var bP = b.pnlPct != null ? b.pnlPct : 0;
+                return aP - bP;
+            }
             return a.idx - b.idx;
         });
 
@@ -3744,39 +3764,54 @@
         }
 
         var html = '';
-        items.forEach(function(it) {
-            var st = it.st;
-            var action = it.action;
-            var rating = _norm(st.rating);
-            var color = ACTION_COLOR[action] || '#888';
-            var scoreStr = st.total_score != null ? st.total_score.toFixed(1) : '—';
+        LEVELS.forEach(function(lv) {
+            var group = items.filter(function(it) {
+                var l = ACTION_LEVEL[it.action] != null ? ACTION_LEVEL[it.action] : 9;
+                return l === lv.key;
+            });
+            if (group.length === 0) return;
 
-            // 持仓盈亏百分比（有成本价时展示）
-            var pnlStr = '';
-            if (st.quantity != null && st.quantity > 0 && st.cost_price && st.unrealized_pnl != null) {
-                var pct = st.unrealized_pnl / (st.cost_price * st.quantity) * 100;
-                var pColor = pct > 0 ? '#e74c3c' : (pct < 0 ? '#27ae60' : '#888');
-                pnlStr = '<span style="font-size:12px;font-weight:600;color:' + pColor + ';">' + (pct > 0 ? '+' : '') + pct.toFixed(1) + '%</span>';
-            }
+            html += '<div style="width:100%;margin-top:8px;">';
+            html += '<div style="font-size:13px;font-weight:700;color:#444;margin-bottom:6px;">' + lv.icon + ' ' + lv.label +
+                ' <span style="font-weight:400;color:#999;font-size:12px;">· ' + lv.desc + '（' + group.length + '）</span></div>';
+            html += '<div style="display:flex;flex-wrap:wrap;gap:8px;">';
 
-            var clickFn, clickTitle;
-            if (action === '待评分') {
-                clickFn = 'oneClickAnalyze(' + st.id + ', \'' + st.symbol + '\', \'' + st.market + '\')';
-                clickTitle = '暂无评分报告，点击一键分析';
-            } else {
-                clickFn = 'viewReport(' + st.id + ')';
-                clickTitle = '点击查看个股分析报告';
-            }
+            group.forEach(function(it) {
+                var st = it.st;
+                var action = it.action;
+                var rating = _norm(st.rating);
+                var color = ACTION_COLOR[action] || '#888';
+                var scoreStr = st.total_score != null ? st.total_score.toFixed(1) : '—';
 
-            html += '<span style="display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border:1px solid #e8e8e8;border-radius:20px;background:#fafafa;cursor:pointer;transition:box-shadow .15s;" ' +
-                'onclick="' + clickFn + '" title="' + clickTitle + '" onmouseover="this.style.boxShadow=\'0 2px 8px rgba(0,0,0,0.12)\'" onmouseout="this.style.boxShadow=\'none\'">' +
-                '<span style="font-weight:700;font-size:12px;color:' + color + ';white-space:nowrap;">' + action + '</span>' +
-                '<strong style="font-size:13px;">' + (st.name || st.symbol) + '</strong>' +
-                (rating ? '<span style="font-size:11px;color:#999;">' + st.symbol + '</span>' : '') +
-                (st.rating ? '<span class="rating-badge ' + getRatingClass(st.rating) + '" style="font-size:11px;">' + st.rating + '</span>' : '') +
-                '<span style="font-size:12px;color:#888;">' + scoreStr + '分</span>' +
-                pnlStr +
-                '</span>';
+                // 持仓盈亏百分比（有成本价时展示）
+                var pnlStr = '';
+                if (st.quantity != null && st.quantity > 0 && st.cost_price && st.unrealized_pnl != null) {
+                    var pct = st.unrealized_pnl / (st.cost_price * st.quantity) * 100;
+                    var pColor = pct > 0 ? '#e74c3c' : (pct < 0 ? '#27ae60' : '#888');
+                    pnlStr = '<span style="font-size:12px;font-weight:600;color:' + pColor + ';">' + (pct > 0 ? '+' : '') + pct.toFixed(1) + '%</span>';
+                }
+
+                var clickFn, clickTitle;
+                if (action === '待评分') {
+                    clickFn = 'oneClickAnalyze(' + st.id + ', \'' + st.symbol + '\', \'' + st.market + '\')';
+                    clickTitle = '暂无评分报告，点击一键分析';
+                } else {
+                    clickFn = 'viewReport(' + st.id + ')';
+                    clickTitle = '点击查看个股分析报告';
+                }
+
+                html += '<span style="display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border:1px solid #e8e8e8;border-radius:20px;background:#fafafa;cursor:pointer;transition:box-shadow .15s;" ' +
+                    'onclick="' + clickFn + '" title="' + clickTitle + '" onmouseover="this.style.boxShadow=\'0 2px 8px rgba(0,0,0,0.12)\'" onmouseout="this.style.boxShadow=\'none\'">' +
+                    '<span style="font-weight:700;font-size:12px;color:' + color + ';white-space:nowrap;">' + action + '</span>' +
+                    '<strong style="font-size:13px;">' + (st.name || st.symbol) + '</strong>' +
+                    (rating ? '<span style="font-size:11px;color:#999;">' + st.symbol + '</span>' : '') +
+                    (st.rating ? '<span class="rating-badge ' + getRatingClass(st.rating) + '" style="font-size:11px;">' + st.rating + '</span>' : '') +
+                    '<span style="font-size:12px;color:#888;">' + scoreStr + '分</span>' +
+                    pnlStr +
+                    '</span>';
+            });
+
+            html += '</div></div>';
         });
         dom.innerHTML = html;
     }
