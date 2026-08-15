@@ -3161,13 +3161,55 @@
                         '（' + adviseData.weakest_dim.score.toFixed(1) + '分）</p>';
             }
             // 020R-16：数据完整度与提示并入维度亮点卡（不再与综合分析重复）
+            // 020R-31：按数据状态分级提示效果——异常(红)/滞后(黄)/提示(灰)/正常(绿)
             if (adviseData.data_warnings && adviseData.data_warnings.length > 0) {
+                var _classifyDw = function(w) {
+                    if (w.indexOf('⚠️') >= 0) return 'bad';
+                    var m = /滞后(\d+)天/.exec(w);
+                    if (m) {
+                        var n = parseInt(m[1], 10);
+                        if (n >= 5) return 'bad';
+                        if (n >= 1) return 'warn';
+                        return 'good';
+                    }
+                    if (w.indexOf('数据源暂不可用') >= 0) return 'warn';
+                    if (w.indexOf('暂无') >= 0) return 'warn';
+                    if (w.indexOf('最新') >= 0) return 'good';
+                    return 'info';
+                };
+                var DW_STYLE = {
+                    'bad':  { icon: '🔴', color: '#c62828', bg: '#ffebee', border: '#e57373', label: '异常' },
+                    'warn': { icon: '🟡', color: '#e65100', bg: '#fff8e1', border: '#ffb74d', label: '滞后' },
+                    'info': { icon: 'ℹ️', color: '#5d6d7e', bg: '#f5f7fa', border: '#cfd8e3', label: '提示' },
+                    'good': { icon: '✅', color: '#2e7d32', bg: '#eafaf1', border: '#81c784', label: '正常' }
+                };
+                var dwOrder = { 'bad': 0, 'warn': 1, 'info': 2, 'good': 3 };
+                var dwItems = adviseData.data_warnings.map(function(w) {
+                    return { text: w, state: _classifyDw(w) };
+                }).sort(function(a, b) {
+                    var oa = dwOrder[a.state] != null ? dwOrder[a.state] : 9;
+                    var ob = dwOrder[b.state] != null ? dwOrder[b.state] : 9;
+                    return oa - ob;
+                });
+                var badCount = dwItems.filter(function(x) { return x.state === 'bad'; }).length;
+                var warnCount = dwItems.filter(function(x) { return x.state === 'warn'; }).length;
+
                 html += '<div class="advice-section" style="margin-top:10px;">';
-                html += '<div class="advice-section-title" style="color:#f39c12;">📋 数据完整度与提示</div>';
-                html += '<ul class="risk-list">';
-                adviseData.data_warnings.forEach(function(w) {
-                    var warn = /数据完整度：/.test(w);
-                    html += '<li style="color:' + (warn ? '#5d6d7e' : '#e65100') + ';">' + w + '</li>';
+                html += '<div class="advice-section-title" style="color:#f39c12;">📋 数据完整度与提示' +
+                        '<span style="font-weight:normal;font-size:12px;color:#999;margin-left:8px;">' +
+                        (badCount + warnCount > 0
+                            ? '🔴 ' + badCount + ' 项异常 · 🟡 ' + warnCount + ' 项滞后'
+                            : '✅ 数据状态正常') +
+                        '</span></div>';
+                html += '<ul class="risk-list" style="list-style:none;padding-left:0;">';
+                dwItems.forEach(function(x) {
+                    var st = DW_STYLE[x.state] || DW_STYLE['info'];
+                    html += '<li style="display:flex;align-items:flex-start;gap:8px;background:' + st.bg +
+                        ';border-left:3px solid ' + st.border + ';border-radius:6px;padding:6px 10px;margin-bottom:6px;font-size:13px;color:' + st.color + ';">' +
+                        '<span style="flex-shrink:0;">' + st.icon + '</span>' +
+                        '<span style="line-height:1.5;">' + x.text + '</span>' +
+                        '<span style="flex-shrink:0;margin-left:auto;font-size:11px;opacity:.85;">' + st.label + '</span>' +
+                        '</li>';
                 });
                 html += '</ul>';
                 html += '</div>';
