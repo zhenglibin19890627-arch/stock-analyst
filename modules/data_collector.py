@@ -2491,14 +2491,38 @@ def _fetch_capital_flow_westock(symbol, market, date_str=''):
             logger.warning(f'[{symbol}] westock 返回字段全空，不采用')
             _westock_record_failure()
             return None
+        # 020O：主力净流入占比 = 主力净额 ÷ 成交额；
+        # 成交额 = 主力买入+主力卖出+散户买入+散户卖出（A股 MainInFlow 系 / 港股 MainIn 系）。
+        _main_in = _safe_float_wan(
+            row.get('MainInFlow') if row.get('MainInFlow') is not None else row.get('MainIn')
+        )
+        _main_out = _safe_float_wan(
+            row.get('MainOutFlow') if row.get('MainOutFlow') is not None else row.get('MainOut')
+        )
+        _retail_in = _safe_float_wan(
+            row.get('RetailInFlow') if row.get('RetailInFlow') is not None else row.get('RetailIn')
+        )
+        _retail_out = _safe_float_wan(
+            row.get('RetailOutFlow') if row.get('RetailOutFlow') is not None else row.get('RetailOut')
+        )
+        _main_pct = None
+        if all(v is not None for v in (_main_in, _main_out, _retail_in, _retail_out)):
+            _turnover_wan = _main_in + _main_out + _retail_in + _retail_out
+            if _turnover_wan and main_net is not None:
+                _main_pct = round(main_net / _turnover_wan * 100, 2)
+        # 020O：全资金净流入——仅港股 hkfund 提供（TotalNetFlow=主力+散户主动净额，
+        # 有实际意义）；A股 asfund 散户为被动镜像、全口径恒等0，返回 None 不写入。
+        _total_net = _safe_float_wan(row.get('TotalNetFlow'))
         _westock_reset()
         return {
             'trade_date': row.get('EndDate') or '',
             'main_net_inflow': main_net,
+            'main_net_inflow_pct': _main_pct,
             'super_large_net': jumbo,
             'large_net': block,
             'medium_net': mid,
             'small_net': small,
+            'total_net_inflow': _total_net,
         }
     except Exception as e:
         logger.warning(f'[{symbol}] westock 资金面层失败: {e}')
@@ -3544,12 +3568,14 @@ def backfill_capital_history(symbol, market, dates):
             conn = get_connection()
             cur = conn.cursor()
             cur.execute(
-                'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=NULL, '
-                'super_large_net=?, '
+                'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=?, '
+                'total_net_inflow=?, super_large_net=?, '
                 'large_net=?, medium_net=?, small_net=?, is_estimated=0, capital_source=? '
                 'WHERE stock_id=? AND trade_date=?',
                 (
                     row['main_net_inflow'],
+                    row.get('main_net_inflow_pct'),
+                    row.get('total_net_inflow'),
                     row['super_large_net'],
                     row['large_net'],
                     row['medium_net'],
@@ -3562,13 +3588,16 @@ def backfill_capital_history(symbol, market, dates):
             if cur.rowcount == 0:
                 cur.execute(
                     'INSERT OR IGNORE INTO raw_capital_flow '
-                    '(stock_id, trade_date, main_net_inflow, super_large_net, large_net, '
+                    '(stock_id, trade_date, main_net_inflow, main_net_inflow_pct, total_net_inflow, '
+                    'super_large_net, large_net, '
                     'medium_net, small_net, is_estimated, capital_source) '
-                    'VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)',
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
                     (
                         stock_id,
                         d,
                         row['main_net_inflow'],
+                        row.get('main_net_inflow_pct'),
+                        row.get('total_net_inflow'),
                         row['super_large_net'],
                         row['large_net'],
                         row['medium_net'],
@@ -3584,6 +3613,43 @@ def backfill_capital_history(symbol, market, dates):
             )
         except Exception as e:
             logger.warning(f'[{symbol}] 历史资金面回补 {d} 失败: {e}')
+    return filled
+
+
+def backfill_hk_total_net(symbol, dates):
+    """020O：港股资金面补充回填（腾讯 hkfund TotalNetFlow + 主力净流入占比）。
+
+    仅 UPDATE total_net_inflow / main_net_inflow_pct 列，不动 main_net_inflow 等主力字段——
+    港股存量主力多为东财真实数据（EM 恢复前不降级覆盖）。
+    A股不适用（asfund 散户为被动镜像、全口径恒等0，无全净额数据）。
+    返回成功回补的日期列表。
+    """
+    stock_id = get_stock_id(symbol, 'hk_stock')
+    if not stock_id:
+        return []
+    filled = []
+    for d in dates:
+        try:
+            row = _fetch_capital_flow_westock(symbol, 'hk_stock', date_str=d)
+            if not row or row.get('total_net_inflow') is None:
+                logger.info(f'[{symbol}] 港股全净额回补 {d}: 腾讯无该日数据，跳过')
+                continue
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                'UPDATE raw_capital_flow SET total_net_inflow=?, main_net_inflow_pct=? '
+                'WHERE stock_id=? AND trade_date=?',
+                (row['total_net_inflow'], row.get('main_net_inflow_pct'), stock_id, d),
+            )
+            conn.commit()
+            conn.close()
+            filled.append(d)
+            logger.info(
+                f'[{symbol}] 港股回补成功: {d} 全净额={row["total_net_inflow"]}万 '
+                f'占比={row.get("main_net_inflow_pct")}%(腾讯)'
+            )
+        except Exception as e:
+            logger.warning(f'[{symbol}] 港股回补 {d} 失败: {e}')
     return filled
 
 
@@ -3945,11 +4011,14 @@ def fetch_capital_flow(symbol, market):
                 # 020F：UPDATE + INSERT OR IGNORE（与新浪层同模式）——
                 # INSERT OR REPLACE 会整行替换，冲掉同花顺批量预取的辅助字段 ths_net_inflow
                 cursor.execute(
-                    'UPDATE raw_capital_flow SET main_net_inflow=?, super_large_net=?, '
+                    'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=?, '
+                    'total_net_inflow=?, super_large_net=?, '
                     'large_net=?, medium_net=?, small_net=?, is_estimated=0, capital_source=? '
                     'WHERE stock_id=? AND trade_date=?',
                     (
                         w_row['main_net_inflow'],
+                        w_row.get('main_net_inflow_pct'),
+                        w_row.get('total_net_inflow'),
                         w_row['super_large_net'],
                         w_row['large_net'],
                         w_row['medium_net'],
@@ -3962,13 +4031,16 @@ def fetch_capital_flow(symbol, market):
                 if cursor.rowcount == 0:
                     cursor.execute(
                         'INSERT OR IGNORE INTO raw_capital_flow '
-                        '(stock_id, trade_date, main_net_inflow, super_large_net, large_net, '
+                        '(stock_id, trade_date, main_net_inflow, main_net_inflow_pct, total_net_inflow, '
+                        'super_large_net, large_net, '
                         'medium_net, small_net, is_estimated, capital_source) '
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'westock')",
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'westock')",
                         (
                             stock_id,
                             w_date,
                             w_row['main_net_inflow'],
+                            w_row.get('main_net_inflow_pct'),
+                            w_row.get('total_net_inflow'),
                             w_row['super_large_net'],
                             w_row['large_net'],
                             w_row['medium_net'],

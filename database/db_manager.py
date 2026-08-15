@@ -1077,6 +1077,9 @@ def _migrate_columns(cursor):
         ('raw_fundamental', 'holder_increase', 'BOOLEAN'),
         # 019Y: K线表新增数据来源标记列（'mootdx'=K线降级备用源；NULL=腾讯主源，与资本面 capital_source 同风格）
         ('raw_kline', 'data_source', 'TEXT DEFAULT NULL'),
+        # 020O: 资金面表新增全资金净流入列（腾讯 hkfund TotalNetFlow，主力+散户主动净额；
+        # 仅港股有值——A股 asfund 散户为被动镜像、全口径恒等0，无此数据）
+        ('raw_capital_flow', 'total_net_inflow', 'REAL'),
     ]
     for table, column, col_type in migrations:
         try:

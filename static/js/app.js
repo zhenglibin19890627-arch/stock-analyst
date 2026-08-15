@@ -1061,11 +1061,18 @@
             const capitalSourceLabel = sourceNotes.length ? capitalBaseSource + '（' + sourceNotes.join('、') + '）' : capitalBaseSource;
             html += '<h4 style="margin: 24px 0 8px;">资金面数据（最近10条）<span style="font-size:12px;color:#999;font-weight:normal;">　' + capitalSourceLabel + '</span></h4>';
             if (capital.success && capital.count > 0) {
-                html += '<table><thead><tr><th>日期</th><th>主力净流入</th><th>主力净流入占比</th><th>超大单</th><th>大单</th><th>中单</th><th>小单</th></tr></thead><tbody>';
+                // 020O：按数据形态条件渲染列——A股有四档分解（超大/大/中/小），
+                // 港股有腾讯全资金净流入（TotalNetFlow，主力+散户主动净额）
+                const hasTiers = capital.data.some(d => d.super_large_net != null || d.large_net != null);
+                const hasTotalNet = capital.data.some(d => d.total_net_inflow != null);
+                const tierHeader = hasTiers ? '<th>超大单</th><th>大单</th><th>中单</th><th>小单</th>' : '';
+                const totalNetHeader = hasTotalNet ? '<th title="腾讯全资金净流入（主力+散户主动净额）">全资金净流入<sup style="color:#999">腾讯</sup></th>' : '';
+                html += '<table><thead><tr><th>日期</th><th>主力净流入</th><th>主力净流入占比</th>' + tierHeader + totalNetHeader + '</tr></thead><tbody>';
                 capital.data.forEach(d => {
                     const color = d.main_net_inflow > 0 ? '#e74c3c' : '#27ae60';
                     const medColor = d.medium_net > 0 ? '#e74c3c' : d.medium_net < 0 ? '#27ae60' : '#999';
                     const smColor = d.small_net > 0 ? '#e74c3c' : d.small_net < 0 ? '#27ae60' : '#999';
+                    const totColor = d.total_net_inflow > 0 ? '#e74c3c' : d.total_net_inflow < 0 ? '#27ae60' : '#999';
                     // 019E Task 4.1：估算行追加标注（仅资金面表格，评分卡片不标注）
                     // 019K Task 4：THS 顶替行追加“同花顺”标注（口径提示：全部资金净流入，非主力）
                     // 019S：ths_total 已无新增行（存量 27 行按方案 b 处置），
@@ -1074,13 +1081,20 @@
                     const estTag = d.is_estimated === 1 ? '<sup style="color:#e67e22;font-size:11px">估算</sup>' : '';
                     const thsTag = d.capital_source === 'ths_total' ? '<sup style="color:#1a73e8;font-size:11px">同花顺</sup>' : '';
                     const sinaTag = d.capital_source === 'sina_main' ? '<sup style="color:#8e44ad;font-size:11px">新浪</sup>' : '';
-                    html += `<tr><td>${d.trade_date}</td><td style="color:${color}">${d.main_net_inflow ?? '—'}${estTag}${thsTag}${sinaTag}</td><td>${d.main_net_inflow_pct ?? '—'}%</td><td>${d.super_large_net ?? '—'}</td><td>${d.large_net ?? '—'}</td><td style="color:${medColor}">${d.medium_net ?? '—'}</td><td style="color:${smColor}">${d.small_net ?? '—'}</td></tr>`;
+                    const tierCells = hasTiers
+                        ? `<td>${d.super_large_net ?? '—'}</td><td>${d.large_net ?? '—'}</td><td style="color:${medColor}">${d.medium_net ?? '—'}</td><td style="color:${smColor}">${d.small_net ?? '—'}</td>`
+                        : '';
+                    const totalNetCell = hasTotalNet
+                        ? `<td style="color:${totColor}">${d.total_net_inflow ?? '—'}</td>`
+                        : '';
+                    html += `<tr><td>${d.trade_date}</td><td style="color:${color}">${d.main_net_inflow ?? '—'}${estTag}${thsTag}${sinaTag}</td><td>${d.main_net_inflow_pct ?? '—'}%</td>${tierCells}${totalNetCell}</tr>`;
                 });
                 html += '</tbody></table>';
                 // 020N：原「同花顺净额」辅助列不再展示——同花顺历史接口无法获取，缺失日无法补齐；
                 // 且东财/腾讯四档净额互补恒等（超大+大+中+小≡0，散户=被动方口径），
                 // 无法合成同花顺「净额」口径，为避免误导按用户裁定移除以保证口径真实。
-                html += '<div style="font-size:12px;color:#999;margin-top:4px;">主力净流入来源：东方财富/腾讯（超大单+大单）；超大/大/中/小四档净额来自同一数据源、逐日完整，四档合计为零（散户为被动方口径）</div>';
+                // 020O：港股另展示腾讯全资金净流入（TotalNetFlow，港股散户非被动镜像、有实际意义）。
+                html += '<div style="font-size:12px;color:#999;margin-top:4px;">主力净流入来源：东方财富/腾讯（超大单+大单）；A股超大/大/中/小四档净额来自同一数据源、逐日完整，四档合计为零（散户为被动方口径）；港股全资金净流入来自腾讯（主力+散户主动净额）</div>';
             } else {
                 html += '<div class="alert alert-warning">暂无资金面数据，请先点击"采集数据"</div>';
             }
