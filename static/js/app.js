@@ -3109,11 +3109,12 @@
         html += '<div class="advice-card md-card">';
         html += '<div class="card-title" style="font-size:15px;margin-bottom:10px;">📝 综合分析</div>';
 
-        if (adviseData.advice_detail) {
+        // 020R-40：综合分析文本为固定子项，缺失时给出兜底说明
+        {
             // U7(#5): 综合文本（历史快照 markdown_content）中的「数据完整度」行
             // 可能与顶部实时 data_quality（已修复口径）不一致，移除该行避免矛盾，
             // 完整度统一以顶部权威展示为准。
-            var detailText = adviseData.advice_detail;
+            var detailText = adviseData.advice_detail || '';
             if (detailText) {
                 // U7(#5): 移除综合文本中的「数据完整度」相关行，避免与顶部实时
                 // data_quality 及右侧维度亮点卡内的数据完整度重复（020R-16）
@@ -3126,75 +3127,104 @@
                 try { _mdHtml = marked.parse(detailText); } catch (e) { _mdHtml = ''; }
             }
             html += '<div class="md-body">' +
-                    (_mdHtml || ((detailText || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>'))) +
+                    (_mdHtml || ((detailText || '暂无综合分析文本。').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>'))) +
                     '</div>';
         }
 
         // 020R-14：仓位建议移除（网格计划卡已含各档位仓位比例）
 
-        if (adviseData.news_summary) {
-            html += '<div class="advice-section">';
-            html += '<div class="advice-section-title">消息面摘要</div>';
-            html += '<div class="advice-detail-text" style="border-left-color:#f39c12;font-size:13px;">' +
-                    adviseData.news_summary + '</div>';
-            html += '</div>';
-        }
+        // 020R-40：消息面摘要为固定子项，缺失时给出兜底说明
+        html += '<div class="advice-section">';
+        html += '<div class="advice-section-title">消息面摘要</div>';
+        html += '<div class="advice-detail-text" style="border-left-color:#f39c12;font-size:13px;">' +
+                (adviseData.news_summary || '暂无消息面摘要（近期无重大新闻，可参考右侧消息面指标明细）。') +
+                '</div>';
+        html += '</div>';
 
+        // 020R-40：风险提示为固定子项，缺失时给出兜底说明
+        html += '<div class="advice-section">';
+        html += '<div class="advice-section-title" style="color:#c62828;">风险提示</div>';
+        html += '<ul class="risk-list">';
         if (adviseData.risk_warnings && adviseData.risk_warnings.length > 0) {
-            html += '<div class="advice-section">';
-            html += '<div class="advice-section-title" style="color:#c62828;">风险提示</div>';
-            html += '<ul class="risk-list">';
             adviseData.risk_warnings.forEach(function(r) {
                 html += '<li>' + r + '</li>';
             });
-            html += '</ul>';
-            html += '</div>';
+        } else {
+            html += '<li>暂无风险提示。</li>';
         }
+        html += '</ul>';
+        html += '</div>';
 
         // 数据警告已移至维度亮点卡（020R-16），此处不再重复展示
 
         html += '</div><!-- /md-card -->';
 
-        // 维度亮点卡（含数据完整度与提示）
-        if (adviseData.strongest_dim || adviseData.weakest_dim ||
-                (adviseData.data_warnings && adviseData.data_warnings.length > 0)) {
+        // 维度亮点卡（020R-40：固定子项——最强/最弱维度 + 数据完整度与提示，缺失自动兜底）
+        {
+            // 最强/最弱维度：后端缺失时从前端 dims 兜底计算，保证必显
+            var _dimNameMap = { kline: '技术面', fundamental: '基本面', capital_flow: '资金面', news: '消息面' };
+            var swFallback = null;
+            if (!adviseData.strongest_dim || !adviseData.weakest_dim) {
+                var scored = [];
+                Object.keys(_dimNameMap).forEach(function(k) {
+                    var d = dims[k];
+                    if (d && d.score != null && d.status !== 'failed' && d.status !== 'no_data') {
+                        scored.push({ name: _dimNameMap[k], score: Number(d.score) });
+                    }
+                });
+                if (scored.length > 0) {
+                    scored.sort(function(a, b) { return b.score - a.score; });
+                    swFallback = { s: scored[0], w: scored[scored.length - 1] };
+                }
+            }
+            var strongest = adviseData.strongest_dim || (swFallback && swFallback.s);
+            var weakest = adviseData.weakest_dim || (swFallback && swFallback.w);
+
             html += '<div class="advice-card dim-hl-card">';
             html += '<div class="card-title" style="font-size:15px;margin-bottom:10px;">🌟 维度亮点</div>';
-            if (adviseData.strongest_dim) {
+            if (strongest) {
                 html += '<p style="font-size:14px;color:#27ae60;margin:0 0 6px;">' +
-                        '★ 最强维度：' + adviseData.strongest_dim.name +
-                        '（' + adviseData.strongest_dim.score.toFixed(1) + '分）</p>';
+                        '★ 最强维度：' + strongest.name +
+                        '（' + Number(strongest.score).toFixed(1) + '分）</p>';
+            } else {
+                html += '<p style="font-size:14px;color:#999;margin:0 0 6px;">★ 最强维度：暂无数据</p>';
             }
-            if (adviseData.weakest_dim) {
+            if (weakest) {
                 html += '<p style="font-size:14px;color:#e74c3c;margin:0;">' +
-                        '▼ 最弱维度：' + adviseData.weakest_dim.name +
-                        '（' + adviseData.weakest_dim.score.toFixed(1) + '分）</p>';
+                        '▼ 最弱维度：' + weakest.name +
+                        '（' + Number(weakest.score).toFixed(1) + '分）</p>';
+            } else {
+                html += '<p style="font-size:14px;color:#999;margin:0;">▼ 最弱维度：暂无数据</p>';
             }
+
             // 020R-16：数据完整度与提示并入维度亮点卡（不再与综合分析重复）
             // 020R-31：按数据状态分级提示效果——异常(红)/滞后(黄)/提示(灰)/正常(绿)
-            if (adviseData.data_warnings && adviseData.data_warnings.length > 0) {
-                var _classifyDw = function(w) {
-                    if (w.indexOf('⚠️') >= 0) return 'bad';
-                    var m = /滞后(\d+)天/.exec(w);
-                    if (m) {
-                        var n = parseInt(m[1], 10);
-                        if (n >= 5) return 'bad';
-                        if (n >= 1) return 'warn';
-                        return 'good';
-                    }
-                    if (w.indexOf('数据源暂不可用') >= 0) return 'warn';
-                    if (w.indexOf('暂无') >= 0) return 'warn';
-                    if (w.indexOf('最新') >= 0) return 'good';
-                    return 'info';
-                };
-                var DW_STYLE = {
-                    'bad':  { icon: '🔴', color: '#c62828', bg: '#ffebee', border: '#e57373', label: '异常' },
-                    'warn': { icon: '🟡', color: '#e65100', bg: '#fff8e1', border: '#ffb74d', label: '滞后' },
-                    'info': { icon: 'ℹ️', color: '#5d6d7e', bg: '#f5f7fa', border: '#cfd8e3', label: '提示' },
-                    'good': { icon: '✅', color: '#2e7d32', bg: '#eafaf1', border: '#81c784', label: '正常' }
-                };
-                var dwOrder = { 'bad': 0, 'warn': 1, 'info': 2, 'good': 3 };
-                var dwItems = adviseData.data_warnings.map(function(w) {
+            // 020R-40：数据完整度为固定子项——无告警时按 data_quality 兜底、再兜底为「数据正常」
+            var _classifyDw = function(w) {
+                if (w.indexOf('⚠️') >= 0) return 'bad';
+                var m = /滞后(\d+)天/.exec(w);
+                if (m) {
+                    var n = parseInt(m[1], 10);
+                    if (n >= 5) return 'bad';
+                    if (n >= 1) return 'warn';
+                    return 'good';
+                }
+                if (w.indexOf('数据源暂不可用') >= 0) return 'warn';
+                if (w.indexOf('暂无') >= 0) return 'warn';
+                if (w.indexOf('最新') >= 0) return 'good';
+                return 'info';
+            };
+            var DW_STYLE = {
+                'bad':  { icon: '🔴', color: '#c62828', bg: '#ffebee', border: '#e57373', label: '异常' },
+                'warn': { icon: '🟡', color: '#e65100', bg: '#fff8e1', border: '#ffb74d', label: '滞后' },
+                'info': { icon: 'ℹ️', color: '#5d6d7e', bg: '#f5f7fa', border: '#cfd8e3', label: '提示' },
+                'good': { icon: '✅', color: '#2e7d32', bg: '#eafaf1', border: '#81c784', label: '正常' }
+            };
+            var dwOrder = { 'bad': 0, 'warn': 1, 'info': 2, 'good': 3 };
+            var dwItems = [];
+            var dwList = adviseData.data_warnings || [];
+            if (dwList.length > 0) {
+                dwItems = dwList.map(function(w) {
                     // 020R-32：去掉每条前缀「数据完整度：」，只显示维度名与状态
                     return { text: w.replace(/^数据完整度：/, ''), state: _classifyDw(w) };
                 }).sort(function(a, b) {
@@ -3202,29 +3232,49 @@
                     var ob = dwOrder[b.state] != null ? dwOrder[b.state] : 9;
                     return oa - ob;
                 });
-                var badCount = dwItems.filter(function(x) { return x.state === 'bad'; }).length;
-                var warnCount = dwItems.filter(function(x) { return x.state === 'warn'; }).length;
-
-                html += '<div class="advice-section" style="margin-top:10px;">';
-                html += '<div class="advice-section-title" style="color:#f39c12;">📋 数据完整度与提示' +
-                        '<span style="font-weight:normal;font-size:12px;color:#999;margin-left:8px;">' +
-                        (badCount + warnCount > 0
-                            ? '🔴 ' + badCount + ' 项异常 · 🟡 ' + warnCount + ' 项滞后'
-                            : '✅ 数据状态正常') +
-                        '</span></div>';
-                html += '<ul class="risk-list" style="list-style:none;padding-left:0;">';
-                dwItems.forEach(function(x) {
-                    var st = DW_STYLE[x.state] || DW_STYLE['info'];
-                    html += '<li style="display:flex;align-items:flex-start;gap:8px;background:' + st.bg +
-                        ';border-left:3px solid ' + st.border + ';border-radius:6px;padding:6px 10px;margin-bottom:6px;font-size:13px;color:' + st.color + ';">' +
-                        '<span style="flex-shrink:0;">' + st.icon + '</span>' +
-                        '<span style="line-height:1.5;">' + x.text + '</span>' +
-                        '<span style="flex-shrink:0;margin-left:auto;font-size:11px;opacity:.85;">' + st.label + '</span>' +
-                        '</li>';
-                });
-                html += '</ul>';
-                html += '</div>';
+            } else {
+                // 无告警兜底：优先 data_quality 逐维度展示，否则整体「数据正常」
+                var dq = adviseData.data_quality || {};
+                var dqKeys = Object.keys(dq);
+                var hasDqVal = dqKeys.some(function(k) { return dq[k] != null; });
+                if (hasDqVal) {
+                    [['technical', '技术'], ['fundamental', '基本'], ['capital', '资金'], ['news', '消息']].forEach(function(pair) {
+                        var v = dq[pair[0]];
+                        if (v == null || v === undefined) {
+                            dwItems.push({ text: pair[1] + '：已采集（未统计完整度）', state: 'info' });
+                        } else if (v <= 0) {
+                            dwItems.push({ text: pair[1] + '：数据缺失', state: 'bad' });
+                        } else {
+                            dwItems.push({ text: pair[1] + '：完整度 ' + Math.round(v * 100) + '%', state: 'good' });
+                        }
+                    });
+                } else {
+                    dwItems.push({ text: '数据完整度未统计（历史快照），点击「🔄 刷新报告」获取实时完整度', state: 'info' });
+                }
             }
+            var badCount = dwItems.filter(function(x) { return x.state === 'bad'; }).length;
+            var warnCount = dwItems.filter(function(x) { return x.state === 'warn'; }).length;
+            var goodCount = dwItems.filter(function(x) { return x.state === 'good'; }).length;
+
+            html += '<div class="advice-section" style="margin-top:10px;">';
+            html += '<div class="advice-section-title" style="color:#f39c12;">📋 数据完整度与提示' +
+                    '<span style="font-weight:normal;font-size:12px;color:#999;margin-left:8px;">' +
+                    (badCount + warnCount > 0
+                        ? '🔴 ' + badCount + ' 项异常 · 🟡 ' + warnCount + ' 项滞后'
+                        : (goodCount > 0 ? '✅ 数据状态正常' : 'ℹ️ 未统计完整度')) +
+                    '</span></div>';
+            html += '<ul class="risk-list" style="list-style:none;padding-left:0;">';
+            dwItems.forEach(function(x) {
+                var st = DW_STYLE[x.state] || DW_STYLE['info'];
+                html += '<li style="display:flex;align-items:flex-start;gap:8px;background:' + st.bg +
+                    ';border-left:3px solid ' + st.border + ';border-radius:6px;padding:6px 10px;margin-bottom:6px;font-size:13px;color:' + st.color + ';">' +
+                    '<span style="flex-shrink:0;">' + st.icon + '</span>' +
+                    '<span style="line-height:1.5;">' + x.text + '</span>' +
+                    '<span style="flex-shrink:0;margin-left:auto;font-size:11px;opacity:.85;">' + st.label + '</span>' +
+                    '</li>';
+            });
+            html += '</ul>';
+            html += '</div>';
             html += '</div>';
         }
         html += '</div><!-- /advice-two-col -->';

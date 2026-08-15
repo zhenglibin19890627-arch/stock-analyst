@@ -488,6 +488,11 @@ def _pick_top_factors(dim_key, factors_dict):
     keys = priority.get(dim_key, [])
     result = {}
     count = 0
+    # 020R-40：数据完整度固定包含（report-latest 快照路径据此计算 data_quality，
+    # 与实时 advise 路径保持一致；原先排优先级末尾永远取不到）
+    if factors_dict.get('data_completeness') is not None:
+        result['data_completeness'] = factors_dict['data_completeness']
+        count += 1
     for k in keys:
         if k in factors_dict and factors_dict[k] is not None:
             # 020R-6：不再截断因子值——长文本完整入参，展示层负责换行完整显示
