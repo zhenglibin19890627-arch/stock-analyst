@@ -474,6 +474,18 @@ class BacktestEngine:
         conn = get_connection()
         cursor = conn.cursor()
 
+        # 020K：自愈清理孤儿回测行——ratings_history 写入用 INSERT OR REPLACE
+        # （advisor.py 红线模块），报告重生成会换掉 rating id，旧 id 的回测结果
+        # 失去引用；不清理会重复计数污染市场报告统计。
+        # 排除 rating_id=-1（历史模拟回测行，is_simulated=1，无对应评级）。
+        cleaned = cursor.execute(
+            'DELETE FROM backtest_results WHERE rating_id IS NOT NULL AND rating_id != -1 '
+            'AND rating_id NOT IN (SELECT id FROM ratings_history)'
+        ).rowcount
+        conn.commit()
+        if cleaned:
+            logger.info(f'[backtest] 清理孤儿回测行: {cleaned} 条')
+
         # 查询待回测的评级记录
         sql = """
             SELECT rh.id AS rating_id

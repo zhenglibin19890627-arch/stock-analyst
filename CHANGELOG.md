@@ -1,5 +1,13 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-15] 回测中心数据同步重算 + 孤儿回测行自愈（020K）
+
+- 背景：报告重生成会经 advisor.py 的 `INSERT OR REPLACE` 重写 `ratings_history` 换掉 rating id（B24 红线模块，不改），导致 `backtest_results` 累计 595 条孤儿行（旧 id 失去引用），污染回测中心市场报告统计。
+- 落地：`BacktestEngine.batch_backtest` 开头新增自愈清理——删除 `rating_id` 非空且不在 `ratings_history` 中的孤儿行（排除 `rating_id=-1` 的历史模拟行），每次回测运行自动收敛，无需人工维护。
+- 数据修复（先备份 db_backup_20260815_130323_pre_backtest_regen.db）：清理 595 条孤儿行 → 评级回测全量重跑 521/521 成功（真实样本与 ratings_history 一一对应）→ 价格建议回测全量重跑 1046/1046 成功（force 模式自带备份）。
+- 说明：07-16 遗留的 77 行 `ratings_history` 字母档（B/C/D）与回测表中文标签不一致属历史表示差异，回测统计口径统一、不受影响。
+- 验证：孤儿行 0；08-06～08-14 每天 29 行真实回测覆盖；价格回测 1046 行 created_at 全部刷新。
+
 ## [2026-08-15] 报告重生成支持跳过采集（020J：skip_collect）
 
 - 背景：数据回填完成后需重生成历史报告，但 `_process_single_stock` 写死"先采集后分析"，历史 8 天重生成会重复打外部接口（每轮 3-4 分钟）。
