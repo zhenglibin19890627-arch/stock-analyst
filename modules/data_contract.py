@@ -111,6 +111,13 @@ class StockData(BaseModel):
     news_count: int | None = Field(default=None, description='新闻总数')
     news_positive_ratio: float | None = Field(default=None, description='正面新闻占比(0~1)')
     news_negative_count: int | None = Field(default=None, description='负面新闻数量')
+    # 020R-45 新增：股东人数与机构持仓（资金面-筹码结构）
+    holder_count_change_pct: float | None = Field(
+        default=None, description='股东户数增减比例(%)，正=户数增加（筹码分散）'
+    )
+    institution_hold_ratio: float | None = Field(
+        default=None, description='机构持仓比例(%)（东财六类机构持股汇总/总股本）'
+    )
 
     # ================================================================
     # 四、扩展与元数据
@@ -175,6 +182,9 @@ class StockData(BaseModel):
         'main_net_inflow': '资金面-主力资金子项：维度内子权重保持，使用中性值填充（默认值填充型）',
         'north_net_buy': '资金面-互联互通子项：维度内子权重调整降权（权重降低型）',
         'margin_balance_chg': '资金面-杠杆资金子项：维度内子权重调整降权（权重降低型）',
+        # 020R-45 新增：股东人数/机构持仓（A股专属，缺失时子权重归零）
+        'holder_count_change_pct': '资金面-股东人数子项：维度内子权重调整为0（权重归零型）',
+        'institution_hold_ratio': '资金面-机构持仓子项：维度内子权重调整为0（权重归零型）',
     }
 
     def get_degradation(self, field_name: str) -> str:
@@ -223,7 +233,13 @@ class StockData(BaseModel):
             'news_positive_ratio',
             'news_negative_count',
         }
-        CAPITAL = {'main_net_inflow', 'north_net_buy', 'margin_balance_chg'}
+        CAPITAL = {
+            'main_net_inflow',
+            'north_net_buy',
+            'margin_balance_chg',
+            'holder_count_change_pct',
+            'institution_hold_ratio',
+        }
 
         if dimension == 'technical':
             scope = TECHNICAL
@@ -248,7 +264,8 @@ class StockData(BaseModel):
         - technical: 12个可选字段
         - fundamental: 9个可选字段
         - news: 5个字段 (news_sentiment, holder_increase, news_count, news_positive_ratio, news_negative_count)
-        - capital: 3个字段 (main_net_inflow, north_net_buy, margin_balance_chg)
+        - capital: 5个字段 (main_net_inflow, north_net_buy, margin_balance_chg,
+          holder_count_change_pct, institution_hold_ratio)  # 020R-45 从3扩展至5
         """
         tech_total = 12
         tech_present = 12 - len(self.missing_fields('technical'))
@@ -259,8 +276,8 @@ class StockData(BaseModel):
         news_total = 5  # B22: 从2扩展至5
         news_present = 5 - len(self.missing_fields('news'))
 
-        capital_total = 3
-        capital_present = 3 - len(self.missing_fields('capital'))
+        capital_total = 5  # 020R-45: 从3扩展至5
+        capital_present = 5 - len(self.missing_fields('capital'))
 
         self.data_quality = DataQuality(
             technical=round(tech_present / tech_total, 2),
@@ -325,6 +342,9 @@ class StockData(BaseModel):
             'news_count': self.news_count,
             'news_positive_ratio': self.news_positive_ratio,
             'news_negative_count': self.news_negative_count,
+            # 020R-45 新增：股东人数/机构持仓
+            'holder_count_change_pct': self.holder_count_change_pct,
+            'institution_hold_ratio': self.institution_hold_ratio,
             # 元数据
             'extra': self.extra,
             'data_quality': self.data_quality.model_dump() if self.data_quality else None,

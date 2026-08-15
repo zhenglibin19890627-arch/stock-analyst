@@ -395,6 +395,9 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
     # 6. 读取消息面
     news = _read_news_sentiment(stock_id)
 
+    # 6.5 020R-45：读取股东人数/机构持仓（最新一期）
+    holder_structure = _read_holder_structure(stock_id)
+
     # 7. 组装 StockData
     code = _format_stock_code(symbol, market)
     market_contract = _market_to_contract(market)
@@ -488,6 +491,11 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
         holder_increase=fund.get('holder_increase')
         if fund and 'holder_increase' in fund.keys()
         else None,  # B10: 从数据库读取实际值
+        # 020R-45：股东人数/机构持仓（A股有值，港股恒为 None）
+        holder_count_change_pct=holder_structure.get('holder_count_change_pct')
+        if holder_structure
+        else None,
+        institution_hold_ratio=holder_structure.get('inst_ratio') if holder_structure else None,
         # 扩展
         extra={'name': name, 'stock_id': stock_id},
     )

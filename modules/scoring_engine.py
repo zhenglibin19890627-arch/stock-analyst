@@ -195,19 +195,22 @@ NEWS_SUBITEMS: list[SubItem] = [
     SubItem('股东行为', 'holder', ['holder_increase'], 0.30, 'zero'),
 ]
 
-# --- 资金面 3 子项 ---
+# --- 资金面 5 子项（020R-45 扩展：新增机构持仓/股东人数，权重重排，豁免见 RED_LINES.md §6） ---
 # B26：北向资金数据源自2024-08-16起停更（港交所政策变更），降权0.30→0.10
-# 释放权重按主力:两融=45:25比例分配给主力(+0.10)和两融(+0.10)
 CAPITAL_SUBITEMS: list[SubItem] = [
     SubItem(
         '主力资金',
         'main_capital',
         ['main_net_inflow'],
-        0.55,
+        0.40,  # 020R-45: 0.55→0.40
         'zero',  # 019T T2: C类(keep_default 填充) → A类(归零)；缺失=无信息，不占权重
     ),
     SubItem('互联互通', 'north_capital', ['north_net_buy'], 0.10, 'reduce'),
-    SubItem('杠杆资金', 'margin_capital', ['margin_balance_chg'], 0.35, 'reduce'),
+    SubItem('杠杆资金', 'margin_capital', ['margin_balance_chg'], 0.20, 'reduce'),  # 020R-45: 0.35→0.20
+    # 020R-45 新增：机构持仓（六类机构持股汇总/总股本，A股专属，缺失归零）
+    SubItem('机构持仓', 'inst_hold', ['institution_hold_ratio'], 0.20, 'zero'),
+    # 020R-45 新增：股东人数（户数环比，筹码集中度，A股专属，缺失归零）
+    SubItem('股东人数', 'holder_count', ['holder_count_change_pct'], 0.10, 'zero'),
 ]
 
 
@@ -842,6 +845,52 @@ def score_margin_capital(data: StockData) -> tuple[float, dict]:
         return 20.0, {**detail, 'note': '融资余额大幅减少'}
 
 
+def score_inst_hold(data: StockData) -> tuple[float, dict]:
+    """机构持仓子项评分：机构持仓比例（六类机构持股汇总/总股本，020R-45）
+
+    缺失返回中性 50，degradation=zero → 缺失时子权重归零（A股专属字段）。
+    """
+    ratio = data.institution_hold_ratio
+    if ratio is None:
+        return 50.0, {'note': '机构持仓数据缺失，返回中性分（不占权重）'}
+
+    detail = {'institution_hold_ratio': f'{ratio:.2f}%'}
+    if ratio >= 60:
+        return 95.0, {**detail, 'note': '机构重仓'}
+    elif ratio >= 40:
+        return 82.0, {**detail, 'note': '机构高配'}
+    elif ratio >= 25:
+        return 68.0, {**detail, 'note': '机构中等持仓'}
+    elif ratio >= 10:
+        return 55.0, {**detail, 'note': '机构低配'}
+    else:
+        return 40.0, {**detail, 'note': '机构极少关注'}
+
+
+def score_holder_count(data: StockData) -> tuple[float, dict]:
+    """股东人数子项评分：户数环比变化（正=户数增加/筹码分散，020R-45）
+
+    缺失返回中性 50，degradation=zero → 缺失时子权重归零（A股专属字段）。
+    """
+    chg = data.holder_count_change_pct
+    if chg is None:
+        return 50.0, {'note': '股东人数数据缺失，返回中性分（不占权重）'}
+
+    detail = {'holder_count_change_pct': f'{chg:+.2f}%'}
+    if chg <= -10:
+        return 92.0, {**detail, 'note': '户数大幅减少(筹码集中)'}
+    elif chg <= -5:
+        return 78.0, {**detail, 'note': '户数减少(筹码集中)'}
+    elif chg <= -1:
+        return 62.0, {**detail, 'note': '户数略降'}
+    elif chg <= 1:
+        return 50.0, {**detail, 'note': '户数持平'}
+    elif chg <= 5:
+        return 40.0, {**detail, 'note': '户数略增(筹码分散)'}
+    else:
+        return 25.0, {**detail, 'note': '户数大幅增加(筹码分散)'}
+
+
 # 子项评分函数注册表
 SCORING_FUNCTIONS: dict[str, Callable[[StockData], tuple[float, dict]]] = {
     # 技术面
@@ -864,6 +913,9 @@ SCORING_FUNCTIONS: dict[str, Callable[[StockData], tuple[float, dict]]] = {
     'main_capital': score_main_capital,
     'north_capital': score_north_capital,
     'margin_capital': score_margin_capital,
+    # 020R-45 新增：机构持仓/股东人数
+    'inst_hold': score_inst_hold,
+    'holder_count': score_holder_count,
 }
 
 

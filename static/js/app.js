@@ -4441,6 +4441,12 @@
      */
     function _capitalStateColor(state) {
         if (!state) return '#666';
+        // 020R-45：股东人数/机构持仓语义（筹码集中/机构高配=好→红；筹码分散/机构极少=差→绿）
+        if (/(筹码集中|户数略降)/.test(state)) return '#e74c3c';
+        if (/(筹码分散|户数略增)/.test(state)) return '#27ae60';
+        if (/(机构重仓|机构高配)/.test(state)) return '#e74c3c';
+        if (/(机构中等持仓|机构低配)/.test(state)) return '#e67e22';
+        if (/机构极少/.test(state)) return '#27ae60';
         if (/(流入|买入|增加)/.test(state)) return '#e74c3c';
         if (/(流出|卖出|减少)/.test(state)) return '#27ae60';
         return '#666';
@@ -4483,10 +4489,20 @@
         html += _row('互联互通',
             cd.north_net != null ? ('北向 ' + _fv(_wanFmt(cd.north_net), cd.north_state)) :
             '<span style="color:#999;">数据缺失（北向数据源已停更）</span>');
-        // 3) 杠杆资金（权重 35%）
+        // 3) 杠杆资金（权重 20%）
         html += _row('杠杆资金',
             cd.margin_chg != null ? ('融资余额 ' + _fv(_wanFmt(cd.margin_chg), cd.margin_state)) :
             '<span style="color:#999;">数据缺失</span>');
+        // 4) 机构持仓（020R-45，权重 20%，A股专属）
+        html += _row('机构持仓',
+            cd.inst_ratio != null
+                ? _fv(cd.inst_ratio + '%' + (cd.inst_report_date ? '（' + cd.inst_report_date + '）' : ''), cd.inst_state)
+                : '<span style="color:#999;">数据缺失（A股专属）</span>');
+        // 5) 股东人数（020R-45，权重 10%，A股专属）
+        html += _row('股东人数',
+            cd.holder_count_change_pct != null
+                ? ('户数环比 ' + _fv((cd.holder_count_change_pct > 0 ? '+' : '') + cd.holder_count_change_pct + '%', cd.holder_state))
+                : '<span style="color:#999;">数据缺失（A股专属）</span>');
         return html;
     }
 

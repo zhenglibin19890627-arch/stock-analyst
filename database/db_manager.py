@@ -275,6 +275,26 @@ def init_database():
     """)
 
     # ============================================================
+    # 6.6 股东人数与机构持仓表 —— 020R-45（资金面-筹码结构）
+    # ============================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS holder_structure (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stock_id INTEGER NOT NULL,
+            stat_date DATE NOT NULL,             -- 股东户数统计截止日
+            holder_count INTEGER,                -- 股东户数(户)
+            holder_count_change_pct REAL,        -- 股东户数增减比例(%)
+            total_shares REAL,                   -- 总股本(股)
+            inst_shares REAL,                    -- 机构持股总数(股，六类汇总)
+            inst_ratio REAL,                     -- 机构持仓比例(%)
+            inst_report_date TEXT,               -- 机构持仓报告期(YYYYMMDD)
+            fetched_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+            UNIQUE(stock_id, stat_date),
+            FOREIGN KEY (stock_id) REFERENCES stocks(id)
+        )
+    """)
+
+    # ============================================================
     # 7. 消息面数据表 —— 公告、研报等
     # ============================================================
     cursor.execute("""

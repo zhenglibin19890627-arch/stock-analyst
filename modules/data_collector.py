@@ -1593,6 +1593,139 @@ def _save_holder_increase(stock_id: int, holder_increase):
 
 
 # ============================================================
+# 020R-45：股东人数与机构持仓采集（A股专属，资金面-筹码结构）
+# ============================================================
+
+HOLD_INST_TYPES = ['基金持仓', 'QFII持仓', '社保持仓', '券商持仓', '保险持仓']  # 020R-45：阳光私募接口不支持，5类
+
+_fund_hold_cache: dict = {}
+_fund_hold_cache_time: dict = {}
+
+
+def _num_or_none(v):
+    """宽松数值转换（'-'/''/NaN → None）。"""
+    try:
+        if v is None or v == '' or v == '-':
+            return None
+        if pd.isna(v):
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _latest_fund_hold_dates():
+    """候选机构持仓报告期（YYYYMMDD）：今天之前最近若干季度末，从新到旧。"""
+    today = datetime.now(_CN_TZ)
+    candidates = set()
+    for year in (today.year, today.year - 1, today.year - 2):
+        for md in ('1231', '0930', '0630', '0331'):
+            d = f'{year}{md}'
+            if d <= today.strftime('%Y%m%d'):
+                candidates.add(d)
+    return sorted(candidates, reverse=True)
+
+
+def _get_fund_hold_table(hold_type, date):
+    """取某类机构持仓全市场表（10分钟模块级缓存，批量采集复用）。失败返回 None。"""
+    key = (hold_type, date)
+    now = time.time()
+    cached_at = _fund_hold_cache_time.get(key, 0)
+    if key in _fund_hold_cache and cached_at and (now - cached_at) < 600:
+        return _fund_hold_cache[key]
+    try:
+        df = ak.stock_report_fund_hold(symbol=hold_type, date=date)
+        _fund_hold_cache[key] = df
+        _fund_hold_cache_time[key] = now
+        return df
+    except Exception as e:
+        logger.warning(f'[020R-45 机构持仓] {hold_type} {date} 获取失败: {e}')
+        return None
+
+
+def fetch_holder_structure(symbol: str):
+    """020R-45：采集股东人数（东财户数明细）与机构持仓（东财六类机构持股汇总）。
+
+    Returns:
+        dict: stat_date / holder_count / holder_count_change_pct / total_shares /
+              inst_shares / inst_ratio / inst_report_date
+        接口不可用或数据异常时返回 None（静默降级，不阻塞主流程）。
+    """
+    try:
+        gdhs = ak.stock_zh_a_gdhs_detail_em(symbol=symbol)
+        if gdhs is None or gdhs.empty:
+            return None
+        # 020R-45：该接口按日期升序返回，最新一期在最后一行（iloc[-1]）
+        latest = gdhs.iloc[-1]
+        total_shares = _num_or_none(latest.get('总股本'))
+        result = {
+            'stat_date': str(latest.get('股东户数统计截止日'))[:10],
+            'holder_count': _num_or_none(latest.get('股东户数-本次')),
+            'holder_count_change_pct': _num_or_none(latest.get('股东户数-增减比例')),
+            'total_shares': total_shares,
+            'inst_shares': None,
+            'inst_ratio': None,
+            'inst_report_date': None,
+        }
+        # 机构持仓：六类机构持股汇总 / 总股本
+        inst_shares = 0.0
+        inst_date = None
+        for hold_type in HOLD_INST_TYPES:
+            for date in _latest_fund_hold_dates():
+                df = _get_fund_hold_table(hold_type, date)
+                if df is None or df.empty or '股票代码' not in df.columns:
+                    continue
+                sub = df[df['股票代码'].astype(str).str.contains(symbol, na=False)]
+                if sub.empty:
+                    continue
+                if '持股总数' in df.columns:
+                    try:
+                        inst_shares += float(sub.iloc[0]['持股总数'] or 0)
+                    except (TypeError, ValueError):
+                        pass
+                inst_date = inst_date or date
+                break  # 该类型取最近一个有数据的报告期
+        if inst_date:
+            result['inst_shares'] = round(inst_shares, 2)
+            result['inst_report_date'] = inst_date
+            if total_shares and total_shares > 0:
+                result['inst_ratio'] = round(inst_shares / total_shares * 100, 2)
+        return result
+    except Exception as e:
+        logger.warning(f'[020R-45 股东人数/机构持仓 {symbol}] 采集失败(静默降级): {e}')
+        return None
+
+
+def _save_holder_structure(stock_id: int, data):
+    """020R-45：股东人数/机构持仓快照落库（按 stat_date 幂等，保留最近 12 期）。"""
+    if not data or data.get('stat_date') is None:
+        return
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT OR REPLACE INTO holder_structure '
+        '(stock_id, stat_date, holder_count, holder_count_change_pct, total_shares, '
+        'inst_shares, inst_ratio, inst_report_date) VALUES (?,?,?,?,?,?,?,?)',
+        (
+            stock_id, data['stat_date'], data.get('holder_count'),
+            data.get('holder_count_change_pct'), data.get('total_shares'),
+            data.get('inst_shares'), data.get('inst_ratio'), data.get('inst_report_date'),
+        ),
+    )
+    cursor.execute(
+        'DELETE FROM holder_structure WHERE stock_id=? AND stat_date NOT IN '
+        '(SELECT stat_date FROM holder_structure WHERE stock_id=? ORDER BY stat_date DESC LIMIT 12)',
+        (stock_id, stock_id),
+    )
+    conn.commit()
+    conn.close()
+    logger.info(
+        f'[020R-45 股东人数/机构持仓] stock_id={stock_id}, '
+        f'holder_change={data.get("holder_count_change_pct")}, inst_ratio={data.get("inst_ratio")}'
+    )
+
+
+# ============================================================
 # 港股 —— 基本面数据
 # ============================================================
 
@@ -4879,6 +5012,15 @@ def collect_stock_data(symbol, market, force_full=False):
                 holder_val = fetch_holder_increase(symbol)
                 _save_holder_increase(stock_id, holder_val)
                 results['holder_increase'] = ('success', f'holder_increase={holder_val}')
+
+                # 020R-45: 股东人数与机构持仓采集（A股专属，失败静默降级）
+                hs_data = fetch_holder_structure(symbol)
+                _save_holder_structure(stock_id, hs_data)
+                results['holder_structure'] = (
+                    'success',
+                    f'holder_change={hs_data.get("holder_count_change_pct") if hs_data else None}, '
+                    f'inst_ratio={hs_data.get("inst_ratio") if hs_data else None}',
+                )
         except Exception as e:
             logger.warning(f'[{symbol}] B10基本面补全/股东增减持异常(不阻塞): {e}')
     else:

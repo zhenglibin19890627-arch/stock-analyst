@@ -70,7 +70,7 @@ def _fundamental_detail_for_stock(stock_id):
 
 
 def _capital_detail_for_stock(stock_id):
-    """020R-38：读取 raw_capital_flow，计算资金面三个子项展示明细（主力/北向/两融）。
+    """020R-38/45：读取 raw_capital_flow + holder_structure，计算资金面子项展示明细。
 
     纯展示层增强：失败或数据不足时返回 None，不影响报告主流程。
     """
@@ -83,13 +83,21 @@ def _capital_detail_for_stock(stock_id):
             (stock_id,),
         )
         rows = [dict(r) for r in cursor.fetchall()]
+        # 020R-45：股东人数/机构持仓最新一期
+        cursor.execute(
+            'SELECT stat_date, holder_count, holder_count_change_pct, total_shares, '
+            'inst_shares, inst_ratio, inst_report_date FROM holder_structure '
+            'WHERE stock_id = ? ORDER BY stat_date DESC LIMIT 1',
+            (stock_id,),
+        )
+        hs_row = cursor.fetchone()
         conn.close()
-        if not rows:
+        if not rows and not hs_row:
             return None
 
         from modules.capital_detail import compute_capital_detail
 
-        return compute_capital_detail(rows)
+        return compute_capital_detail(rows, dict(hs_row) if hs_row else None)
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).warning(f'资金面指标明细计算失败 stock_id={stock_id}: {e}')
         return None
