@@ -2798,6 +2798,7 @@
     var _reportTechDetail = null; // 020R-36：技术指标明细（供技术面卡渲染）
     var _reportFundDetail = null; // 020R-37：基本面指标明细（供基本面卡渲染）
     var _reportCapDetail = null;  // 020R-38：资金面指标明细（供资金面卡渲染）
+    var _reportNewsDetail = null; // 020R-39：消息面指标明细（供消息面卡渲染）
     var _radarChart = null;
     var _klineChart = null;
 
@@ -3085,10 +3086,11 @@
         html += '</div><!-- /report-top-grid -->';
 
         // 3. 四维评分详情（2×2网格，紧跟首屏评分卡后）
-        // 020R-36/37/38：技术/基本面/资金面指标明细并入对应维度卡内
+        // 020R-36/37/38/39：四维指标明细并入对应维度卡内
         _reportTechDetail = adviseData.technical_detail || null;
         _reportFundDetail = adviseData.fundamental_detail || null;
         _reportCapDetail = adviseData.capital_detail || null;
+        _reportNewsDetail = adviseData.news_detail || null;
         html += '<div class="card dim-detail-card">';
         html += '<div class="card-title" style="font-size:15px;margin-bottom:6px;">四维评分详情</div>';
         html += '<div class="dim-grid">';
@@ -4243,6 +4245,9 @@
         } else if (key === 'capital_flow' && _reportCapDetail) {
             // 020R-38：资金面指标明细并入资金面卡（主力资金/互联互通/杠杆资金）
             factorsHtml = _renderCapitalRows(_reportCapDetail);
+        } else if (key === 'news' && _reportNewsDetail) {
+            // 020R-39：消息面指标明细并入消息面卡（情绪/新闻概览/重要新闻/股东行为）
+            factorsHtml = _renderNewsRows(_reportNewsDetail);
         } else if (topFactors.length === 0) {
             factorsHtml = '<span style="color:#bbb;font-size:12px;">暂无关键因子</span>';
         } else {
@@ -4430,6 +4435,61 @@
         html += _row('杠杆资金',
             cd.margin_chg != null ? ('融资余额 ' + _fv(_wanFmt(cd.margin_chg), cd.margin_state)) :
             '<span style="color:#999;">数据缺失</span>');
+        return html;
+    }
+
+    /**
+     * 020R-39：消息面指标明细——状态语义着色（正面红、负面绿、中性灰、增持红、减持绿）
+     */
+    function _newsStateColor(state) {
+        if (!state) return '#666';
+        if (/(正面|增持|利好)/.test(state)) return '#e74c3c';
+        if (/(负面|减持)/.test(state)) return '#27ae60';
+        return '#666';
+    }
+
+    /**
+     * 020R-39：消息面指标明细行（并入消息面卡内）——情绪/新闻概览/重要新闻/股东行为
+     */
+    function _renderNewsRows(nd) {
+        function _fv(value, state) {
+            var color = _newsStateColor(state);
+            return '<span style="color:' + color + ';">' + value +
+                (state ? ' ' + state : '') + '</span>';
+        }
+        function _row(label, html) {
+            return '<div class="factor-row">' +
+                '<span class="factor-label">' + label + '</span>' +
+                '<span class="factor-val">' + html + '</span></div>';
+        }
+        var html = '<div style="font-size:11px;color:#999;margin-bottom:2px;">消息面指标明细' +
+            (nd.news_date ? '（新闻截至 ' + nd.news_date + '）' : '') + '</div>';
+        // 1) 情绪（权重 70%）
+        html += _row('情绪',
+            nd.avg_sentiment != null
+                ? _fv((nd.avg_sentiment > 0 ? '+' : '') + nd.avg_sentiment.toFixed(2), nd.sentiment_state)
+                : '<span style="color:#999;">数据缺失</span>');
+        // 新闻概览
+        if (nd.total_count != null) {
+            var overview = '共 ' + nd.total_count + ' 条';
+            if (nd.positive_ratio != null) overview += ' · 正面 ' + nd.positive_ratio + '%';
+            if (nd.negative_count != null) overview += ' · 负面 ' + nd.negative_count;
+            html += _row('新闻概览', '<span style="color:#333;font-weight:400;">' + overview + '</span>');
+        }
+        // 重要新闻
+        if (nd.top_news) {
+            var t = String(nd.top_news);
+            if (t.length > 40) t = t.slice(0, 40) + '…';
+            html += _row('重要新闻', '<span style="color:#333;font-weight:400;">' + t + '</span>');
+        }
+        // 2) 股东行为（权重 30%）
+        if (nd.holder === true) {
+            html += _row('股东行为', _fv('增持', '增持·利好'));
+        } else if (nd.holder === false) {
+            html += _row('股东行为', _fv('未增持', '未增持/减持'));
+        } else {
+            html += _row('股东行为', '<span style="color:#999;">数据缺失</span>');
+        }
         return html;
     }
 

@@ -95,6 +95,44 @@ def _capital_detail_for_stock(stock_id):
         return None
 
 
+def _news_detail_for_stock(stock_id):
+    """020R-39：读取 news_sentiment 最新聚合 + 股东增持标志，计算消息面两个子项展示明细。
+
+    纯展示层增强：失败或数据不足时返回 None，不影响报告主流程。
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT news_date, avg_sentiment, positive_count, negative_count, neutral_count, '
+            'total_count, top_news_title FROM news_sentiment WHERE stock_id = ? '
+            'ORDER BY news_date DESC LIMIT 1',
+            (stock_id,),
+        )
+        news_row = cursor.fetchone()
+        # 股东增持标志：与 data_adapter 一致，向后搜索最近非空值
+        cursor.execute(
+            'SELECT holder_increase FROM raw_fundamental WHERE stock_id = ? '
+            'ORDER BY report_date DESC LIMIT 20',
+            (stock_id,),
+        )
+        holder = None
+        for r in cursor.fetchall():
+            if r['holder_increase'] is not None:
+                holder = bool(r['holder_increase'])
+                break
+        conn.close()
+        if not news_row and holder is None:
+            return None
+
+        from modules.news_detail import compute_news_detail
+
+        return compute_news_detail(dict(news_row) if news_row else None, holder)
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning(f'消息面指标明细计算失败 stock_id={stock_id}: {e}')
+        return None
+
+
 @bp.route('/api/stocks/<int:stock_id>/analyze', methods=['POST'])
 def api_analyze_stock(stock_id):
     """执行四维分析引擎评分（统一走 advisor.generate_advice 入口，与每日报告一致）"""
@@ -433,6 +471,8 @@ def api_get_report_latest(stock_id):
     result['fundamental_detail'] = _fundamental_detail_for_stock(stock_id)
     # 020R-38：资金面指标明细（主力/北向/两融，供资金面卡展示）
     result['capital_detail'] = _capital_detail_for_stock(stock_id)
+    # 020R-39：消息面指标明细（情绪/股东行为，供消息面卡展示）
+    result['news_detail'] = _news_detail_for_stock(stock_id)
 
     return jsonify(result)
 
@@ -464,6 +504,8 @@ def api_advise_stock(stock_id):
             result['fundamental_detail'] = _fundamental_detail_for_stock(stock_id)
             # 020R-38：资金面指标明细（主力/北向/两融）
             result['capital_detail'] = _capital_detail_for_stock(stock_id)
+            # 020R-39：消息面指标明细（情绪/股东行为）
+            result['news_detail'] = _news_detail_for_stock(stock_id)
         return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'message': f'建议生成失败: {e!s}'}), 500
