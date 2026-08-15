@@ -7,14 +7,16 @@
 持续补采机制，直到数据完整。
 
 策略：
-1. 工作日每 30 分钟检测一次缺口（threading.Timer 串联，不重叠）
-2. 缺口维度判定（相对日期容忍周末/节假日）：
-   - kline      : 最新K线 < 3 天前（缺失）
+1. 每 30 分钟检测一次缺口（threading.Timer 串联，不重叠）
+2. 缺口维度判定（020H：基于"全市场 K 线并集"的交易日历，覆盖近 10 个交易日）：
+   - kline      : 近 10 个交易日中任一交易日缺失该股 K 线
+   - capital    : 近 10 个交易日中任一交易日缺失该股主力净流入（真实数据行）
+   - ths        : 最新交易日缺失同花顺辅助净额（仅 A 股；随本轮批量刷新一次）
    - fundamental: 完全无数据（增量 TTL 门控负责新鲜度）
-   - capital    : 当日无资金面数据（盘后东财出当日数据；盘前判定会自然退避）
    - news       : 3 天内无消息面聚合
 3. 每轮最多补 MAX_PER_ROUND 只（按缺口维度数优先），
-   复用 collect_stock_data 统一入口（内部增量门控跳过新鲜维度）
+   复用 collect_stock_data 统一入口（内部增量门控跳过新鲜维度）；
+   同花顺净额由本轮一次性批量刷新（fetch_capital_flow_batch）。
 4. 退避：本轮失败率 >= 80% → 间隔翻倍（30→60→120 分钟上限）；
    有成功 → 重置 30 分钟
 5. 全部完整 → 降为 4 小时低频巡检；新缺口出现 → 恢复 30 分钟
@@ -26,13 +28,10 @@
 import atexit
 import logging
 import threading
-from datetime import datetime, timedelta, timezone
 
 from database.db_manager import get_connection
 
 logger = logging.getLogger(__name__)
-
-_CN_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
 
 # ============================================================
 # 策略参数（可调）
@@ -42,6 +41,7 @@ MAX_INTERVAL_MIN = 120   # 退避间隔上限（分钟）
 IDLE_INTERVAL_MIN = 240  # 全部完整后的低频巡检间隔（分钟）
 MAX_PER_ROUND = 5        # 每轮最多补采股票数
 FAIL_RATE_TO_BACKOFF = 0.8  # 本轮失败率 >= 此值时触发退避
+GAP_WINDOW_TRADING_DAYS = 10  # 020H：完整性校验窗口（近 N 个交易日）
 
 # ============================================================
 # 调度器状态
@@ -50,6 +50,25 @@ _scheduler_started = False
 _timer = None
 _backoff_min = BASE_INTERVAL_MIN
 _atexit_registered = False
+
+
+def _recent_trading_days(n=GAP_WINDOW_TRADING_DAYS):
+    """以全市场 K 线日期并集为交易日历，返回最近 n 个交易日（ISO 日期，降序）。
+
+    并集口径：任一股票出现过的交易日即计入日历——个别股票 K 线滞后
+    不影响日历完整性；周末/节假日天然不含行（非交易日），
+    因此资金面/K线缺口判定不再受"自然日当天无数据"误判。
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT DISTINCT substr(trade_date, 1, 10) AS d FROM raw_kline "
+        "WHERE trade_date >= date('now', 'localtime', '-40 day') "
+        "ORDER BY d DESC"
+    )
+    days = [r['d'] for r in cursor.fetchall()]
+    conn.close()
+    return days[:n]
 
 
 def _get_stocks_with_gaps():
@@ -64,53 +83,69 @@ def _get_stocks_with_gaps():
     """
     conn = get_connection()
     cursor = conn.cursor()
+    cal = _recent_trading_days()
+    if not cal:
+        logger.warning('[补采] 未获取到交易日历（K线数据为空），跳过本轮')
+        return {}
+    latest_td = cal[0]
+    oldest_td = cal[-1]
+
     cursor.execute(
-        """
-        SELECT s.id, s.symbol, s.name, s.market,
-               (SELECT MAX(k.trade_date) FROM raw_kline k WHERE k.stock_id = s.id) AS latest_kline,
-               EXISTS(SELECT 1 FROM raw_fundamental f WHERE f.stock_id = s.id) AS has_fund,
-               EXISTS(SELECT 1 FROM raw_capital_flow rc
-                      WHERE rc.stock_id = s.id AND rc.trade_date = date('now', 'localtime')) AS has_capital_today,
-               EXISTS(SELECT 1 FROM news_sentiment ns
-                      WHERE ns.stock_id = s.id AND ns.news_date >= date('now', 'localtime', '-3 day')) AS has_news_recent
-        FROM stocks s
-        WHERE s.status = 'active'
-        ORDER BY s.id
-        """
+        "SELECT id, symbol, name, market FROM stocks WHERE status='active' ORDER BY id"
     )
-    rows = [dict(r) for r in cursor.fetchall()]
+    stocks = [dict(r) for r in cursor.fetchall()]
     conn.close()
 
-    today = datetime.now(_CN_TZ).date()
-    kline_cutoff = (today - timedelta(days=3)).isoformat()
-
     gaps = {}
-    for r in rows:
+    conn = get_connection()
+    cursor = conn.cursor()
+    for s in stocks:
         dims = []
-        latest_kline = str(r['latest_kline'] or '')[:10]
-        if not latest_kline or latest_kline < kline_cutoff:
+        kd = {r['d'] for r in cursor.execute(
+            "SELECT DISTINCT substr(trade_date, 1, 10) d FROM raw_kline "
+            "WHERE stock_id=? AND trade_date>=?", (s['id'], oldest_td))}
+        if any(d not in kd for d in cal):
             dims.append('kline')
-        if not r['has_fund']:
-            dims.append('fundamental')
-        if not r['has_capital_today']:
+        cd = {r['d'] for r in cursor.execute(
+            "SELECT DISTINCT substr(trade_date, 1, 10) d FROM raw_capital_flow "
+            "WHERE stock_id=? AND main_net_inflow IS NOT NULL AND trade_date>=?",
+            (s['id'], oldest_td))}
+        miss_c = [d for d in cal if d not in cd]
+        if miss_c:
             dims.append('capital')
-        if not r['has_news_recent']:
+        if s['market'] == 'a_stock':
+            has_ths = cursor.execute(
+                'SELECT 1 FROM raw_capital_flow WHERE stock_id=? AND trade_date=? '
+                'AND ths_net_inflow IS NOT NULL', (s['id'], latest_td)).fetchone()
+            if not has_ths:
+                dims.append('ths')
+        if not cursor.execute(
+            'SELECT 1 FROM raw_fundamental f WHERE f.stock_id=?', (s['id'],)
+        ).fetchone():
+            dims.append('fundamental')
+        if not cursor.execute(
+            "SELECT 1 FROM news_sentiment ns WHERE ns.stock_id=? "
+            "AND ns.news_date >= date('now', 'localtime', '-3 day')", (s['id'],)
+        ).fetchone():
             dims.append('news')
         if dims:
-            gaps[r['id']] = {
-                'symbol': r['symbol'],
-                'name': r['name'],
-                'market': r['market'],
+            gaps[s['id']] = {
+                'symbol': s['symbol'],
+                'name': s['name'],
+                'market': s['market'],
                 'dims': dims,
+                'capital_dates': miss_c if 'capital' in dims else [],
             }
+    conn.close()
     return gaps
 
 
-def _collect_one(stock_id, symbol, market):
+def _collect_one(stock_id, symbol, market, missing_cap_dates=None):
     """对单只股票执行补采（复用 collect_stock_data 增量门控）。
 
     与日报流程互斥写库：复用 daily_report._generate_lock（短超时）。
     返回 True 表示本轮采集无 failed 维度。
+    020H：东财熔断期间，若该股存在资金面历史缺口日，追加新浪逐日回填。
     """
     from modules.daily_report import _generate_lock
 
@@ -121,13 +156,26 @@ def _collect_one(stock_id, symbol, market):
         from modules.data_collector import collect_stock_data
 
         result = collect_stock_data(symbol, market)
-        # 判定成功：各维度值均不以 'failed' 开头（值形如 ('ok', msg) / ('failed', msg)）
-        if not isinstance(result, dict):
-            return False
-        failed = [
-            k for k, v in result.items()
-            if isinstance(v, (tuple, list)) and v and str(v[0]).startswith('failed')
-        ]
+        failed = []
+        if isinstance(result, dict):
+            failed = [
+                k for k, v in result.items()
+                if isinstance(v, (tuple, list)) and v and str(v[0]).startswith('failed')
+            ]
+
+        # 020H：东财熔断期间逐日回填历史资金面缺口（新浪 lscjfb）
+        if missing_cap_dates:
+            try:
+                import modules.data_collector as dc
+
+                if dc._em_banned():
+                    filled = dc.backfill_capital_history(symbol, market, missing_cap_dates)
+                    logger.info(
+                        f'[补采] {symbol} 历史资金面逐日回填: {len(filled)}/{len(missing_cap_dates)} 天'
+                    )
+            except Exception as e:
+                logger.warning(f'[补采] {symbol} 历史资金面回填异常: {e}')
+
         if failed:
             logger.warning(f'[补采] {symbol} 本轮仍有失败维度: {failed}')
             return False
@@ -149,6 +197,21 @@ def _tick():
             _schedule_next(IDLE_INTERVAL_MIN)
             return
 
+        # 020H：同花顺净额缺口 → 本轮一次性批量刷新（一次 HTTP 调用覆盖指定 A 股；
+        # 周末由 fetch_capital_flow_batch 内部 019G 校验自动跳过）
+        ths_symbols = [
+            v['symbol'] for v in gaps.values()
+            if v['market'] == 'a_stock' and 'ths' in v['dims']
+        ]
+        if ths_symbols:
+            try:
+                from modules.data_collector import fetch_capital_flow_batch
+
+                batch = fetch_capital_flow_batch(ths_symbols)
+                logger.info('[补采] 同花顺批量已随本轮刷新: %s', batch.get('source', ''))
+            except Exception as e:
+                logger.warning(f'[补采] 同花顺批量刷新失败: {e}')
+
         # 按缺口维度数排序，本轮取前 MAX_PER_ROUND 只
         ranked = sorted(
             gaps.items(), key=lambda kv: (len(kv[1]['dims']), kv[0]), reverse=True
@@ -161,7 +224,10 @@ def _tick():
 
         ok = fail = 0
         for stock_id, info in ranked:
-            if _collect_one(stock_id, info['symbol'], info['market']):
+            if _collect_one(
+                stock_id, info['symbol'], info['market'],
+                missing_cap_dates=info.get('capital_dates') or [],
+            ):
                 ok += 1
             else:
                 fail += 1

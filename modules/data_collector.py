@@ -3501,6 +3501,67 @@ def _fetch_capital_flow_sina_main(symbol, market, target_date=None):
         time.sleep(_random.uniform(0.5, 1.0))
 
 
+def backfill_capital_history(symbol, market, dates):
+    """020H：逐日回补资金面历史缺口（新浪 lscjfb target_date 逐日顶替）。
+
+    供补采调度器在东财不可用（熔断）期间回填近 10 个交易日的历史缺失日；
+    EM 恢复后 push2his 120 天历史会自动覆盖回补（顶替行不阻断 EM 回填）。
+    返回成功回补的日期列表。
+    """
+    stock_id = get_stock_id(symbol, market)
+    if not stock_id:
+        return []
+    filled = []
+    for d in dates:
+        try:
+            row = _fetch_capital_flow_sina_main(symbol, market, target_date=d)
+            if not row:
+                logger.info(f'[{symbol}] 历史资金面回补 {d}: 新浪无该日数据，跳过')
+                continue
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                'UPDATE raw_capital_flow SET main_net_inflow=?, super_large_net=?, '
+                'large_net=?, medium_net=?, small_net=?, is_estimated=0, capital_source=? '
+                'WHERE stock_id=? AND trade_date=?',
+                (
+                    row['main_net_inflow'],
+                    row['super_large_net'],
+                    row['large_net'],
+                    row['medium_net'],
+                    row['small_net'],
+                    'sina_main',
+                    stock_id,
+                    d,
+                ),
+            )
+            if cur.rowcount == 0:
+                cur.execute(
+                    'INSERT OR IGNORE INTO raw_capital_flow '
+                    '(stock_id, trade_date, main_net_inflow, super_large_net, large_net, '
+                    'medium_net, small_net, is_estimated, capital_source) '
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'sina_main')",
+                    (
+                        stock_id,
+                        d,
+                        row['main_net_inflow'],
+                        row['super_large_net'],
+                        row['large_net'],
+                        row['medium_net'],
+                        row['small_net'],
+                    ),
+                )
+            conn.commit()
+            conn.close()
+            filled.append(d)
+            logger.info(
+                f'[{symbol}] 历史资金面回补成功: {d} 主力={row["main_net_inflow"]}万(sina_main)'
+            )
+        except Exception as e:
+            logger.warning(f'[{symbol}] 历史资金面回补 {d} 失败: {e}')
+    return filled
+
+
 def fetch_capital_flow(symbol, market):
     """
     采集资金面数据。
