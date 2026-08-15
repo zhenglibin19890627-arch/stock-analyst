@@ -912,9 +912,9 @@
         /* 020Q: 网格计划紧凑窄表（表头灰底、价位右对齐、档位/仓位居中、说明靠左） */
         .pa-grid-title { margin: 10px 0 6px; font-size: 13px; font-weight: 600; color: #22262b; }
         .pa-grid-table {
-            width: auto;
+            width: 100%;
             max-width: none;
-            margin: 0 auto 10px;
+            margin: 0 0 10px;
             border-collapse: collapse;
             font-size: 12.5px;
             background: #fff;
