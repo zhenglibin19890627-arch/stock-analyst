@@ -3014,61 +3014,56 @@
                 html += '<div class="advice-section">';
                 html += '<div class="advice-section-title" style="color:#e65100;">💰 价格建议' +
                         (pa.has_position ? '（持仓中）' : '（当前无持仓）') + '</div>';
-                html += '<table class="price-advice-table">';
+                // 020Q：紧凑卡片式键值行（标签左、数值右，限宽不铺满）
+                html += '<div class="pa-kv-wrap">';
 
                 if (pa.has_position) {
-                    // 有持仓：成本价/当前价/浮盈/状态/止盈/止损/操作建议
-                    html += '<tr><td class="pa-label">成本价</td><td class="pa-value">' +
-                            pa.cost_price.toFixed(2) + '</td>';
-                    html += '<td class="pa-label">当前价</td><td class="pa-value">' +
-                            pa.current_close.toFixed(2) + '</td></tr>';
                     var profitClass = pa.profit_pct >= 0 ? 'pa-up' : 'pa-down';
-                    html += '<tr><td class="pa-label">浮盈</td><td class="pa-value ' + profitClass + '">' +
-                            (pa.profit_pct >= 0 ? '+' : '') + pa.profit_pct.toFixed(1) + '%</td>';
                     var stateCls = _paStateCls[pa.state] || '';
-                    html += '<td class="pa-label">状态</td><td class="pa-value ' + stateCls + '">' +
-                            (pa.state_name || '') + '</td></tr>';
-                    html += '<tr><td class="pa-label">止盈价</td><td class="pa-value pa-up">' +
-                            pa.take_profit.toFixed(2) + '</td>';
-                    html += '<td class="pa-label">止损价</td><td class="pa-value pa-down">' +
-                            pa.stop_loss.toFixed(2) + '</td></tr>';
-                    html += '<tr><td class="pa-label">操作建议</td><td class="pa-value" colspan="3" style="text-align:left;">' +
-                            (pa.action_suggestion || '') + '</td></tr>';
+                    html += '<div class="pa-kv-row"><span class="pa-kv-label">成本价</span><span class="pa-kv-value">' + pa.cost_price.toFixed(2) + '</span></div>';
+                    html += '<div class="pa-kv-row"><span class="pa-kv-label">当前价</span><span class="pa-kv-value">' + pa.current_close.toFixed(2) + '</span></div>';
+                    html += '<div class="pa-kv-row"><span class="pa-kv-label">浮盈</span><span class="pa-kv-value ' + profitClass + '">' +
+                            (pa.profit_pct >= 0 ? '+' : '') + pa.profit_pct.toFixed(1) + '%</span></div>';
+                    html += '<div class="pa-kv-row"><span class="pa-kv-label">状态</span><span class="pa-kv-value ' + stateCls + '">' +
+                            (pa.state_name || '') + '</span></div>';
+                    html += '<div class="pa-kv-row"><span class="pa-kv-label">止盈价</span><span class="pa-kv-value pa-up">' +
+                            pa.take_profit.toFixed(2) + '</span></div>';
+                    html += '<div class="pa-kv-row"><span class="pa-kv-label">止损价</span><span class="pa-kv-value pa-down">' +
+                            pa.stop_loss.toFixed(2) + '</span></div>';
+                    html += '<div class="pa-kv-row pa-kv-action"><span class="pa-kv-label">操作建议</span><span class="pa-kv-value">' +
+                            (pa.action_suggestion || '') + '</span></div>';
                 } else {
-                    // 无持仓：建议仓位/评级/买入区间/当前价/目标价/止损价/操作建议
-                    html += '<tr><td class="pa-label">建议仓位</td><td class="pa-value">' +
-                            pa.position_pct + '%</td>';
-                    html += '<td class="pa-label">评级</td><td class="pa-value">' +
-                            (adviseData.rating || '') + '</td></tr>';
-                    html += '<tr><td class="pa-label">买入区间</td><td class="pa-value">' +
-                            pa.buy_range_low.toFixed(2) + ' - ' + pa.buy_range_high.toFixed(2) + '</td>';
-                    html += '<td class="pa-label">当前价</td><td class="pa-value">' +
-                            pa.current_close.toFixed(2) + '</td></tr>';
-                    html += '<tr><td class="pa-label">目标价</td><td class="pa-value pa-up">' +
-                            pa.target_price.toFixed(2) + '</td>';
-                    html += '<td class="pa-label">止损价</td><td class="pa-value pa-down">' +
-                            pa.stop_loss.toFixed(2) + '</td></tr>';
-                    html += '<tr><td class="pa-label">操作建议</td><td class="pa-value" colspan="3" style="text-align:left;">' +
-                            (pa.action_suggestion || '') + '</td></tr>';
+                    html += '<div class="pa-kv-row"><span class="pa-kv-label">建议仓位</span><span class="pa-kv-value">' +
+                            pa.position_pct + '%</span></div>';
+                    html += '<div class="pa-kv-row"><span class="pa-kv-label">评级</span><span class="pa-kv-value">' +
+                            (adviseData.rating || '') + '</span></div>';
+                    html += '<div class="pa-kv-row"><span class="pa-kv-label">买入区间</span><span class="pa-kv-value">' +
+                            pa.buy_range_low.toFixed(2) + ' - ' + pa.buy_range_high.toFixed(2) + '</span></div>';
+                    html += '<div class="pa-kv-row"><span class="pa-kv-label">当前价</span><span class="pa-kv-value">' +
+                            pa.current_close.toFixed(2) + '</span></div>';
+                    html += '<div class="pa-kv-row"><span class="pa-kv-label">目标价</span><span class="pa-kv-value pa-up">' +
+                            pa.target_price.toFixed(2) + '</span></div>';
+                    html += '<div class="pa-kv-row"><span class="pa-kv-label">止损价</span><span class="pa-kv-value pa-down">' +
+                            pa.stop_loss.toFixed(2) + '</span></div>';
+                    html += '<div class="pa-kv-row pa-kv-action"><span class="pa-kv-label">操作建议</span><span class="pa-kv-value">' +
+                            (pa.action_suggestion || '') + '</span></div>';
                 }
 
-                html += '</table>';
+                html += '</div>';
 
-                // 009: 网格计划表格
+                // 009: 网格计划表格（020Q：紧凑窄表）
                 if (pa.grid && pa.grid.length > 0) {
-                    html += '<div style="margin-top:12px;margin-bottom:8px;font-size:14px;font-weight:600;color:#333;">📊 ' +
+                    html += '<div class="pa-grid-title">📊 ' +
                             (pa.has_position ? '操作网格计划' : '网格买入计划') + '</div>';
-                    html += '<table class="price-advice-table pa-grid-table">';
-                    html += '<tr><td class="pa-label">档位</td><td class="pa-label">' +
-                            (pa.has_position ? '价位' : '买入价位') + '</td><td class="pa-label">仓位</td><td class="pa-label">说明</td></tr>';
+                    html += '<table class="pa-grid-table"><thead><tr><th>档位</th><th>价位</th><th>仓位</th><th>说明</th></tr></thead><tbody>';
                     pa.grid.forEach(function(g) {
                         var typeCls = _paGridCls[g.type] || '';
-                        html += '<tr><td class="pa-value">' + g.level + '</td>';
-                        html += '<td class="pa-value ' + typeCls + '">' + g.price.toFixed(2) + '</td>';
-                        html += '<td class="pa-value">' + g.pct + '%</td>';
-                        html += '<td class="pa-value" style="text-align:left;">' + g.label + '</td></tr>';
+                        html += '<tr><td>' + g.level + '</td>';
+                        html += '<td class="' + typeCls + '">' + g.price.toFixed(2) + '</td>';
+                        html += '<td>' + g.pct + '%</td>';
+                        html += '<td>' + g.label + '</td></tr>';
                     });
-                    html += '</table>';
+                    html += '</tbody></table>';
                 }
 
                 // 009: 资金面信号

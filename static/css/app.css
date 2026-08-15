@@ -826,45 +826,70 @@
             color: #c62828;
         }
         .risk-list li:before { content: "⚠ "; }
-        /* 005: 价格建议表格样式 */
-        .price-advice-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 8px;
-            font-size: 14px;
+        /* 020Q: 价格建议紧凑卡片（键值行：标签左灰、数值右对齐、限宽不铺满） */
+        .pa-kv-wrap {
+            max-width: 440px;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 10px;
+            font-size: 13px;
+            background: #fff;
         }
-        .price-advice-table td {
-            padding: 8px 12px;
-            border: 1px solid #e0e0e0;
+        .pa-kv-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            padding: 5px 12px;
+            border-bottom: 1px solid #f2f3f5;
         }
-        .price-advice-table .pa-label {
-            background: #f5f5f5;
-            font-weight: 600;
-            color: #666;
-            width: 18%;
-            white-space: nowrap;
-        }
-        .price-advice-table .pa-value {
-            color: #333;
-            width: 32%;
-            text-align: center;
-        }
-        .price-advice-table .pa-up { color: #d32f2f; font-weight: 700; }
-        .price-advice-table .pa-down { color: #388e3c; font-weight: 700; }
+        .pa-kv-row:last-child { border-bottom: none; }
+        .pa-kv-label { color: #8a8f98; font-size: 12px; white-space: nowrap; }
+        .pa-kv-value { color: #333; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+        .pa-kv-action { background: #fff7ef; }
+        .pa-kv-action .pa-kv-value { color: #e65100; }
+        .pa-kv-wrap .pa-up { color: #d32f2f; font-weight: 700; }
+        .pa-kv-wrap .pa-down { color: #388e3c; font-weight: 700; }
+        .pa-kv-wrap .pa-up-light { color: #ef5350; font-weight: 600; }
+        .pa-kv-wrap .pa-warning { color: #ff9800; font-weight: 700; }
         .price-advice-disclaimer {
             font-size: 12px;
             color: #999;
             margin-top: 6px;
             line-height: 1.6;
         }
-        /* 009: 价格建议增强样式 */
-        .price-advice-table .pa-up-light { color: #ef5350; font-weight: 600; }
-        .price-advice-table .pa-warning { color: #ff9800; font-weight: 700; }
-        .price-advice-table .pa-buy { color: #1976d2; font-weight: 600; }
-        .price-advice-table .pa-reduce { color: #ff9800; font-weight: 600; }
-        .price-advice-table .pa-add { color: #7b1fa2; font-weight: 600; }
-        .pa-grid-table { font-size: 13px; }
-        .pa-grid-table .pa-label { width: auto; }
+        /* 020Q: 网格计划紧凑窄表（表头灰底、价位右对齐、档位/仓位居中、说明靠左） */
+        .pa-grid-title { margin: 10px 0 6px; font-size: 13px; font-weight: 600; color: #333; }
+        .pa-grid-table {
+            width: 100%;
+            max-width: 440px;
+            border-collapse: collapse;
+            font-size: 12.5px;
+            margin-bottom: 10px;
+            background: #fff;
+        }
+        .pa-grid-table th {
+            background: #f7f8fa;
+            color: #8a8f98;
+            font-weight: 600;
+            font-size: 12px;
+            padding: 5px 8px;
+            border: 1px solid #e5e7eb;
+            text-align: center;
+        }
+        .pa-grid-table td {
+            padding: 4px 8px;
+            border: 1px solid #eef0f3;
+            color: #333;
+        }
+        .pa-grid-table td:nth-child(1) { text-align: center; width: 12%; color: #999; font-size: 12px; }
+        .pa-grid-table td:nth-child(2) { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+        .pa-grid-table td:nth-child(3) { text-align: center; width: 15%; }
+        .pa-grid-table td:nth-child(4) { text-align: left; }
+        .pa-grid-table .pa-buy { color: #1976d2; }
+        .pa-grid-table .pa-reduce { color: #ff9800; }
+        .pa-grid-table .pa-add { color: #7b1fa2; }
         .pa-capital-signal {
             margin-top: 8px; padding: 6px 12px;
             background: #fff3e0; border-radius: 4px; font-size: 13px;
