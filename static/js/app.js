@@ -3188,7 +3188,8 @@
 
     function generateDailyReport() {
         var btn = document.getElementById('dailyGenBtn');
-        var container = document.getElementById('dailyContent');
+        var container = document.getElementById('dailyGenStatus');
+        if (!container) return;
         var forceCheckbox = document.getElementById('dailyForceRefresh');
         var forceRefresh = forceCheckbox ? forceCheckbox.checked : false;
         if (btn) { btn.disabled = true; btn.textContent = '⏳ 生成中...'; }
@@ -3299,7 +3300,8 @@
 
     function generateIntradayReport() {
         var btn = document.getElementById('intradayGenBtn');
-        var container = document.getElementById('dailyContent');
+        var container = document.getElementById('dailyGenStatus');
+        if (!container) return;
         if (btn) { btn.disabled = true; btn.textContent = '⏳ 生成中...'; }
         // 动效：立即渲染初始进度面板 + 每 1.5 秒轮询进度接口（能看到当前在做什么、做到哪一步）
         var pollTimer = setInterval(function() { pollReportProgress(container, pollTimer, '盘中快报'); }, 1500);
@@ -3344,6 +3346,7 @@
 
     function loadLatestDailyReport() {
         var container = document.getElementById('dailyContent');
+        if (!container) return; // 日报已融合到看板，无独立容器时不再渲染
         container.innerHTML = '<div class="report-loading">加载中...</div>';
 
         fetch('/api/daily-report/latest')
@@ -3370,76 +3373,40 @@
     }
 
     function renderDailyReport(genResult) {
-        var container = document.getElementById('dailyContent');
-        var results = genResult.results || [];
-        var html = '';
-
-        // 013: 报告类型徽标
+        // 看板融合版：生成结果以紧凑提示显示在批量评分表上方，随后自动刷新表格
+        var container = document.getElementById('dailyGenStatus');
+        if (!container) return;
         var isintraday = genResult.report_type === 'intraday';
-        var typeBadge = isintraday
-            ? '<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:#f39c12;color:#fff;font-size:12px;font-weight:600;margin-left:8px;">盘中快报</span>'
-            : '<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:#1a73e8;color:#fff;font-size:12px;font-weight:600;margin-left:8px;">收盘报告</span>';
-
-        // 操作栏
-        html += '<div class="report-actions">';
-        html += '<button class="report-back-btn" onclick="generateDailyReport()">🔄 重新生成</button>';
-        html += '<span style="color:#888;font-size:13px;">报告日期：' + genResult.report_date + typeBadge + '</span>';
-        if (genResult.finished_at) {
-            html += '<span style="color:#888;font-size:13px;margin-left:15px;">生成时间：' + _fmtGenTime(genResult.finished_at) + '</span>';
-        }
-        html += '</div>';
-
-        // 汇总卡片标题也标注类型
-        html += '<div class="card" style="margin-bottom:16px;">';
-        html += '<div class="card-title">📊 ' + (isintraday ? '盘中快报生成汇总' : '生成汇总') + '</div>';
-        html += '<div class="view-summary">';
-        html += '<div class="view-summary-card"><div class="label">总股票数</div><div class="value" style="color:#333;">' + genResult.total + '</div></div>';
-        html += '<div class="view-summary-card"><div class="label">成功生成</div><div class="value" style="color:#27ae60;">' + genResult.success_count + '</div></div>';
-        html += '<div class="view-summary-card"><div class="label">失败</div><div class="value" style="color:' + (genResult.fail_count > 0 ? '#e74c3c' : '#aaa') + ';">' + genResult.fail_count + '</div></div>';
-        html += '<div class="view-summary-card"><div class="label">v5引擎</div><div class="value" style="color:#1a73e8;">' + genResult.v5_count + '</div></div>';
-        html += '<div class="view-summary-card"><div class="label">经典引擎</div><div class="value" style="color:#888;">' + genResult.legacy_count + '</div></div>';
-        html += '<div class="view-summary-card"><div class="label">fallback</div><div class="value" style="color:' + (genResult.fallback_count > 0 ? '#e74c3c' : '#aaa') + ';">' + genResult.fallback_count + '</div></div>';
-        html += '</div>';
-        // B15-T2: 复用统计提示
+        var typeLabel = isintraday ? '盘中快报' : '收盘报告';
         var reuseCount = genResult.reuse_count || 0;
         var newCount = genResult.success_count - reuseCount;
-        html += '<div style="margin-top:10px;padding:8px 12px;background:#f0f9ff;border-radius:6px;font-size:13px;color:#1a73e8;">' +
-                '✅ 完成：复用 ' + reuseCount + ' 只 / 新分析 ' + newCount + ' 只 / 失败 ' + genResult.fail_count + ' 只</div>';
-        html += '</div>';
+        container.innerHTML =
+            '<div style="margin-bottom:12px;padding:10px 14px;background:#f0f9ff;border:1px solid #cfe7ff;border-radius:8px;font-size:13px;color:#1a5276;">' +
+            '✅ <strong>' + typeLabel + '</strong>（' + (genResult.report_date || '') + '）生成完成：复用 ' + reuseCount +
+            ' 只 / 新分析 ' + newCount + ' 只 / 失败 ' + genResult.fail_count + ' 只，下方表格已刷新' +
+            '</div>';
+        refreshDashboardData();
+    }
 
-        // 股票列表表格
-        html += '<div class="card">';
-        html += '<div class="card-title">📋 评分概览</div>';
-        html += '<table class="data-table" style="width:100%;border-collapse:collapse;">';
-        html += '<thead><tr style="background:#f5f5f5;text-align:left;">';
-        html += '<th style="padding:8px;border-bottom:2px solid #ddd;">股票</th>';
-        html += '<th style="padding:8px;border-bottom:2px solid #ddd;">引擎</th>';
-        html += '<th style="padding:8px;border-bottom:2px solid #ddd;">总分</th>';
-        html += '<th style="padding:8px;border-bottom:2px solid #ddd;">评级</th>';
-        html += '<th style="padding:8px;border-bottom:2px solid #ddd;">状态</th>';
-        html += '</tr></thead><tbody>';
-
-        results.forEach(function(r) {
-            var engineTag = r.engine === 'v5'
-                ? '<span style="color:#1a73e8;font-weight:600;">🚀 v5</span>'
-                : '<span style="color:#888;">⚙️ 经典</span>';
-            var statusTag = r.status === 'ok'
-                ? '<span style="color:#27ae60;">✅</span>'
-                : '<span style="color:#e74c3c;">❌ ' + (r.error || '').substring(0, 30) + '</span>';
-            var scoreStr = r.score != null ? r.score.toFixed(1) : '—';
-            html += '<tr style="border-bottom:1px solid #eee;">';
-            html += '<td style="padding:8px;"><strong>' + (r.name || '') + '</strong><br><span style="color:#888;font-size:12px;">' + r.symbol + '</span></td>';
-            html += '<td style="padding:8px;">' + engineTag + '</td>';
-            html += '<td style="padding:8px;font-size:16px;font-weight:700;color:' + _scoreColor(r.score || 0) + ';">' + scoreStr + '</td>';
-            html += '<td style="padding:8px;"><span class="rating-badge ' + getRatingClass(r.rating) + '" title="' + getRatingTitle(r.rating) + '">' + (r.rating || '—') + '</span></td>';
-            html += '<td style="padding:8px;">' + statusTag + '</td>';
-            html += '</tr>';
-        });
-
-        html += '</tbody></table>';
-        html += '</div>';
-
-        container.innerHTML = html;
+    /** 生成报告后轻量刷新看板表格与图表（保留表头提示信息，不整页重渲染） */
+    function refreshDashboardData() {
+        var summaryPromise = fetch('/api/portfolio/summary').then(function(r) { return safeJson(r); });
+        var scoresPromise  = fetch('/api/portfolio/watchlist-scores').then(function(r) { return safeJson(r); });
+        Promise.all([summaryPromise, scoresPromise])
+            .then(function(results) {
+                var summary = results[0];
+                var scores = results[1];
+                if (!scores.success || !_dashData) return;
+                _dashData.summary = summary;
+                _dashData.stocks = scores.stocks || [];
+                _dashData.reportDate = scores.report_date;
+                _dashData.reportDateMin = scores.report_date_min;
+                _dashData.generatedAt = scores.generated_at;
+                if (scores.report_date) window._currentDailyDate = scores.report_date;
+                dashRenderTable(_dashData.stocks);
+                dashRenderCharts(_dashData.stocks, summary);
+            })
+            .catch(function(e) { console.error('refreshDashboardData:', e); });
     }
 
     function renderDailyReportList(reportDate, reports) {
@@ -3616,8 +3583,17 @@
         html += '<span style="margin-left:auto;color:#888;font-size:13px;" id="dashFilterCount"></span>';
         html += '</div>';
 
-        // ---- 3. 批量评分表 ----
+        // ---- 3. 批量评分表（原每日报告评分概览表已并入本表） ----
         html += '<div class="card" style="margin-bottom:20px;">';
+        html += '<div class="card-title" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">';
+        html += '<span>📋 批量评分表 <span style="font-size:13px;color:#888;font-weight:normal;">（全部自选股最新评分，点击表头可排序）</span></span>';
+        html += '<span style="font-weight:normal;">';
+        html += '<button class="btn btn-primary btn-sm" id="dailyGenBtn" onclick="generateDailyReport()" title="盘后汇总，生成当日完整分析报告（含评分变动、降级提示）">🚀 生成今日报告</button>';
+        html += '<button class="btn btn-warning btn-sm" id="intradayGenBtn" onclick="generateIntradayReport()" style="margin-left:8px;" title="盘中实时刷新评分，快速查看当日盘中变化（不覆盖盘后日报）">📊 盘中快报</button>';
+        html += '<label style="margin-left:12px;font-size:13px;color:#666;cursor:pointer;font-weight:normal;" title="忽略已有结果，全部重新分析"><input type="checkbox" id="dailyForceRefresh" style="vertical-align:middle;"> 强制全量刷新</label>';
+        html += '</span></div>';
+        // 生成结果提示区（生成完成后自动刷新下方表格）
+        html += '<div id="dailyGenStatus"></div>';
         html += '<table class="data-table dash-table" style="width:100%;border-collapse:collapse;" id="dashTable">';
         html += '<thead><tr style="background:#f5f5f5;text-align:left;">';
         html += '<th style="padding:10px;border-bottom:2px solid #ddd;" onclick="dashSort(\'name\')">股票 ↕</th>';
@@ -3625,6 +3601,7 @@
         html += '<th style="padding:10px;border-bottom:2px solid #ddd;" onclick="dashSort(\'score\')" title="四维加权总分（满分100）：技术面+基本面+资金面+消息面">评分 ↕</th>';
         html += '<th style="padding:10px;border-bottom:2px solid #ddd;">评级</th>';
         html += '<th style="padding:10px;border-bottom:2px solid #ddd;" onclick="dashSort(\'change\')">较上期 ↕</th>';
+        html += '<th style="padding:10px;border-bottom:2px solid #ddd;" title="数据完整度：报告生成前对各维度数据新鲜度/来源的检查结果">数据</th>';
         html += '<th style="padding:10px;border-bottom:2px solid #ddd;">生成时间</th>';
         html += '<th style="padding:10px;border-bottom:2px solid #ddd;">报告日期</th>';
         html += '<th style="padding:10px;border-bottom:2px solid #ddd;">行业</th>';
@@ -3642,24 +3619,13 @@
         html += '<div class="card"><div class="card-title">📊 评级分布</div><div id="dashChartRating" style="width:100%;height:300px;"></div></div>';
         html += '</div>';
 
-        // ---- 5. 每日报告融合区（原「每日报告」页面并入总览看板） ----
-        html += '<div class="card">';
-        html += '<div class="card-title">📅 每日报告 <span style="font-size:13px;color:#888;font-weight:normal;">（全部自选股每日汇总，含评分变动、降级提示）</span></div>';
-        // 功能说明（今日报告 vs 盘中快报）
-        html += '<div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px;padding:10px 16px;background:#f8fbff;border:1px solid #e3edf7;border-radius:8px;font-size:13px;color:#555;">';
-        html += '<div><span style="font-weight:600;color:#1a73e8;">🚀 生成今日报告</span>：盘后汇总，生成当日完整分析报告（含评分变动、降级提示）</div>';
-        html += '<div><span style="font-weight:600;color:#f39c12;">📊 盘中快报</span>：盘中实时刷新评分，快速查看当日盘中变化（不覆盖盘后日报）</div>';
-        html += '</div>';
-        html += '<div id="dailyContent"><div class="report-loading">每日报告加载中...</div></div>';
-        html += '</div>';
-
         container.innerHTML = html;
 
         // 渲染表格和图表
         dashRenderTable(stocks);
         dashRenderCharts(stocks, s);
-        // 加载每日报告区
-        loadLatestDailyReport();
+        // 供「日报Excel」导出使用：记录当前报告日期
+        if (data.reportDate) window._currentDailyDate = data.reportDate;
     }
 
     function dashRenderTable(stocks) {
@@ -3679,6 +3645,13 @@
             }
             var mvStr = st.market_value != null ? formatCNY(st.market_value) : '—';
             var industryTag = st.industry === '未分类' ? '<span style="color:#f39c12;">⚠️ 未分类</span>' : st.industry;
+            // 数据完整度：从 data_warnings（JSON 字符串）判断是否存在 ⚠️ 项（原每日报告表列）
+            var dwList = [];
+            try { dwList = JSON.parse(st.data_warnings || '[]'); } catch (e) { dwList = []; }
+            var dataIssues = dwList.filter(function(w) { return /⚠️/.test(w); });
+            var dataTag = dataIssues.length > 0
+                ? '<span style="color:#e65100;font-weight:600;cursor:help;" title="' + dataIssues.map(function(w){return w.replace(/"/g,'&quot;');}).join('\n') + '">⚠️</span>'
+                : '<span style="color:#27ae60;cursor:help;" title="数据完整，无滞后/替代源问题">✓</span>';
 
             html += '<tr style="border-bottom:1px solid #eee;" id="dash-row-' + st.id + '">';
             html += '<td style="padding:10px;"><strong>' + (st.name || '') + obosBadge(st.obos_signal) + '</strong><br><span style="color:#888;font-size:12px;">' + st.symbol + '</span></td>';
@@ -3686,6 +3659,7 @@
             html += '<td style="padding:10px;font-size:16px;font-weight:700;color:' + _scoreColor(st.total_score || 0) + ';">' + scoreStr + '</td>';
             html += '<td style="padding:10px;"><span class="rating-badge ' + getRatingClass(st.rating) + '" title="' + getRatingTitle(st.rating) + '">' + (st.rating || '—') + '</span></td>';
             html += '<td style="padding:10px;">' + changeStr + '</td>';
+            html += '<td style="padding:10px;text-align:center;">' + dataTag + '</td>';
             html += '<td style="padding:10px;font-size:12px;color:#666;white-space:nowrap;">' + _fmtGenTime(st.generated_at) + '</td>';
             html += '<td style="padding:10px;font-size:12px;color:#888;white-space:nowrap;">' + (st.report_date || '<span style="color:#ccc;">暂无</span>') + '</td>';
             html += '<td style="padding:10px;font-size:13px;">' + industryTag + '</td>';

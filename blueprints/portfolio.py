@@ -297,7 +297,7 @@ def api_portfolio_watchlist_scores():
                pc.latest_price, pc.pct_change as price_pct_change,
                lr.engine_version, lr.total_score, lr.rating,
                lr.rating_label, lr.score_change, lr.prev_score,
-               lr.key_factors, lr.status as report_status, lr.generated_at,
+               lr.key_factors, lr.data_warnings, lr.status as report_status, lr.generated_at,
                lr.report_date
         FROM stocks s
         LEFT JOIN holdings h     ON s.id = h.stock_id
@@ -384,6 +384,7 @@ def api_portfolio_watchlist_scores():
                 'has_report': r.get('report_status') == 'ok',
                 'generated_at': r.get('generated_at'),
                 'report_date': r.get('report_date'),
+                'data_warnings': r.get('data_warnings'),
                 # DEV-TASKS-20260727-003：超买超卖信号（从 key_factors 派生，不暴露原始因子）
                 'obos_signal': _derive_obos_signal(r.get('key_factors')),
             }
