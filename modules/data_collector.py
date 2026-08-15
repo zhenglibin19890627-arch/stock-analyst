@@ -3544,7 +3544,8 @@ def backfill_capital_history(symbol, market, dates):
             conn = get_connection()
             cur = conn.cursor()
             cur.execute(
-                'UPDATE raw_capital_flow SET main_net_inflow=?, super_large_net=?, '
+                'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=NULL, '
+                'super_large_net=?, '
                 'large_net=?, medium_net=?, small_net=?, is_estimated=0, capital_source=? '
                 'WHERE stock_id=? AND trade_date=?',
                 (
@@ -3603,6 +3604,15 @@ def fetch_capital_flow(symbol, market):
     stock_id = get_stock_id(symbol, market)
     if not stock_id:
         return 'failed', f'数据库中未找到股票 {symbol}'
+
+    # 020L：周末守卫 — 周六/周日休市，资金面全链路跳过（东财/腾讯/新浪/估算各层）。
+    # 根因：周末定时日报仍逐只采集，估算兜底层把源返回日期写成非交易日脏行
+    # （实测 08-09 周日 23 行 is_estimated=1 脏数据，挤占前端 LIMIT 10 展示名额）。
+    # 与 019G 同花顺周末跳过同原则；周一开盘后自动恢复采集。
+    if datetime.now(_CN_TZ).weekday() >= 5:
+        logger.info(f'[{symbol}] 周末休市（weekday>=5），跳过资金面采集（020L）')
+        return 'skipped', '周末休市，跳过资金面采集'
+
     global _EM_CONSECUTIVE_FAIL_COUNT  # 020B：逐只链路复用进程级东财连续失败计数（熔断传播）
 
     warnings = []
