@@ -2896,6 +2896,23 @@
                 if (s < 0) return 'pa-warning';
                 return '';
             }
+            // 020R-11：先构建网格计划卡（首屏顺序：评分卡/雷达卡/网格计划/价格建议）
+            var gridSideHtml = '';
+            if (pa.grid && pa.grid.length > 0) {
+                gridSideHtml += '<div class="pa-side-card">';
+                gridSideHtml += '<div class="card-title" style="font-size:15px;margin-bottom:8px;">📊 ' +
+                        (pa.has_position ? '操作网格计划' : '网格买入计划') + '</div>';
+                gridSideHtml += '<table class="pa-grid-table"><thead><tr><th>档位</th><th>价位</th><th>仓位</th><th>说明</th></tr></thead><tbody>';
+                pa.grid.forEach(function(g) {
+                    var typeCls = _paGridCls[g.type] || '';
+                    gridSideHtml += '<tr><td>' + g.level + '</td>';
+                    gridSideHtml += '<td class="' + typeCls + '">' + g.price.toFixed(2) + '</td>';
+                    gridSideHtml += '<td>' + g.pct + '%</td>';
+                    gridSideHtml += '<td>' + g.label + '</td></tr>';
+                });
+                gridSideHtml += '</tbody></table>';
+                gridSideHtml += '</div>';
+            }
             paSideHtml += '<div class="pa-side-card">';
             if (pa.available) {
                 paSideHtml += '<div class="card-title" style="font-size:15px;margin-bottom:8px;color:#e65100;">💰 价格建议' +
@@ -2959,30 +2976,16 @@
 
                 paSideHtml += '<div class="price-advice-disclaimer">⚠️ 以上价格建议仅供参考，不构成投资建议。股市有风险，投资需谨慎。</div>';
                 paSideHtml += '</div>';
-
-                // 020R-8：网格计划独立卡片
-                if (pa.grid && pa.grid.length > 0) {
-                    paSideHtml += '<div class="pa-side-card">';
-                    paSideHtml += '<div class="card-title" style="font-size:15px;margin-bottom:8px;">📊 ' +
-                            (pa.has_position ? '操作网格计划' : '网格买入计划') + '</div>';
-                    paSideHtml += '<table class="pa-grid-table"><thead><tr><th>档位</th><th>价位</th><th>仓位</th><th>说明</th></tr></thead><tbody>';
-                    pa.grid.forEach(function(g) {
-                        var typeCls = _paGridCls[g.type] || '';
-                        paSideHtml += '<tr><td>' + g.level + '</td>';
-                        paSideHtml += '<td class="' + typeCls + '">' + g.price.toFixed(2) + '</td>';
-                        paSideHtml += '<td>' + g.pct + '%</td>';
-                        paSideHtml += '<td>' + g.label + '</td></tr>';
-                    });
-                    paSideHtml += '</tbody></table>';
-                    paSideHtml += '</div>';
-                }
             } else {
                 // available=false: 数据不足
                 paSideHtml += '<div class="card-title" style="font-size:15px;margin-bottom:8px;color:#e65100;">💰 价格建议</div>';
                 paSideHtml += '<div class="advice-detail-text" style="border-left-color:#999;color:#999;">' +
                         '数据不足，暂无价格建议' +
                         (pa.reason ? '（' + pa.reason + '）' : '') + '</div>';
+                paSideHtml += '</div>';
             }
+            // 020R-11：网格计划卡在前、价格建议卡在后
+            paSideHtml = gridSideHtml + paSideHtml;
         }
 
         html += '<div class="report-top-grid">';

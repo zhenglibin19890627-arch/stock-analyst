@@ -625,16 +625,17 @@
 
         .report-top-grid {
             display: grid;
-            grid-template-columns: 240px 280px minmax(300px, 1fr) minmax(280px, 1fr);
+            grid-template-columns: 300px 300px 300px minmax(320px, 1fr);
             gap: 12px;
             margin-bottom: 12px;
-            /* 020R-10：四卡等高（默认 stretch），评分卡内容垂直居中、雷达图弹性填满 */
+            /* 020R-11：前三个卡（评分/雷达/网格）等宽300px，价格建议自适应
+               （顺序：评分卡、雷达卡、网格计划、价格建议；四卡等高 stretch） */
         }
         @media (max-width: 1450px) {
-            .report-top-grid { grid-template-columns: 240px 280px 1fr 1fr; }
+            .report-top-grid { grid-template-columns: 300px 300px 300px 1fr; }
         }
-        @media (max-width: 1150px) {
-            .report-top-grid { grid-template-columns: 240px 1fr; }
+        @media (max-width: 1250px) {
+            .report-top-grid { grid-template-columns: 300px 1fr; }
             .pa-side-card { grid-column: auto; }
         }
         @media (max-width: 900px) {
