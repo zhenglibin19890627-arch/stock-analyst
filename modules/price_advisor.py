@@ -290,7 +290,12 @@ def _build_grid(
     """构建网格价位计划
 
     无持仓：3档买入网格（ATR*0.8间距）
-    有持仓：1补+3减网格（S4已破止损时跳过补仓位）
+    有持仓（020P）：
+      - 补仓位（add 10%）：现价下方 max(止损+0.5ATR, 现价-1ATR)，S4已破止损时跳过
+      - 浮亏且止盈目标 < 回本价：回本清仓位（100%）
+      - 浮亏且止盈目标 ≥ 回本价：回本减仓位（30%）→ 第一止盈位（50%）→ 最终止盈位（100%）
+      - 浮盈：第一止盈位（50%，现价+0.6ATR）→ 最终止盈位（100%）
+    全部卖出档位严格自下而上递增，锚定现价与成本孰高，不与止盈/止损档位倒挂。
     """
     grid = []
 
@@ -331,7 +336,7 @@ def _build_grid(
         )
 
     else:
-        # ---- 有持仓：补仓 + 减仓网格 ----
+        # ---- 有持仓：补仓 + 减仓网格（020P：分档与止盈/止损同源，锚定现价）----
         level = 1
 
         # 补仓位（S4已破止损时跳过，避免"破止损仍加仓"矛盾）
@@ -351,45 +356,66 @@ def _build_grid(
             )
             level += 1
 
-        # 回本减仓位
-        grid.append(
-            {
-                'level': level,
-                'price': round(cost_price, 2),
-                'pct': 30,
-                'type': 'reduce',
-                'label': '回本减仓位',
-            }
-        )
-        level += 1
+        _underwater = cost_price is not None and close < cost_price
 
-        # 第一止盈位
-        if atr and atr > 0:
-            tp1 = cost_price + atr * 0.6
-        else:
-            tp1 = cost_price * 1.03
-        if tp1 < take_profit - 0.01:
+        if _underwater and take_profit < cost_price:
+            # 浮亏且评级止盈目标低于回本价：回本即清仓（不设中间档，避免档位倒挂）
             grid.append(
                 {
                     'level': level,
-                    'price': round(tp1, 2),
-                    'pct': 50,
+                    'price': round(cost_price, 2),
+                    'pct': 100,
                     'type': 'reduce',
-                    'label': '第一止盈位',
+                    'label': '回本清仓位',
                 }
             )
-            level += 1
+        else:
+            if _underwater:
+                # 浮亏但止盈目标在回本价上方：先回本减仓，再向上分批止盈
+                grid.append(
+                    {
+                        'level': level,
+                        'price': round(cost_price, 2),
+                        'pct': 30,
+                        'type': 'reduce',
+                        'label': '回本减仓位',
+                    }
+                )
+                level += 1
+                if atr and atr > 0:
+                    tp1 = max(cost_price + atr * 0.6, close + atr * 0.6)
+                else:
+                    tp1 = max(cost_price * 1.03, close * 1.03)
+            else:
+                # 浮盈：现价上方直接分批止盈
+                if atr and atr > 0:
+                    tp1 = close + atr * 0.6
+                else:
+                    tp1 = close * 1.03
 
-        # 最终止盈位
-        grid.append(
-            {
-                'level': level,
-                'price': round(take_profit, 2),
-                'pct': 100,
-                'type': 'reduce',
-                'label': '最终止盈位',
-            }
-        )
+            # 第一止盈位（必须在最终止盈价下方才有意义）
+            if tp1 < take_profit - 0.01:
+                grid.append(
+                    {
+                        'level': level,
+                        'price': round(tp1, 2),
+                        'pct': 50,
+                        'type': 'reduce',
+                        'label': '第一止盈位',
+                    }
+                )
+                level += 1
+
+            # 最终止盈位
+            grid.append(
+                {
+                    'level': level,
+                    'price': round(take_profit, 2),
+                    'pct': 100,
+                    'type': 'reduce',
+                    'label': '最终止盈位',
+                }
+            )
 
     return grid
 
