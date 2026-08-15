@@ -593,16 +593,26 @@ def _build_data_freshness(stock_id):
     has_issue = False
     conn = get_connection()
 
+    # 020R-19：市场最新交易日 = 全部自选股K线日期最大值。
+    # 休市日（周末/节假日）数据至最新交易日即为"最新"，不再按自然日误报"滞后N天"。
+    _td_row = conn.execute(
+        "SELECT MAX(substr(trade_date, 1, 10)) d FROM raw_kline"
+    ).fetchone()
+    latest_td = _td_row['d'] if (_td_row and _td_row['d']) else today
+
     # 1. K线（技术面）
     row = conn.execute(
         'SELECT MAX(trade_date) d FROM raw_kline WHERE stock_id=?', (stock_id,)
     ).fetchone()
     if row and row['d']:
-        lag = _days_between(row['d'], today)
-        flag = ' ⚠️' if (lag is not None and lag > 3) else ''
-        if flag:
-            has_issue = True
-        lines.append(f"K线：至 {row['d']}（滞后{lag}天{flag}）")
+        lag = _days_between(row['d'], latest_td)
+        if lag is not None and lag <= 0:
+            lines.append(f"K线：至 {row['d']}（最新）")
+        else:
+            flag = ' ⚠️' if (lag is not None and lag > 3) else ''
+            if flag:
+                has_issue = True
+            lines.append(f"K线：至 {row['d']}（滞后{lag}天{flag}）")
     else:
         lines.append('K线：缺失 ⚠️')
         has_issue = True
@@ -624,17 +634,24 @@ def _build_data_freshness(stock_id):
     if row:
         if row['s'] == 'sina_main':
             src, issue = '新浪顶替(主力口径)', True
+        elif row['s'] == 'westock':
+            src, issue = '腾讯自选股', False
         elif row['e'] == 1:
             src, issue = '估算兜底(不参评)', True
         elif row['s'] == 'ths_total':
             src, issue = '同花顺顶替', True
         else:
             src, issue = '东财真实', False
-        lag = _days_between(row['d'], today)
-        flag = ' ⚠️' if (issue or (lag is not None and lag > 2)) else ''
-        if flag:
-            has_issue = True
-        lines.append(f"资金面：至 {row['d']}（来源：{src}，滞后{lag}天{flag}）")
+        lag = _days_between(row['d'], latest_td)
+        if lag is not None and lag <= 0:
+            if issue:
+                has_issue = True
+            lines.append(f"资金面：至 {row['d']}（来源：{src}，最新{' ⚠️' if issue else ''}）")
+        else:
+            flag = ' ⚠️' if (issue or (lag is not None and lag > 2)) else ''
+            if flag:
+                has_issue = True
+            lines.append(f"资金面：至 {row['d']}（来源：{src}，滞后{lag}天{flag}）")
     else:
         lines.append('资金面：缺失 ⚠️')
         has_issue = True
