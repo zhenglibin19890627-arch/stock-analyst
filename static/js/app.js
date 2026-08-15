@@ -3087,7 +3087,10 @@
             // 完整度统一以顶部权威展示为准。
             var detailText = adviseData.advice_detail;
             if (detailText) {
+                // U7(#5): 移除综合文本中的「数据完整度」相关行，避免与顶部实时
+                // data_quality 及右侧维度亮点卡内的数据完整度重复（020R-16）
                 detailText = detailText.replace(/\n- \*\*数据完整度\*\*[^\n]*/g, '');
+                detailText = detailText.replace(/\n## 数据完整度[\s\S]*$/g, '');
             }
             // 020R-14：markdown 渲染（marked）；未加载时降级为纯文本换行
             var _mdHtml = '';
@@ -3120,23 +3123,13 @@
             html += '</div>';
         }
 
-        // 数据警告（引擎降级提示 + 数据完整度说明）
-        if (adviseData.data_warnings && adviseData.data_warnings.length > 0) {
-            html += '<div class="advice-section">';
-            html += '<div class="advice-section-title" style="color:#f39c12;">📋 数据完整度与提示</div>';
-            html += '<ul class="risk-list">';
-            adviseData.data_warnings.forEach(function(w) {
-                var warn = /数据完整度：/.test(w);
-                html += '<li style="color:' + (warn ? '#5d6d7e' : '#e65100') + ';">' + w + '</li>';
-            });
-            html += '</ul>';
-            html += '</div>';
-        }
+        // 数据警告已移至维度亮点卡（020R-16），此处不再重复展示
 
         html += '</div><!-- /md-card -->';
 
-        // 维度亮点卡
-        if (adviseData.strongest_dim || adviseData.weakest_dim) {
+        // 维度亮点卡（含数据完整度与提示）
+        if (adviseData.strongest_dim || adviseData.weakest_dim ||
+                (adviseData.data_warnings && adviseData.data_warnings.length > 0)) {
             html += '<div class="advice-card dim-hl-card">';
             html += '<div class="card-title" style="font-size:15px;margin-bottom:10px;">🌟 维度亮点</div>';
             if (adviseData.strongest_dim) {
@@ -3148,6 +3141,18 @@
                 html += '<p style="font-size:14px;color:#e74c3c;margin:0;">' +
                         '▼ 最弱维度：' + adviseData.weakest_dim.name +
                         '（' + adviseData.weakest_dim.score.toFixed(1) + '分）</p>';
+            }
+            // 020R-16：数据完整度与提示并入维度亮点卡（不再与综合分析重复）
+            if (adviseData.data_warnings && adviseData.data_warnings.length > 0) {
+                html += '<div class="advice-section" style="margin-top:10px;">';
+                html += '<div class="advice-section-title" style="color:#f39c12;">📋 数据完整度与提示</div>';
+                html += '<ul class="risk-list">';
+                adviseData.data_warnings.forEach(function(w) {
+                    var warn = /数据完整度：/.test(w);
+                    html += '<li style="color:' + (warn ? '#5d6d7e' : '#e65100') + ';">' + w + '</li>';
+                });
+                html += '</ul>';
+                html += '</div>';
             }
             html += '</div>';
         }
