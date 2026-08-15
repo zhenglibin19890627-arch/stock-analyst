@@ -3076,9 +3076,9 @@
         // 4. K线图卡片已移除（020R：用户裁定报告页不再平铺K线卡片；
         // K线数据仍可在「数据」页查看，评分雷达/详情/建议紧接展示）
 
-        // 5. 投资建议详情
-        html += '<div class="advice-card">';
-        html += '<div class="card-title" style="font-size:15px;margin-bottom:10px;">📝 投资建议详情</div>';
+        // 5. 综合分析卡（markdown 渲染）+ 维度亮点卡（020R-14：投资建议详情拆为两卡）
+        html += '<div class="advice-card md-card">';
+        html += '<div class="card-title" style="font-size:15px;margin-bottom:10px;">📝 综合分析</div>';
 
         if (adviseData.advice_detail) {
             // U7(#5): 综合文本（历史快照 markdown_content）中的「数据完整度」行
@@ -3088,36 +3088,23 @@
             if (detailText) {
                 detailText = detailText.replace(/\n- \*\*数据完整度\*\*[^\n]*/g, '');
             }
-            html += '<div class="advice-section">';
-            html += '<div class="advice-section-title">综合分析</div>';
-            html += '<div class="advice-detail-text">' + detailText + '</div>';
-            html += '</div>';
+            // 020R-14：markdown 渲染（marked）；未加载时降级为纯文本换行
+            var _mdHtml = '';
+            if (typeof marked !== 'undefined' && detailText) {
+                try { _mdHtml = marked.parse(detailText); } catch (e) { _mdHtml = ''; }
+            }
+            html += '<div class="md-body">' +
+                    (_mdHtml || ((detailText || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>'))) +
+                    '</div>';
         }
 
-        if (adviseData.position_advice) {
-            html += '<div class="advice-section">';
-            html += '<div class="advice-section-title">仓位建议' +
-                    (adviseData.has_position ? '' : '（当前无持仓）') + '</div>';
-            html += '<div class="advice-detail-text" style="border-left-color:#27ae60;">' +
-                    adviseData.position_advice + '</div>';
-            html += '</div>';
-        }
+        // 020R-14：仓位建议移除（网格计划卡已含各档位仓位比例）
 
-        // 020R-7：价格建议+网格计划已移至首屏评分区独立卡片（雷达图右侧），此处不再渲染
-
-        if (adviseData.strongest_dim || adviseData.weakest_dim) {
+        if (adviseData.news_summary) {
             html += '<div class="advice-section">';
-            html += '<div class="advice-section-title">维度亮点</div>';
-            if (adviseData.strongest_dim) {
-                html += '<p style="font-size:14px;color:#27ae60;margin-bottom:4px;">' +
-                        '★ 最强维度：' + adviseData.strongest_dim.name +
-                        '（' + adviseData.strongest_dim.score.toFixed(1) + '分）</p>';
-            }
-            if (adviseData.weakest_dim) {
-                html += '<p style="font-size:14px;color:#e74c3c;">' +
-                        '▼ 最弱维度：' + adviseData.weakest_dim.name +
-                        '（' + adviseData.weakest_dim.score.toFixed(1) + '分）</p>';
-            }
+            html += '<div class="advice-section-title">消息面摘要</div>';
+            html += '<div class="advice-detail-text" style="border-left-color:#f39c12;font-size:13px;">' +
+                    adviseData.news_summary + '</div>';
             html += '</div>';
         }
 
@@ -3129,14 +3116,6 @@
                 html += '<li>' + r + '</li>';
             });
             html += '</ul>';
-            html += '</div>';
-        }
-
-        if (adviseData.news_summary) {
-            html += '<div class="advice-section">';
-            html += '<div class="advice-section-title">消息面摘要</div>';
-            html += '<div class="advice-detail-text" style="border-left-color:#f39c12;font-size:13px;">' +
-                    adviseData.news_summary + '</div>';
             html += '</div>';
         }
 
@@ -3153,7 +3132,24 @@
             html += '</div>';
         }
 
-        html += '</div><!-- /advice-card -->';
+        html += '</div><!-- /md-card -->';
+
+        // 维度亮点卡
+        if (adviseData.strongest_dim || adviseData.weakest_dim) {
+            html += '<div class="advice-card dim-hl-card">';
+            html += '<div class="card-title" style="font-size:15px;margin-bottom:10px;">🌟 维度亮点</div>';
+            if (adviseData.strongest_dim) {
+                html += '<p style="font-size:14px;color:#27ae60;margin:0 0 6px;">' +
+                        '★ 最强维度：' + adviseData.strongest_dim.name +
+                        '（' + adviseData.strongest_dim.score.toFixed(1) + '分）</p>';
+            }
+            if (adviseData.weakest_dim) {
+                html += '<p style="font-size:14px;color:#e74c3c;margin:0;">' +
+                        '▼ 最弱维度：' + adviseData.weakest_dim.name +
+                        '（' + adviseData.weakest_dim.score.toFixed(1) + '分）</p>';
+            }
+            html += '</div>';
+        }
 
         container.innerHTML = html;
 
