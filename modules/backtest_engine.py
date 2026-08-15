@@ -544,26 +544,35 @@ class BacktestEngine:
 
         基于：样本量 / 总体准确率 / 周期衰减趋势 / 动态准确率 / 分档表现。
         阈值口径：≥60% 有效、45%~60% 一般/接近随机、<45% 偏弱。
+        020R-21：每条观点附色调 tones（good=✓ 提示 / bad=⚠️ 预警 / neutral=中性），
+        与 interpretation_parts 等长，前端逐条着色展示。
         """
         parts = []
+        tones = []
+
+        def add(text, tone='neutral'):
+            parts.append(text)
+            tones.append(tone)
+
         total = report['total']
         if total == 0:
-            parts = ['暂无真实回测数据，无法解读。请先触发评级变更或手动重跑回测（报告仅统计真实评级回测样本，已排除模拟回测）。']
+            add('暂无真实回测数据，无法解读。请先触发评级变更或手动重跑回测（报告仅统计真实评级回测样本，已排除模拟回测）。', 'bad')
             report['interpretation_parts'] = parts
+            report['interpretation_tones'] = tones
             return parts[0]
 
-        parts.append(f'本报告基于 {total} 条真实评级回测样本（样本期 {report.get("date_range") or "—"}，已排除模拟回测数据）。')
+        add(f'本报告基于 {total} 条真实评级回测样本（样本期 {report.get("date_range") or "—"}，已排除模拟回测数据）。')
 
         # 总体准确率（T+1日主口径）
         judged = report.get('correct_count', 0) + report.get('wrong_count', 0)
         acc = report.get('accuracy')
         if judged > 0 and acc is not None:
             if acc >= 0.60:
-                parts.append(f'短期方向判断有效：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定），显著高于随机水平。')
+                add(f'短期方向判断有效：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定），显著高于随机水平。', 'good')
             elif acc >= 0.45:
-                parts.append(f'短期方向判断一般：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定），仅略高于随机，优势有限。')
+                add(f'短期方向判断一般：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定），仅略高于随机，优势有限。', 'bad')
             else:
-                parts.append(f'短期方向判断偏弱：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定），接近或低于随机水平。')
+                add(f'短期方向判断偏弱：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定），接近或低于随机水平。', 'bad')
 
         # 周期衰减趋势
         pa = report.get('period_accuracy', {})
@@ -577,25 +586,26 @@ class BacktestEngine:
             if p1m is not None:
                 tail.append(f'T+1月 {p1m * 100:.0f}%')
             if tail:
-                parts.append(
+                add(
                     f'周期衰减：准确率随持有期拉长递减（T+1日 {p1d * 100:.0f}% → ' + '、'.join(tail) + '），'
-                    '评级以短线方向参考为主，长期持有参考价值下降。'
+                    '评级以短线方向参考为主，长期持有参考价值下降。',
+                    'bad',
                 )
             else:
-                parts.append(f'周期维度：T+1日准确率 {p1d * 100:.0f}%，周/月样本不足暂不评估。')
+                add(f'周期维度：T+1日准确率 {p1d * 100:.0f}%，周/月样本不足暂不评估。')
 
         # 动态准确率（评级有效期）
         dyn_n = report.get('dynamic_count', 0)
         dyn = report.get('dynamic_accuracy')
         if dyn_n > 0 and dyn is not None:
             if dyn >= 0.60:
-                parts.append(f'动态准确率 {dyn * 100:.0f}%（{dyn_n}条）较高：评级有效期内方向判断可信，可参考评级持有至改评。')
+                add(f'动态准确率 {dyn * 100:.0f}%（{dyn_n}条）较高：评级有效期内方向判断可信，可参考评级持有至改评。', 'good')
             elif dyn >= 0.45:
-                parts.append(f'动态准确率 {dyn * 100:.0f}%（{dyn_n}条）接近随机水平：评级有效期内的持有无明显超额，不建议按评级长期持有。')
+                add(f'动态准确率 {dyn * 100:.0f}%（{dyn_n}条）接近随机水平：评级有效期内的持有无明显超额，不建议按评级长期持有。', 'bad')
             else:
-                parts.append(f'动态准确率 {dyn * 100:.0f}%（{dyn_n}条）低于随机：评级有效期内的方向判断不可信。')
+                add(f'动态准确率 {dyn * 100:.0f}%（{dyn_n}条）低于随机：评级有效期内的方向判断不可信。', 'bad')
 
-        # 分档表现（样本≥30才纳入点评）
+        # 分档表现（样本≥30才纳入点评；020R-21 拆为"最可信"与"最弱"两条，分别提示/预警）
         rs_list = [
             (r, s) for r, s in report.get('rating_stats', {}).items()
             if s.get('total', 0) >= 30 and s.get('accuracy') is not None
@@ -603,9 +613,15 @@ class BacktestEngine:
         if rs_list:
             best = max(rs_list, key=lambda x: x[1]['accuracy'])
             worst = min(rs_list, key=lambda x: x[1]['accuracy'])
-            parts.append(
-                f'分档看：「{best[0]}」最可信（{best[1]["total"]}条，T+1日准确率 {best[1]["accuracy"] * 100:.0f}%）；'
-                f'「{worst[0]}」最弱（{worst[1]["total"]}条，T+1日准确率 {worst[1]["accuracy"] * 100:.0f}%）。'
+            best_acc = best[1]['accuracy']
+            worst_acc = worst[1]['accuracy']
+            add(
+                f'分档看：「{best[0]}」最可信（{best[1]["total"]}条，T+1日准确率 {best_acc * 100:.0f}%）。',
+                'good' if best_acc >= 0.60 else 'neutral',
+            )
+            add(
+                f'「{worst[0]}」最弱（{worst[1]["total"]}条，T+1日准确率 {worst_acc * 100:.0f}%）。',
+                'bad' if worst_acc < 0.45 else 'neutral',
             )
 
         # 样本不足档位提示
@@ -614,11 +630,12 @@ class BacktestEngine:
             if 0 < s.get('total', 0) < 30 and s.get('accuracy') is not None
         ]
         if low:
-            parts.append(f'注意：「{'、'.join(sorted(low))}」样本不足（<30条），其准确率仅供参考，勿单独作为决策依据。')
+            add(f'注意：「{'、'.join(sorted(low))}」样本不足（<30条），其准确率仅供参考，勿单独作为决策依据。', 'bad')
 
-        parts.append('以上为历史回测统计解读，不构成投资建议。')
-        # 020R-20：逐条观点列表（前端卡片化逐条展示）
+        add('以上为历史回测统计解读，不构成投资建议。')
+        # 020R-20/21：逐条观点 + 色调列表（前端卡片化逐条着色展示）
         report['interpretation_parts'] = parts
+        report['interpretation_tones'] = tones
         return ' '.join(parts)
 
     def compute_market_report(self, market='a_stock', include_simulated=False):

@@ -953,6 +953,14 @@
             color: #f9a825;
             font-weight: 700;
         }
+        /* 020R-21：解读条目色调——好=绿✓ 提示，预警=橙⚠️，中性=默认圆点 */
+        .bt-interp-list li.bt-interp-good,
+        .bt-interp-list li.bt-interp-bad { padding-left: 4px; }
+        .bt-interp-list li.bt-interp-good:before,
+        .bt-interp-list li.bt-interp-bad:before { content: none; }
+        .bt-interp-list li.bt-interp-good { color: #2e7d32; }
+        .bt-interp-list li.bt-interp-bad { color: #e65100; }
+        .bt-interp-list .bt-interp-icon { margin-right: 6px; font-weight: 700; }
         /* 020Q: 价格建议紧凑卡片（键值行：标签左灰、数值右对齐、限宽不铺满） */
         .pa-kv-wrap {
             max-width: 440px;
