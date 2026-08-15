@@ -408,7 +408,17 @@
                     _stocksCache = data.stocks;
                     _sortRenderers['stocks'] = loadStocks;
                     var st = _sortState['stocks'];
-                    var rows = st ? sortTable(_stocksCache, st.key, st.order) : _stocksCache;
+                    var rows = _stocksCache.slice();
+                    if (st) {
+                        rows = sortTable(rows, st.key, st.order);
+                    } else {
+                        // 默认排序：有持仓的排前面（持仓数量 > 0），组内保持接口原始顺序
+                        rows.sort(function(a, b) {
+                            var ha = (a.quantity != null && a.quantity > 0) ? 1 : 0;
+                            var hb = (b.quantity != null && b.quantity > 0) ? 1 : 0;
+                            return hb - ha;
+                        });
+                    }
                     let html = '<table><thead><tr>' +
                         '<th style="width:30px;"><input type="checkbox" onclick="toggleAllStocks(this)"></th>' +
                         '<th>市场</th><th>代码</th><th>名称</th><th>分组</th>' +
