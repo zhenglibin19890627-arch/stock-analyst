@@ -55,14 +55,49 @@ for _bp in ALL_BLUEPRINTS:
 
 
 # ============================================================
+# 020S：HTML 与静态资源禁止缓存——用户每次刷新都拿到最新前端改动。
+# 此前浏览器缓存旧 HTML（引用旧版本号资源），前端修改一直"看不到"。
+# ============================================================
+
+
+@app.after_request
+def _no_cache_html_static(resp):
+    from flask import request as _request
+
+    if _request.path == '/' or _request.path.startswith('/static/'):
+        resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+    return resp
+
+
+# ============================================================
 # 页面路由
 # ============================================================
 
 
 @app.route('/')
 def index():
-    """首页 —— 数据采集测试页面"""
-    return render_template('index.html')
+    """首页 —— 数据采集测试页面
+
+    020S：静态资源版本号自动跟随文件修改时间（mtime），
+    配合 after_request 禁止缓存，前端改动无需手动升级版本号即可生效。
+    """
+    import os as _os
+
+    _base = _os.path.dirname(_os.path.abspath(__file__))
+
+    def _ver(rel_path):
+        try:
+            return str(int(_os.path.getmtime(_os.path.join(_base, rel_path))))
+        except OSError:
+            return '0'
+
+    return render_template(
+        'index.html',
+        css_version=_ver('static/css/app.css'),
+        js_version=_ver('static/js/app.js'),
+    )
 
 
 # ============================================================
