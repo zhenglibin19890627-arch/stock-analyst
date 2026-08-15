@@ -114,7 +114,7 @@
     var ROUTES = {
         '#holdings':    { view: 'view-holdings',    label: '持仓管理', init: function() { loadPortfolioGroups(); } },
         '#watchlist':   { view: 'view-watchlist',   label: '自选股',   init: function() { loadStocks(); } },
-        '#trades':      { view: 'view-trades',      label: '流水与成本修正', init: function() { loadAllTrades(); loadAllAdjustments(); } },
+        '#trades':      { view: 'view-trades',      label: '交易流水', init: function() { loadAllTrades(); loadAllAdjustments(); } },
         '#report':      { view: 'view-report',      label: '分析报告', init: function() { /* 由 viewReport() 驱动 */ } },
         '#daily':       { view: 'view-daily',       label: '每日报告', init: function() { loadLatestDailyReport(); } },
         '#dashboard':   { view: 'view-dashboard',   label: '总览看板', init: function() { loadDashboard(); } },
