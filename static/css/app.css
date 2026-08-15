@@ -639,6 +639,12 @@
             .pa-side-card { grid-column: auto; }
         }
         /* 020R-7：价格建议+网格计划独立卡片（雷达图右侧），内部限宽解除、随卡片宽度 */
+        .pa-side-stack {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-width: 0;
+        }
         .pa-side-card {
             background: white;
             border-radius: 12px;

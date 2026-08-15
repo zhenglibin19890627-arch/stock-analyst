@@ -2896,6 +2896,7 @@
                 if (s < 0) return 'pa-warning';
                 return '';
             }
+            paSideHtml += '<div class="pa-side-stack">';
             paSideHtml += '<div class="pa-side-card">';
             if (pa.available) {
                 paSideHtml += '<div class="card-title" style="font-size:15px;margin-bottom:8px;color:#e65100;">💰 价格建议' +
@@ -2937,21 +2938,6 @@
 
                 paSideHtml += '</div>';
 
-                // 009: 网格计划表格（020Q：紧凑窄表）
-                if (pa.grid && pa.grid.length > 0) {
-                    paSideHtml += '<div class="pa-grid-title">📊 ' +
-                            (pa.has_position ? '操作网格计划' : '网格买入计划') + '</div>';
-                    paSideHtml += '<table class="pa-grid-table"><thead><tr><th>档位</th><th>价位</th><th>仓位</th><th>说明</th></tr></thead><tbody>';
-                    pa.grid.forEach(function(g) {
-                        var typeCls = _paGridCls[g.type] || '';
-                        paSideHtml += '<tr><td>' + g.level + '</td>';
-                        paSideHtml += '<td class="' + typeCls + '">' + g.price.toFixed(2) + '</td>';
-                        paSideHtml += '<td>' + g.pct + '%</td>';
-                        paSideHtml += '<td>' + g.label + '</td></tr>';
-                    });
-                    paSideHtml += '</tbody></table>';
-                }
-
                 // 009: 资金面信号
                 if (pa.capital_signal) {
                     paSideHtml += '<div class="pa-capital-signal">';
@@ -2973,6 +2959,24 @@
                 }
 
                 paSideHtml += '<div class="price-advice-disclaimer">⚠️ 以上价格建议仅供参考，不构成投资建议。股市有风险，投资需谨慎。</div>';
+                paSideHtml += '</div>';
+
+                // 020R-8：网格计划独立卡片
+                if (pa.grid && pa.grid.length > 0) {
+                    paSideHtml += '<div class="pa-side-card">';
+                    paSideHtml += '<div class="card-title" style="font-size:15px;margin-bottom:8px;">📊 ' +
+                            (pa.has_position ? '操作网格计划' : '网格买入计划') + '</div>';
+                    paSideHtml += '<table class="pa-grid-table"><thead><tr><th>档位</th><th>价位</th><th>仓位</th><th>说明</th></tr></thead><tbody>';
+                    pa.grid.forEach(function(g) {
+                        var typeCls = _paGridCls[g.type] || '';
+                        paSideHtml += '<tr><td>' + g.level + '</td>';
+                        paSideHtml += '<td class="' + typeCls + '">' + g.price.toFixed(2) + '</td>';
+                        paSideHtml += '<td>' + g.pct + '%</td>';
+                        paSideHtml += '<td>' + g.label + '</td></tr>';
+                    });
+                    paSideHtml += '</tbody></table>';
+                    paSideHtml += '</div>';
+                }
             } else {
                 // available=false: 数据不足
                 paSideHtml += '<div class="card-title" style="font-size:15px;margin-bottom:8px;color:#e65100;">💰 价格建议</div>';
