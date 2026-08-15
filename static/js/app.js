@@ -2796,6 +2796,7 @@
     // ========== P0: 个股分析报告页面 ==========
     var _reportStockId = null;
     var _reportTechDetail = null; // 020R-36：技术指标明细（供技术面卡渲染）
+    var _reportFundDetail = null; // 020R-37：基本面指标明细（供基本面卡渲染）
     var _radarChart = null;
     var _klineChart = null;
 
@@ -3083,8 +3084,9 @@
         html += '</div><!-- /report-top-grid -->';
 
         // 3. 四维评分详情（2×2网格，紧跟首屏评分卡后）
-        // 020R-36：技术指标明细并入技术面卡内（_reportTechDetail 供 _renderDimensionCard 使用）
+        // 020R-36/37：技术/基本面指标明细并入对应维度卡内
         _reportTechDetail = adviseData.technical_detail || null;
+        _reportFundDetail = adviseData.fundamental_detail || null;
         html += '<div class="card dim-detail-card">';
         html += '<div class="card-title" style="font-size:15px;margin-bottom:6px;">四维评分详情</div>';
         html += '<div class="dim-grid">';
@@ -4233,6 +4235,9 @@
         if (key === 'kline' && _reportTechDetail) {
             // 020R-36：技术指标明细并入技术面卡（均线/MACD/RSI/KDJ/布林/量能 + 近期走势）
             factorsHtml = _renderTechRows(_reportTechDetail, factors);
+        } else if (key === 'fundamental' && _reportFundDetail) {
+            // 020R-37：基本面指标明细并入基本面卡（估值/盈利/成长/现金流/财务健康 + 基本面趋势）
+            factorsHtml = _renderFundamentalRows(_reportFundDetail, factors);
         } else if (topFactors.length === 0) {
             factorsHtml = '<span style="color:#bbb;font-size:12px;">暂无关键因子</span>';
         } else {
@@ -4308,6 +4313,63 @@
         html += _row('量能', (td.vol_ratio != null ? ('量比 ' + td.vol_ratio) : null), td.vol_state);
         if (factors && factors.recent_trend) {
             html += _row('近期走势', String(factors.recent_trend), null);
+        }
+        return html;
+    }
+
+    /**
+     * 020R-37：基本面指标明细——状态语义着色（红=好/低估值，绿=差/高估，灰=中性）
+     */
+    function _fundStateColor(state) {
+        if (!state) return '#666';
+        var GOOD = ['低估', '破净', '合理偏低', '优秀', '良好', '高', '中高',
+                    '高增长', '较快增长', '稳步增长', '充裕', '健康', '低杠杆', '充足'];
+        var BAD = ['偏高', '高估', '严重高估', '负值', '较差', '亏损', '低',
+                   '小幅下滑', '明显下滑', '偏弱', '为负·警惕', '高杠杆', '极高杠杆', '偏紧', '紧张'];
+        if (GOOD.indexOf(state) >= 0) return '#e74c3c';
+        if (BAD.indexOf(state) >= 0) return '#27ae60';
+        return '#666';
+    }
+
+    /**
+     * 020R-37：基本面指标明细行（并入基本面卡内）——五类子项 + 基本面趋势
+     */
+    function _renderFundamentalRows(fd, factors) {
+        function _fv(value, state) {
+            var color = _fundStateColor(state);
+            return '<span style="color:' + color + ';">' +
+                (value != null ? String(value) : '—') +
+                (state ? ' ' + state : '') + '</span>';
+        }
+        function _row(label, html) {
+            return '<div class="factor-row">' +
+                '<span class="factor-label">' + label + '</span>' +
+                '<span class="factor-val">' + html + '</span></div>';
+        }
+        var html = '<div style="font-size:11px;color:#999;margin-bottom:2px;">基本面指标明细' +
+            (fd.report_date ? '（最新财报 ' + fd.report_date + '）' : '') + '</div>';
+        // 1) 估值
+        html += _row('估值',
+            (fd.pe != null ? ('PE ' + _fv(fd.pe, fd.pe_state)) : '') +
+            (fd.pb != null ? (' · PB ' + _fv(fd.pb, fd.pb_state)) : ''));
+        // 2) 盈利能力
+        html += _row('盈利能力',
+            (fd.roe != null ? ('ROE ' + _fv(fd.roe + '%', fd.roe_state)) : '') +
+            (fd.gross_margin != null ? (' · 毛利率 ' + _fv(fd.gross_margin + '%', fd.gm_state)) : ''));
+        // 3) 成长性
+        html += _row('成长性',
+            (fd.revenue_growth != null ? ('营收 ' + _fv((fd.revenue_growth > 0 ? '+' : '') + fd.revenue_growth + '%', fd.rg_state)) : '') +
+            (fd.profit_growth != null ? (' · 净利 ' + _fv((fd.profit_growth > 0 ? '+' : '') + fd.profit_growth + '%', fd.pg_state)) : ''));
+        // 4) 现金流质量
+        html += _row('现金流质量',
+            fd.ocf_to_profit != null ? ('经营现金流/净利润 ' + _fv(fd.ocf_to_profit, fd.ocf_state)) : '');
+        // 5) 财务健康度
+        html += _row('财务健康度',
+            (fd.debt_ratio != null ? ('负债率 ' + _fv(fd.debt_ratio + '%', fd.dr_state)) : '') +
+            (fd.current_ratio != null ? (' · 流动比率 ' + _fv(fd.current_ratio, fd.cr_state)) : ''));
+        // 基本面趋势（仅展示，不影响评分）
+        if (factors && factors.fund_trend) {
+            html += _row('基本面趋势', '<span style="color:#333;font-weight:400;">' + String(factors.fund_trend) + '</span>');
         }
         return html;
     }

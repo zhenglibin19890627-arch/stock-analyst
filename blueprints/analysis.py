@@ -42,6 +42,33 @@ def _technical_detail_for_stock(stock_id):
         return None
 
 
+def _fundamental_detail_for_stock(stock_id):
+    """020R-37：读取 raw_fundamental 最新一期，计算基本面五类子项展示明细。
+
+    纯展示层增强：失败或数据不足时返回 None，不影响报告主流程。
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT report_date, pe_ratio, pb_ratio, roe, gross_margin, '
+            'revenue_growth, profit_growth, ocf_to_net_profit, debt_ratio, current_ratio '
+            'FROM raw_fundamental WHERE stock_id = ? ORDER BY report_date DESC LIMIT 1',
+            (stock_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+
+        from modules.fundamental_detail import compute_fundamental_detail
+
+        return compute_fundamental_detail(dict(row))
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning(f'基本面指标明细计算失败 stock_id={stock_id}: {e}')
+        return None
+
+
 @bp.route('/api/stocks/<int:stock_id>/analyze', methods=['POST'])
 def api_analyze_stock(stock_id):
     """执行四维分析引擎评分（统一走 advisor.generate_advice 入口，与每日报告一致）"""
@@ -376,6 +403,8 @@ def api_get_report_latest(stock_id):
 
     # 020R-35：技术指标明细（均线/MACD/RSI/KDJ/布林/量能，供四维评分详情技术面展示）
     result['technical_detail'] = _technical_detail_for_stock(stock_id)
+    # 020R-37：基本面指标明细（估值/盈利/成长/现金流/财务健康，供基本面卡展示）
+    result['fundamental_detail'] = _fundamental_detail_for_stock(stock_id)
 
     return jsonify(result)
 
@@ -403,6 +432,8 @@ def api_advise_stock(stock_id):
             result['generated_at'] = datetime.now(_CN_TZ).isoformat()
             # 020R-35：技术指标明细（均线/MACD/RSI/KDJ/布林/量能）
             result['technical_detail'] = _technical_detail_for_stock(stock_id)
+            # 020R-37：基本面指标明细（估值/盈利/成长/现金流/财务健康）
+            result['fundamental_detail'] = _fundamental_detail_for_stock(stock_id)
         return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'message': f'建议生成失败: {e!s}'}), 500
