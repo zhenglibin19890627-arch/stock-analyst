@@ -625,16 +625,16 @@
 
         .report-top-grid {
             display: grid;
-            grid-template-columns: 280px 300px minmax(320px, 1fr) minmax(300px, 1fr);
+            grid-template-columns: 240px 280px minmax(300px, 1fr) minmax(280px, 1fr);
             gap: 12px;
             margin-bottom: 12px;
-            align-items: start;
+            /* 020R-10：四卡等高（默认 stretch），评分卡内容垂直居中、雷达图弹性填满 */
         }
         @media (max-width: 1450px) {
-            .report-top-grid { grid-template-columns: 280px 300px 1fr 1fr; }
+            .report-top-grid { grid-template-columns: 240px 280px 1fr 1fr; }
         }
         @media (max-width: 1150px) {
-            .report-top-grid { grid-template-columns: 280px 1fr; }
+            .report-top-grid { grid-template-columns: 240px 1fr; }
             .pa-side-card { grid-column: auto; }
         }
         @media (max-width: 900px) {
@@ -657,6 +657,9 @@
             padding: 20px;
             text-align: center;
             box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
         }
         .score-card .score-label { font-size: 13px; color: #888; margin-bottom: 4px; }
         .score-card .score-value {
@@ -716,11 +719,13 @@
         .radar-card {
             background: white;
             border-radius: 12px;
-            padding: 10px 12px;
+            padding: 12px 14px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            display: flex;
+            flex-direction: column;
         }
         .radar-card .card-title { margin-bottom: 2px; }
-        #radarChart { width: 100%; height: 230px; }
+        #radarChart { width: 100%; flex: 1; min-height: 230px; }
 
         .kline-card {
             background: white;
