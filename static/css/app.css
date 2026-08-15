@@ -625,17 +625,17 @@
 
         .report-top-grid {
             display: grid;
-            grid-template-columns: 320px 320px 320px minmax(320px, 1fr);
+            grid-template-columns: 340px 340px 340px minmax(320px, 1fr);
             gap: 12px;
             margin-bottom: 12px;
-            /* 020R-11：前三个卡（评分/雷达/网格）等宽320px，价格建议自适应
+            /* 020R-13：前三个卡（评分/雷达/网格）等宽340px，价格建议自适应
                （顺序：评分卡、雷达卡、网格计划、价格建议；四卡等高 stretch） */
         }
         @media (max-width: 1450px) {
-            .report-top-grid { grid-template-columns: 320px 320px 320px 1fr; }
+            .report-top-grid { grid-template-columns: 340px 340px 340px 1fr; }
         }
-        @media (max-width: 1300px) {
-            .report-top-grid { grid-template-columns: 320px 1fr; }
+        @media (max-width: 1350px) {
+            .report-top-grid { grid-template-columns: 340px 1fr; }
             .pa-side-card { grid-column: auto; }
         }
         @media (max-width: 900px) {
@@ -912,11 +912,11 @@
         /* 020Q: 网格计划紧凑窄表（表头灰底、价位右对齐、档位/仓位居中、说明靠左） */
         .pa-grid-title { margin: 10px 0 6px; font-size: 13px; font-weight: 600; color: #22262b; }
         .pa-grid-table {
-            width: 100%;
-            max-width: 440px;
+            width: auto;
+            max-width: none;
+            margin: 0 auto 10px;
             border-collapse: collapse;
             font-size: 12.5px;
-            margin-bottom: 10px;
             background: #fff;
         }
         .pa-grid-table th {
@@ -924,19 +924,18 @@
             color: #3d4450;
             font-weight: 600;
             font-size: 12px;
-            padding: 6px 8px;
+            padding: 6px 12px;
             border: 1px solid #b6bcc6;
             text-align: center;
         }
         .pa-grid-table td {
-            padding: 5px 8px;
+            padding: 5px 12px;
             border: 1px solid #c9ced6;
             color: #22262b;
+            text-align: center;
         }
-        .pa-grid-table td:nth-child(1) { text-align: center; width: 12%; color: #5c6470; font-size: 12px; }
-        .pa-grid-table td:nth-child(2) { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
-        .pa-grid-table td:nth-child(3) { text-align: center; width: 15%; }
-        .pa-grid-table td:nth-child(4) { text-align: left; }
+        .pa-grid-table td:nth-child(1) { color: #5c6470; font-size: 12px; }
+        .pa-grid-table td:nth-child(2) { font-weight: 600; font-variant-numeric: tabular-nums; }
         .pa-grid-table .pa-buy { color: #1565c0; }
         .pa-grid-table .pa-reduce { color: #e65100; }
         .pa-grid-table .pa-add { color: #6a1b9a; }
