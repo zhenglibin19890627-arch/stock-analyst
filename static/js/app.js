@@ -4253,11 +4253,9 @@
                 html += '<div style="background:#fff;border-radius:10px;padding:20px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.1);">';
                 html += '<h3 style="margin:0 0 12px;">' + (market === 'a_stock' ? 'A股' : '港股') + ' 评级有效性报告</h3>';
                 html += '<p style="font-size:13px;color:#888;margin-bottom:16px;">' + rpt.sample_period_note + ' <span style="color:#27ae60;">✓ 全部真实样本（已排除模拟回测）</span> ' + warn + '</p>';
-                // 客观解读评语
-                if (rpt.interpretation) {
-                    html += '<div style="background:linear-gradient(135deg,#fff8e1,#fffde7);border-left:4px solid #f9a825;border-radius:6px;padding:12px 16px;margin-bottom:16px;font-size:13px;line-height:1.8;color:#5d4037;">';
-                    html += '<div style="font-weight:700;margin-bottom:4px;">📋 客观解读</div>' + rpt.interpretation + '</div>';
-                }
+                // 020R-20：客观解读改为独立卡片逐条展示（评级有效性部分）
+                window._btRatingParts = rpt.interpretation_parts || [];
+                _renderBtInterpretationCard();
                 // U3(#10): 一句话总结
                 var btSummaryParts = [];
                 var btAccRound = Math.round((rpt.accuracy || 0) * 100);
@@ -4341,6 +4339,8 @@
             .then(function(r) { return safeJson(r); })
             .then(function(data) {
                 if (!data.success || !data.report || data.report.total_points === 0) {
+                    window._btPriceParts = [];
+                    _renderBtInterpretationCard();
                     el.innerHTML = '<div style="background:#fff3cd;border:1px solid #ffeaa7;border-radius:6px;padding:12px;margin-top:16px;"><p style="font-size:13px;color:#856404;">暂无价格建议回测数据。<button class="btn btn-primary btn-sm" style="margin-left:8px;" onclick="runPriceBacktest()">▶ 运行价格建议回测</button></p></div>';
                     return;
                 }
@@ -4406,8 +4406,36 @@
                 }
                 html += '</div>';
                 el.innerHTML = html;
+                // 020R-20：客观解读卡（价格建议命中率部分）
+                window._btPriceParts = rpt.interpretation_parts || [];
+                _renderBtInterpretationCard();
             })
             .catch(function(e) { el.innerHTML = '<p style="color:red;">价格建议回测加载失败: ' + e + '</p>'; });
+    }
+
+    // 020R-20：客观解读独立卡片——评级有效性 + 价格建议命中率，逐条列出（一条一个观点）
+    function _renderBtInterpretationCard() {
+        var el = document.getElementById('btInterpretationContent');
+        if (!el) return;
+        var ratingParts = window._btRatingParts || [];
+        var priceParts = window._btPriceParts || [];
+        var html = '';
+        html += '<div class="bt-interp-card">';
+        html += '<div class="bt-interp-title">📋 客观解读</div>';
+        if (ratingParts.length) {
+            html += '<div class="bt-interp-group">评级有效性</div>';
+            html += '<ul class="bt-interp-list">';
+            ratingParts.forEach(function(p) { html += '<li>' + p + '</li>'; });
+            html += '</ul>';
+        }
+        if (priceParts.length) {
+            html += '<div class="bt-interp-group">价格建议命中率</div>';
+            html += '<ul class="bt-interp-list">';
+            priceParts.forEach(function(p) { html += '<li>' + p + '</li>'; });
+            html += '</ul>';
+        }
+        html += '</div>';
+        el.innerHTML = html;
     }
 
     function runPriceBacktest() {

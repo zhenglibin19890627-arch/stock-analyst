@@ -548,7 +548,9 @@ class BacktestEngine:
         parts = []
         total = report['total']
         if total == 0:
-            return '暂无真实回测数据，无法解读。请先触发评级变更或手动重跑回测（报告仅统计真实评级回测样本，已排除模拟回测）。'
+            parts = ['暂无真实回测数据，无法解读。请先触发评级变更或手动重跑回测（报告仅统计真实评级回测样本，已排除模拟回测）。']
+            report['interpretation_parts'] = parts
+            return parts[0]
 
         parts.append(f'本报告基于 {total} 条真实评级回测样本（样本期 {report.get("date_range") or "—"}，已排除模拟回测数据）。')
 
@@ -615,6 +617,8 @@ class BacktestEngine:
             parts.append(f'注意：「{'、'.join(sorted(low))}」样本不足（<30条），其准确率仅供参考，勿单独作为决策依据。')
 
         parts.append('以上为历史回测统计解读，不构成投资建议。')
+        # 020R-20：逐条观点列表（前端卡片化逐条展示）
+        report['interpretation_parts'] = parts
         return ' '.join(parts)
 
     def compute_market_report(self, market='a_stock', include_simulated=False):

@@ -1089,6 +1089,43 @@ def compute_price_backtest_report(market='a_stock'):
         'note': '近12天有真实评级数据，命中率可能更准确；之前时段存在未来函数偏差',
     }
 
+    # ---- 020R-20：客观解读（逐条观点，前端卡片化逐条展示）----
+    interpretation_parts = []
+    if total_points > 0:
+        interpretation_parts.append(
+            f'价格建议回测基于 {total_points} 个回测点（无持仓 {len(no_pos)} 个 / 有持仓 {len(has_pos)} 个）。'
+        )
+        _t5_b = hit_rates['t5']['buy_range']
+        _t20_b = hit_rates['t20']['buy_range']
+        if _t20_b is not None:
+            interpretation_parts.append(
+                f'买入区间命中：T+5 {_t5_b * 100:.0f}%、T+20 {_t20_b * 100:.0f}%——'
+                + ('买入区间定价合理，回调到位概率较高。' if _t20_b >= 0.6 else '买入区间命中一般，可适当放宽或下移区间。')
+            )
+        if t20_target is not None:
+            interpretation_parts.append(
+                f'目标价命中：T+20 {t20_target * 100:.0f}%——'
+                + ('目标价设定合理，实现概率较高。' if t20_target >= 0.35 else '目标价偏乐观，实际达成概率有限。')
+            )
+        if t20_stop is not None:
+            interpretation_parts.append(
+                f'止损线触发：T+20 {t20_stop * 100:.0f}%——'
+                + ('止损保护有效且触发频率适中。' if t20_stop <= 0.15 else '止损触发偏频繁，止损位可能偏紧。')
+            )
+        if risk_reward is not None:
+            interpretation_parts.append(
+                f'风险收益比 {risk_reward}（目标命中/止损触发）——'
+                + ('目标兑现机会大于止损风险。' if risk_reward >= 1 else '止损风险高于目标兑现机会，需谨慎。')
+            )
+        if composite_score is not None:
+            interpretation_parts.append(
+                f'价格建议综合得分 {composite_score:.3f}（目标价40% + 买入区间30% + 止损控制30%）。'
+            )
+        if period_comparison.get('note'):
+            interpretation_parts.append(f'数据质量提示：{period_comparison["note"]}。')
+    else:
+        interpretation_parts.append('暂无价格建议回测数据，无法解读。')
+
     return {
         'market': market,
         'total_points': total_points,
@@ -1102,4 +1139,5 @@ def compute_price_backtest_report(market='a_stock'):
         'composite_score': composite_score,
         'confidence_report': confidence_report,
         'period_comparison': period_comparison,
+        'interpretation_parts': interpretation_parts,
     }
