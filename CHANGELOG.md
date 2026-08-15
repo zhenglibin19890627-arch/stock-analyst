@@ -1,5 +1,12 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-15] 刷新报告综合分析内容变化修复（020R-42）
+
+- 用户反馈：顺丰控股点刷新后综合分析卡片发生变化（操作建议变空、风险提示消失）。
+- 根因：generate_advice 内部写库时用的是未组装完的 analysis 字典，markdown 所需的 action_advice/risk_warnings 在组装后的 result 里才有——刷新路径写出的 markdown 缺「操作建议」值与「风险提示」段；每日报告路径用组装后的 advice 构建 markdown，两者不一致。
+- 修复：`advisor._save_daily_report_for_advice` 写库前按同一口径补齐 action_advice（评级×持仓×盈亏矩阵）与 risk_warnings（_detect_risks），markdown 与每日报告路径一致（不改 generate_advice，B24 红线）。
+- 验证：顺丰实测——刷新后 markdown 恢复「操作建议：持有观望」+「风险提示：MA5低于MA20 均线空头排列」；写库快照与 08-15 日报内容一致。
+
 ## [2026-08-15] 刷新报告数据完整度提示丢失修复（020R-41）
 
 - 用户反馈：小米原本有多项数据滞后提示，点「刷新报告」后只剩一条（资金面提示）。

@@ -634,8 +634,30 @@ def _save_daily_report_for_advice(stock_id, analysis, prev_score, engine_used, r
             ]
         except Exception as e:  # noqa: BLE001
             logger.warning(f'[020R-41] 数据完整度行补充失败 stock_id={stock_id}: {e}')
+
+        # 020R-42：markdown 所需的 action_advice/risk_warnings 在 generate_advice 组装后的
+        # result 中才有，此处按同一口径在写库前补齐——否则刷新报告后「操作建议」变空、
+        # 「风险提示」段消失（与每日报告路径 markdown 不一致）
+        md_source = dict(analysis)
+        try:
+            pos = _read_position(stock_id)
+            latest_close_info = _read_latest_close(stock_id)
+            has_position = pos is not None
+            is_profitable = bool(
+                has_position
+                and latest_close_info
+                and pos['cost_price'] > 0
+                and latest_close_info['close'] >= pos['cost_price']
+            )
+            md_source['action_advice'] = _determine_action(
+                analysis.get('rating', '持有观望'), has_position, is_profitable
+            )
+            md_source['risk_warnings'] = _detect_risks(analysis.get('dimensions', {}))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f'[020R-42] markdown 建议/风险补齐失败 stock_id={stock_id}: {e}')
+
         generated_at = datetime.now(_CN_TZ).isoformat()
-        markdown = _build_markdown_single(analysis, prev_score)
+        markdown = _build_markdown_single(md_source, prev_score)
 
         # 查询是否已有该日该股票 daily 报告
         cursor.execute(
