@@ -412,9 +412,9 @@
                     let html = '<table><thead><tr>' +
                         '<th style="width:30px;"><input type="checkbox" onclick="toggleAllStocks(this)"></th>' +
                         '<th>市场</th><th>代码</th><th>名称</th><th>分组</th>' +
+                        sortableTh('stocks', 'latest_price', '最新价') +
                         '<th>持仓成本</th><th>持仓数量</th>' +
                         sortableTh('stocks', 'market_value', '市值') +
-                        sortableTh('stocks', 'latest_price', '最新价') +
                         sortableTh('stocks', 'unrealized_pnl', '浮动盈亏') +
                         '<th>价格时间</th>' +
                         '<th>操作</th></tr></thead><tbody>';
@@ -466,19 +466,19 @@
                             '<td><strong>' + s.symbol + '</strong></td>' +
                             '<td>' + (s.name || '—') + obosBadge(s.obos_signal) + '</td>' +
                             '<td>' + (s.group_name || '—') + '</td>' +
+                            '<td>' + priceDisplay + '</td>' +
                             '<td>' + costDisplay + '</td>' +
                             '<td>' + qtyDisplay + '</td>' +
                             '<td>' + mvDisplay + '</td>' +
-                            '<td>' + priceDisplay + '</td>' +
                             '<td>' + upnlDisplay + '</td>' +
                             '<td style="font-size:12px;">' + timeDisplay + '</td>' +
                             '<td style="white-space:nowrap;">' +
                                 '<button class="btn btn-primary btn-sm" style="background:#8e44ad;" onclick="oneClickAnalyze(' + s.id + ', \'' + s.symbol + '\', \'' + s.market + '\')">⚡ 一键分析</button> ' +
                                 '<button class="btn btn-sm" style="background:#2ecc71;color:white;" onclick="viewReport(' + s.id + ')">📊 报告</button> ' +
+                                '<button class="btn btn-sm" style="background:#3498db;color:white;" onclick="viewData(' + s.id + ')">📋 查看数据</button> ' +
                                 '<div style="position:relative;display:inline-block;">' +
                                     '<button class="btn btn-sm" style="background:#f0f0f0;border:1px solid #ccc;" onclick="toggleStockMore(' + s.id + ', event)">⋯ 更多</button>' +
                                     '<div id="stockMore' + s.id + '" class="stock-more-menu" style="display:none;position:absolute;right:0;top:100%;z-index:100;background:#fff;border:1px solid #ddd;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.15);min-width:130px;padding:4px 0;">' +
-                                        '<a href="javascript:void(0)" onclick="event.stopPropagation();viewData(' + s.id + ')" style="display:block;padding:6px 16px;font-size:13px;color:#333;text-decoration:none;">📋 查看数据</a>' +
                                         '<a href="javascript:void(0)" onclick="event.stopPropagation();addStockToHoldings(' + s.id + ',\'' + s.symbol + '\',\'' + (s.name||'').replace(/'/g,' ') + '\',\'' + s.market + '\')" style="display:block;padding:6px 16px;font-size:13px;color:#333;text-decoration:none;">💰 加入持仓</a>' +
                                         '<a href="javascript:void(0)" onclick="event.stopPropagation();openStockEditModal(' + s.id + ',\'' + s.symbol + '\',\'' + (s.name||'').replace(/'/g,' ') + '\',' + (s.group_id||'null') + ')" style="display:block;padding:6px 16px;font-size:13px;color:#333;text-decoration:none;">✏️ 编辑</a>' +
                                         '<a href="javascript:void(0)" onclick="event.stopPropagation();deleteStock(' + s.id + ')" style="display:block;padding:6px 16px;font-size:13px;color:#e74c3c;text-decoration:none;">🗑 删除</a>' +
