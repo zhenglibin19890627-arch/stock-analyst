@@ -116,16 +116,16 @@
         '#watchlist':   { view: 'view-watchlist',   label: '自选股',   init: function() { loadStocks(); } },
         '#trades':      { view: 'view-trades',      label: '交易流水', init: function() { loadAllTrades(); loadAllAdjustments(); } },
         '#report':      { view: 'view-report',      label: '分析报告', init: function() { /* 由 viewReport() 驱动 */ } },
-        '#daily':       { view: 'view-daily',       label: '每日报告', init: function() { loadLatestDailyReport(); } },
         '#dashboard':   { view: 'view-dashboard',   label: '总览看板', init: function() { loadDashboard(); } },
         '#backtest':    { view: 'view-backtest',    label: '回测中心', init: function() { loadBacktestMarketReport(); } }
     };
     var DEFAULT_ROUTE = '#holdings';
     var _viewLoaded = {}; // 记录各视图是否已首次加载
 
-    /** 导航到指定路由（旧 #adjustments 哈希自动归并到 #trades） */
+    /** 导航到指定路由（旧 #adjustments/#daily 哈希自动归并） */
     function navigateTo(hash) {
         if (hash === '#adjustments') hash = '#trades';
+        if (hash === '#daily') hash = '#dashboard';
         if (!ROUTES[hash]) hash = DEFAULT_ROUTE;
         window.location.hash = hash;
     }
@@ -135,6 +135,10 @@
         var hash = window.location.hash || DEFAULT_ROUTE;
         if (hash === '#adjustments') {
             window.location.hash = '#trades'; // 旧链接兼容，触发一次重定向
+            return;
+        }
+        if (hash === '#daily') {
+            window.location.hash = '#dashboard'; // 旧链接兼容，触发一次重定向
             return;
         }
         if (!ROUTES[hash]) hash = DEFAULT_ROUTE;
@@ -3351,8 +3355,12 @@
                 } else {
                     container.innerHTML = '<div class="report-empty">' +
                         '<p style="font-size:18px;margin-bottom:12px;">📅 每日分析报告</p>' +
-                        '<p>暂无报告，请点击「生成今日报告」。</p>' +
-                        '<button class="btn btn-primary" style="margin-top:12px;" onclick="generateDailyReport()">🚀 生成今日报告</button>' +
+                        '<p style="margin-bottom:16px;">暂无报告。基于v5.0引擎为全部自选股生成每日分析汇总报告，含评分变动、关键因子异动、降级提示。</p>' +
+                        '<button class="btn btn-primary" onclick="generateDailyReport()" id="dailyGenBtn">🚀 生成今日报告</button>' +
+                        '<button class="btn btn-warning" onclick="generateIntradayReport()" id="intradayGenBtn" style="margin-left:8px;">📊 盘中快报</button>' +
+                        '<label style="margin-left:16px;font-size:13px;color:#666;cursor:pointer;">' +
+                        '<input type="checkbox" id="dailyForceRefresh" style="vertical-align:middle;"> 强制全量刷新（忽略已有结果）' +
+                        '</label>' +
                         '</div>';
                 }
             })
@@ -3445,8 +3453,9 @@
         });
 
         html += '<div class="report-actions">';
-        html += '<button class="report-back-btn" onclick="generateDailyReport()">🚀 生成今日报告</button>';
-        html += '<button class="report-back-btn" onclick="generateIntradayReport()" style="background:#f39c12;color:#fff;margin-left:10px;">📊 盘中快报</button>';
+        html += '<button class="report-back-btn" id="dailyGenBtn" onclick="generateDailyReport()">🚀 生成今日报告</button>';
+        html += '<button class="report-back-btn" id="intradayGenBtn" onclick="generateIntradayReport()" style="background:#f39c12;color:#fff;margin-left:10px;">📊 盘中快报</button>';
+        html += '<label style="margin-left:16px;font-size:13px;color:#666;cursor:pointer;"><input type="checkbox" id="dailyForceRefresh" style="vertical-align:middle;"> 强制全量刷新（忽略已有结果）</label>';
         html += '<span style="color:#888;font-size:13px;margin-left:15px;">最新报告日期：' + reportDate + '</span>';
         if (batchGenTime) {
             html += '<span style="color:#888;font-size:13px;margin-left:15px;">本批生成时间：' + _fmtGenTime(batchGenTime) + '</span>';
@@ -3561,7 +3570,6 @@
             html += '<span style="color:#888;font-size:13px;margin-right:12px;">生成时间：' + _fmtGenTime(data.generatedAt) + '</span>';
         }
         html += '<button class="btn btn-primary btn-sm" onclick="loadDashboard()" style="margin-right:8px;">🔄 刷新</button>';
-        html += '<button class="btn btn-success btn-sm" onclick="navigateTo(\'#daily\')">📅 每日报告</button>';
         html += '</div></div>';
 
         // ---- 0. 大盘指数区域 (B8) ----
@@ -3634,11 +3642,24 @@
         html += '<div class="card"><div class="card-title">📊 评级分布</div><div id="dashChartRating" style="width:100%;height:300px;"></div></div>';
         html += '</div>';
 
+        // ---- 5. 每日报告融合区（原「每日报告」页面并入总览看板） ----
+        html += '<div class="card">';
+        html += '<div class="card-title">📅 每日报告 <span style="font-size:13px;color:#888;font-weight:normal;">（全部自选股每日汇总，含评分变动、降级提示）</span></div>';
+        // 功能说明（今日报告 vs 盘中快报）
+        html += '<div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px;padding:10px 16px;background:#f8fbff;border:1px solid #e3edf7;border-radius:8px;font-size:13px;color:#555;">';
+        html += '<div><span style="font-weight:600;color:#1a73e8;">🚀 生成今日报告</span>：盘后汇总，生成当日完整分析报告（含评分变动、降级提示）</div>';
+        html += '<div><span style="font-weight:600;color:#f39c12;">📊 盘中快报</span>：盘中实时刷新评分，快速查看当日盘中变化（不覆盖盘后日报）</div>';
+        html += '</div>';
+        html += '<div id="dailyContent"><div class="report-loading">每日报告加载中...</div></div>';
+        html += '</div>';
+
         container.innerHTML = html;
 
         // 渲染表格和图表
         dashRenderTable(stocks);
         dashRenderCharts(stocks, s);
+        // 加载每日报告区
+        loadLatestDailyReport();
     }
 
     function dashRenderTable(stocks) {

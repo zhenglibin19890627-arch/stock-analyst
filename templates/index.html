@@ -18,7 +18,6 @@
         <button class="topnav-tab" data-route="#watchlist" onclick="navigateTo('#watchlist')">📋 自选股</button>
         <button class="topnav-tab" data-route="#trades" onclick="navigateTo('#trades')">📝 交易流水</button>
         <button class="topnav-tab" data-route="#report" onclick="navigateTo('#report')">📊 分析报告</button>
-        <button class="topnav-tab" data-route="#daily" onclick="navigateTo('#daily')">📅 每日报告</button>
         <button class="topnav-tab" data-route="#dashboard" onclick="navigateTo('#dashboard')">📈 总览看板</button>
         <button class="topnav-tab" data-route="#backtest" onclick="navigateTo('#backtest')">🔬 回测中心</button>
     </div>
@@ -183,35 +182,11 @@
     </div>
 </div><!-- /view-report -->
 
-<!-- ========== 视图：每日报告 ========== -->
-<div id="view-daily" class="view">
-    <div class="export-bar no-print">
-        <button class="btn-export" onclick="exportDailyExcel()">📥 导出Excel</button>
-        <button class="btn-export" onclick="window.print()">🖨️ 导出PDF</button>
-    </div>
-    <!-- U2(#6): 今日报告 vs 盘中快报 功能说明（持久显示，不受动态内容替换影响） -->
-    <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px;padding:10px 16px;background:#f8fbff;border:1px solid #e3edf7;border-radius:8px;font-size:13px;color:#555;">
-        <div><span style="font-weight:600;color:#1a73e8;">🚀 生成今日报告</span>：盘后汇总，生成当日完整分析报告（含评分变动、降级提示）</div>
-        <div><span style="font-weight:600;color:#f39c12;">📊 盘中快报</span>：盘中实时刷新评分，快速查看当日盘中变化（不覆盖盘后日报）</div>
-    </div>
-    <div id="dailyContent">
-        <div class="report-empty">
-            <p style="font-size:18px;margin-bottom:12px;">📅 每日分析报告</p>
-            <p style="margin-bottom:16px;">基于v5.0引擎为全部自选股生成每日分析汇总报告，含评分变动、关键因子异动、降级提示。</p>
-            <button class="btn btn-primary" onclick="generateDailyReport()" id="dailyGenBtn">🚀 生成今日报告</button>
-            <button class="btn btn-warning" onclick="generateIntradayReport()" id="intradayGenBtn">📊 盘中快报</button>
-            <button class="btn btn-success" onclick="loadLatestDailyReport()">📄 查看最新报告</button>
-            <label style="margin-left:16px;font-size:13px;color:#666;cursor:pointer;">
-                <input type="checkbox" id="dailyForceRefresh" style="vertical-align:middle;"> 强制全量刷新（忽略已有结果）
-            </label>
-        </div>
-    </div>
-</div><!-- /view-daily -->
-
-<!-- ========== 视图：总览看板 (P2) ========== -->
+<!-- ========== 视图：总览看板 (P2，含每日报告融合区) ========== -->
 <div id="view-dashboard" class="view">
     <div class="export-bar no-print">
-        <button class="btn-export" onclick="window.location='/api/export/watchlist'">📥 导出Excel</button>
+        <button class="btn-export" onclick="window.location='/api/export/watchlist'">📥 看板Excel</button>
+        <button class="btn-export" onclick="exportDailyExcel()">📥 日报Excel</button>
         <button class="btn-export" onclick="window.print()">🖨️ 导出PDF</button>
     </div>
     <div id="dashboardContent">
