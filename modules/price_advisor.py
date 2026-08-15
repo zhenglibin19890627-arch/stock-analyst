@@ -802,26 +802,29 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr, cap
 
 
 def _gen_with_position(close, cost_price, rating, ma60, boll_upper, atr, capital_signal=None):
-    """有持仓：状态机 / 动态止盈 / 网格 / 操作建议 / 浮盈"""
+    """有持仓：状态机 / 动态止盈 / 网格 / 操作建议 / 浮盈
+
+    020P：止盈/止损锚定现价（与成本解耦）——市场不看个人成本，
+    目标与止损只由 评级档位 + 现价 + 技术阻力 决定；
+    成本仅用于浮盈浮亏展示与网格回本位。
+    """
 
     target_gain = RATING_TARGET_GAIN.get(rating, 0.12)
     stop_loss_pct = RATING_STOP_LOSS.get(rating, 0.05)
     min_target_gain = MIN_TARGET_GAIN.get(rating, 0.04)
 
-    # ---- 009新增：动态止盈价（双约束公式）----
-    # 固定止盈价 = cost * (1 + target_gain)
+    # ---- 020P：止盈价锚定现价（双约束公式）----
+    # 固定止盈价 = close * (1 + target_gain)
     # 技术阻力位 = _calc_resistance(close, ma60, boll_upper)
-    # 最低止盈价 = cost * (1 + min_target_gain)
+    # 最低止盈价 = close * (1 + min_target_gain)
     # 止盈价 = max(最低止盈价, min(固定止盈价, 技术阻力位))
-    fixed_tp = cost_price * (1 + target_gain)
+    fixed_tp = close * (1 + target_gain)
     resistance = _calc_resistance(close, ma60, boll_upper)
-    min_tp = cost_price * (1 + min_target_gain)
+    min_tp = close * (1 + min_target_gain)
     take_profit = max(min_tp, min(fixed_tp, resistance))
 
-    # ---- 止损价 ----
-    stop_loss = cost_price * (1 - stop_loss_pct)
-    min_stop = close * 0.90
-    stop_loss = max(stop_loss, min_stop)
+    # ---- 020P：止损价锚定现价（评级止损比例）----
+    stop_loss = close * (1 - stop_loss_pct)
 
     # ---- 009新增：操作建议状态机 ----
     state, state_name, action_suggestion = _determine_action_by_state(

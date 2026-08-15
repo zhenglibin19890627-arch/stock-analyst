@@ -223,26 +223,25 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr):
 
 
 def _gen_with_position(close, cost_price, rating, ma60=None, boll_upper=None, atr=None):
-    """有持仓：止盈价 / 止损价 / 补仓价位（009 动态止盈版）
+    """有持仓：止盈价 / 止损价 / 补仓价位（020P 现价锚定版）
 
-    与 price_advisor._gen_with_position 逻辑一致（L749-764），修改时需双向同步。
-    动态止盈公式：take_profit = max(min_tp, min(fixed_tp, resistance))
+    与 price_advisor._gen_with_position 逻辑一致，修改时需双向同步。
+    020P：止盈/止损锚定现价（与成本解耦）——take_profit = max(min_tp, min(fixed_tp, resistance))
+    其中 fixed_tp/min_tp 均基于 close；止损 = close * (1 - 评级止损比例)。
     补仓价位与 price_advisor._build_grid 有持仓补仓位一致（S4 已破止损时不设）。
     """
     target_gain = RATING_TARGET_GAIN.get(rating, 0.12)
     min_target_gain = MIN_TARGET_GAIN.get(rating, 0.04)
     stop_loss_pct = RATING_STOP_LOSS.get(rating, 0.05)
 
-    # ---- 动态止盈：max(min_tp, min(fixed_tp, resistance)) ----
-    fixed_tp = cost_price * (1 + target_gain)
+    # ---- 动态止盈：max(min_tp, min(fixed_tp, resistance))（020P：锚定现价）----
+    fixed_tp = close * (1 + target_gain)
     resistance = _calc_resistance(close, ma60, boll_upper)
-    min_tp = cost_price * (1 + min_target_gain)
+    min_tp = close * (1 + min_target_gain)
     take_profit = max(min_tp, min(fixed_tp, resistance))
 
-    # ---- 止损价 ----
-    stop_loss = cost_price * (1 - stop_loss_pct)
-    min_stop = close * 0.90
-    stop_loss = max(stop_loss, min_stop)
+    # ---- 止损价（020P：锚定现价，评级比例）----
+    stop_loss = close * (1 - stop_loss_pct)
 
     # ---- 补仓价位（网格补仓位，与 price_advisor._build_grid 同公式）----
     add_price = None
