@@ -625,14 +625,29 @@
 
         .report-top-grid {
             display: grid;
-            grid-template-columns: 300px minmax(400px, 480px);
-            justify-content: start;
+            grid-template-columns: 280px 320px minmax(380px, 460px);
             gap: 12px;
             margin-bottom: 12px;
+            align-items: start;
+        }
+        @media (max-width: 1320px) {
+            .report-top-grid { grid-template-columns: 280px 1fr; }
+            .pa-side-card { grid-column: 1 / -1; }
         }
         @media (max-width: 900px) {
             .report-top-grid { grid-template-columns: 1fr; }
+            .pa-side-card { grid-column: auto; }
         }
+        /* 020R-7：价格建议+网格计划独立卡片（雷达图右侧），内部限宽解除、随卡片宽度 */
+        .pa-side-card {
+            background: white;
+            border-radius: 12px;
+            padding: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            min-width: 0;
+        }
+        .pa-side-card .pa-kv-wrap { max-width: none; }
+        .pa-side-card .pa-grid-table { max-width: none; }
 
         .score-card {
             background: white;
