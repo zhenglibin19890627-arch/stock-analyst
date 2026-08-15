@@ -145,7 +145,7 @@ def _collect_one(stock_id, symbol, market, missing_cap_dates=None):
 
     与日报流程互斥写库：复用 daily_report._generate_lock（短超时）。
     返回 True 表示本轮采集无 failed 维度。
-    020H：东财熔断期间，若该股存在资金面历史缺口日，追加新浪逐日回填。
+    020H：东财熔断期间，若该股存在资金面历史缺口日，追加逐日回填（020I 链序：腾讯 westock --date → 新浪 lscjfb）。
     """
     from modules.daily_report import _generate_lock
 

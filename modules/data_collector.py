@@ -2450,9 +2450,12 @@ def _parse_westock_markdown(text):
     return dict(zip(headers, cells))
 
 
-def _fetch_capital_flow_westock(symbol, market):
+def _fetch_capital_flow_westock(symbol, market, date_str=''):
     """
     020A：腾讯自选股资金面备用层（A股 asfund / 港股 hkfund）。
+    020I：date_str 非空时追加 --date 参数逐日查询历史（补采调度器回填用），
+    并严格校验返回 EndDate == date_str（与新浪 M-2 同一红线：严禁取错日）；
+    不匹配只记录日志、不计入 westock 连续失败（避免回填拖垮实时链路）。
     返回单日 dict {trade_date, main_net_inflow, super_large_net, large_net,
     medium_net, small_net} 或 None。
     - A股返回四档分解（主力=超大+大，与东财同口径）；港股仅主力净额+总额。
@@ -2465,7 +2468,7 @@ def _fetch_capital_flow_westock(symbol, market):
     command = 'hkfund' if market == 'hk_stock' else 'asfund'
     wcode = f'{prefix}{code}'
     try:
-        text = _westock_cli_query(command, wcode)
+        text = _westock_cli_query(command, wcode, date_str=date_str)
         if not text:
             _westock_record_failure()
             return None
@@ -2473,6 +2476,11 @@ def _fetch_capital_flow_westock(symbol, market):
         if not row:
             logger.warning(f'[{symbol}] westock 输出无法解析: {text[:150]}')
             _westock_record_failure()
+            return None
+        if date_str and (row.get('EndDate') or '').strip() != date_str:
+            logger.warning(
+                f'[{symbol}] westock --date {date_str} 返回 EndDate={row.get("EndDate")} 不匹配，放弃'
+            )
             return None
         main_net = _safe_float_wan(row.get('MainNetFlow'))
         jumbo = _safe_float_wan(row.get('JumboNetFlow'))
@@ -3397,7 +3405,7 @@ def _fetch_capital_flow_sina_main(symbol, market, target_date=None):
     Args:
         symbol: str 股票代码（A股，6开头→sh 前缀，0/3开头→sz 前缀；港股不适用返回 None）
         market: str 市场（'a_stock'）
-        target_date: str YYYY-MM-DD；None 表示当日（当日采集 num=2，回补窗口 num=5）
+        target_date: str YYYY-MM-DD；None 表示当日（当日采集 num=2，回补窗口 num=15）
 
     Returns:
         dict 或 None：
@@ -3419,7 +3427,7 @@ def _fetch_capital_flow_sina_main(symbol, market, target_date=None):
             target_date = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
             num = 2  # 当日采集：覆盖今日+上一交易日
         else:
-            num = 5  # 回补窗口：覆盖目标日期（5 个交易日窗口）
+            num = 15  # 回补窗口：覆盖目标日期（15 个交易日窗口，覆盖近 10 交易日完整性口径）
 
         def _request_once(proto):
             url = (
@@ -3502,7 +3510,8 @@ def _fetch_capital_flow_sina_main(symbol, market, target_date=None):
 
 
 def backfill_capital_history(symbol, market, dates):
-    """020H：逐日回补资金面历史缺口（新浪 lscjfb target_date 逐日顶替）。
+    """020H：逐日回补资金面历史缺口。
+    020I：链序改为 腾讯 westock --date（A股+港股）→ 新浪 lscjfb（仅A股）。
 
     供补采调度器在东财不可用（熔断）期间回填近 10 个交易日的历史缺失日；
     EM 恢复后 push2his 120 天历史会自动覆盖回补（顶替行不阻断 EM 回填）。
@@ -3513,11 +3522,25 @@ def backfill_capital_history(symbol, market, dates):
         return []
     filled = []
     for d in dates:
+        source = None
+        row = None
         try:
-            row = _fetch_capital_flow_sina_main(symbol, market, target_date=d)
-            if not row:
-                logger.info(f'[{symbol}] 历史资金面回补 {d}: 新浪无该日数据，跳过')
-                continue
+            row = _fetch_capital_flow_westock(symbol, market, date_str=d)
+            if row:
+                source = 'westock'
+        except Exception:
+            row = None
+        if row is None and market == 'a_stock':
+            try:
+                row = _fetch_capital_flow_sina_main(symbol, market, target_date=d)
+                if row:
+                    source = 'sina_main'
+            except Exception:
+                row = None
+        if not row or not source:
+            logger.info(f'[{symbol}] 历史资金面回补 {d}: 无可用数据源，跳过')
+            continue
+        try:
             conn = get_connection()
             cur = conn.cursor()
             cur.execute(
@@ -3530,7 +3553,7 @@ def backfill_capital_history(symbol, market, dates):
                     row['large_net'],
                     row['medium_net'],
                     row['small_net'],
-                    'sina_main',
+                    source,
                     stock_id,
                     d,
                 ),
@@ -3540,7 +3563,7 @@ def backfill_capital_history(symbol, market, dates):
                     'INSERT OR IGNORE INTO raw_capital_flow '
                     '(stock_id, trade_date, main_net_inflow, super_large_net, large_net, '
                     'medium_net, small_net, is_estimated, capital_source) '
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'sina_main')",
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)',
                     (
                         stock_id,
                         d,
@@ -3549,13 +3572,14 @@ def backfill_capital_history(symbol, market, dates):
                         row['large_net'],
                         row['medium_net'],
                         row['small_net'],
+                        source,
                     ),
                 )
             conn.commit()
             conn.close()
             filled.append(d)
             logger.info(
-                f'[{symbol}] 历史资金面回补成功: {d} 主力={row["main_net_inflow"]}万(sina_main)'
+                f'[{symbol}] 历史资金面回补成功: {d} 主力={row["main_net_inflow"]}万({source})'
             )
         except Exception as e:
             logger.warning(f'[{symbol}] 历史资金面回补 {d} 失败: {e}')
