@@ -115,6 +115,7 @@
         '#holdings':    { view: 'view-holdings',    label: '持仓管理', init: function() { loadPortfolioGroups(); } },
         '#watchlist':   { view: 'view-watchlist',   label: '自选股',   init: function() { loadStocks(); } },
         '#trades':      { view: 'view-trades',      label: '交易流水', init: function() { loadAllTrades(); loadAllAdjustments(); } },
+        '#market':      { view: 'view-market',      label: '市场行情', init: function() { loadMarketOverview(); } },
         '#report':      { view: 'view-report',      label: '分析报告', init: function() { /* 由 viewReport() 驱动 */ } },
         '#dashboard':   { view: 'view-dashboard',   label: '总览看板', init: function() { loadDashboard(); } },
         '#backtest':    { view: 'view-backtest',    label: '回测中心', init: function() { loadBacktestMarketReport(); } }
@@ -3965,7 +3966,12 @@
                 btn.disabled = false;
                 btn.textContent = '🔄 刷新指数评级';
                 if (data.success) {
-                    loadDashboard();
+                    // 市场行情页刷新指数区；否则刷新看板（原有行为）
+                    if (window.location.hash === '#market') {
+                        loadMarketIndexSection();
+                    } else {
+                        loadDashboard();
+                    }
                 } else {
                     alert('指数刷新失败: ' + (data.error || '未知错误'));
                 }
@@ -3975,6 +3981,138 @@
                 btn.textContent = '🔄 刷新指数评级';
                 alert('指数刷新请求失败: ' + e);
             });
+    }
+
+    // ============================================================
+    // 市场行情页：大盘指数 + 行业资金流向
+    // ============================================================
+
+    function loadMarketOverview() {
+        loadMarketIndexSection();
+        loadIndustryFlow();
+    }
+
+    function loadMarketIndexSection() {
+        var dom = document.getElementById('marketIndexSection');
+        if (!dom) return;
+        dom.innerHTML = '<span style="color:#999;font-size:13px;">加载中...</span>';
+        fetch('/api/index-ratings')
+            .then(function(r) { return safeJson(r); })
+            .then(function(data) {
+                if (!dom) return;
+                if (data.success) {
+                    dom.innerHTML = renderIndexSection(data.indices, data.updated_at);
+                } else {
+                    dom.innerHTML = '<div style="color:#e74c3c;font-size:13px;">指数数据获取失败：' + (data.error || '未知错误') + '</div>';
+                }
+            })
+            .catch(function(e) {
+                if (dom) dom.innerHTML = '<div style="color:#e74c3c;font-size:13px;">指数数据请求失败：' + e + '</div>';
+            });
+    }
+
+    function loadIndustryFlow() {
+        var dom = document.getElementById('marketFlowList');
+        var meta = document.getElementById('marketFlowMeta');
+        fetch('/api/market/industry-fund-flow')
+            .then(function(r) { return safeJson(r); })
+            .then(function(data) {
+                if (!data.success) {
+                    if (dom) dom.innerHTML = '<div class="empty">' + (data.error || '行业资金流暂不可用') + '，请点击「🔄 刷新」重试</div>';
+                    return;
+                }
+                if (meta) {
+                    meta.textContent = data.trade_date
+                        ? ('交易日：' + data.trade_date + (data.updated_at ? ' · 更新：' + String(data.updated_at).slice(5, 16) : ''))
+                        : '';
+                }
+                renderIndustryFlowTable(data.items, dom);
+            })
+            .catch(function(e) {
+                if (dom) dom.innerHTML = '<div class="empty">行业资金流请求失败：' + e + '</div>';
+            });
+    }
+
+    function refreshIndustryFlow() {
+        var btn = document.getElementById('marketFlowRefreshBtn');
+        if (btn) { btn.disabled = true; btn.textContent = '刷新中...'; }
+        fetch('/api/market/industry-fund-flow/refresh', {method: 'POST'})
+            .then(function(r) { return safeJson(r); })
+            .then(function(data) {
+                if (btn) { btn.disabled = false; btn.textContent = '🔄 刷新'; }
+                if (data.success) {
+                    var meta = document.getElementById('marketFlowMeta');
+                    if (meta) {
+                        meta.textContent = data.trade_date
+                            ? ('交易日：' + data.trade_date + (data.updated_at ? ' · 更新：' + String(data.updated_at).slice(5, 16) : ''))
+                            : '';
+                    }
+                    renderIndustryFlowTable(data.items, document.getElementById('marketFlowList'));
+                } else {
+                    alert('行业资金流刷新失败：' + (data.error || '未知错误') + '（限流时稍后重试，页面仍显示上次快照）');
+                }
+            })
+            .catch(function(e) {
+                if (btn) { btn.disabled = false; btn.textContent = '🔄 刷新'; }
+                alert('行业资金流刷新请求失败：' + e);
+            });
+    }
+
+    function renderIndustryFlowTable(items, dom) {
+        if (!dom) return;
+        if (!items || items.length === 0) {
+            dom.innerHTML = '<div class="empty">暂无行业资金流数据，请点击「🔄 刷新」获取</div>';
+            return;
+        }
+        var html = '<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f5f5f5;text-align:left;">' +
+            '<th style="padding:8px;border-bottom:2px solid #ddd;width:36px;">#</th>' +
+            '<th style="padding:8px;border-bottom:2px solid #ddd;">行业</th>' +
+            '<th style="padding:8px;border-bottom:2px solid #ddd;">涨跌幅</th>' +
+            '<th style="padding:8px;border-bottom:2px solid #ddd;">主力净流入</th>' +
+            '<th style="padding:8px;border-bottom:2px solid #ddd;">主力净占比</th>' +
+            '<th style="padding:8px;border-bottom:2px solid #ddd;">超大单</th>' +
+            '<th style="padding:8px;border-bottom:2px solid #ddd;">大单</th>' +
+            '<th style="padding:8px;border-bottom:2px solid #ddd;">中单</th>' +
+            '<th style="padding:8px;border-bottom:2px solid #ddd;">小单</th>' +
+            '<th style="padding:8px;border-bottom:2px solid #ddd;">领涨股</th>' +
+            '</tr></thead><tbody>';
+        items.forEach(function(it, i) {
+            html += '<tr style="border-bottom:1px solid #eee;">' +
+                '<td style="padding:6px 8px;color:#999;font-size:12px;">' + (i + 1) + '</td>' +
+                '<td style="padding:6px 8px;"><strong>' + (it.name || '—') + '</strong>' +
+                '<span style="color:#aaa;font-size:11px;margin-left:6px;">' + (it.code || '') + '</span></td>' +
+                '<td style="padding:6px 8px;">' + fmtPct(it.pct_change) + '</td>' +
+                '<td style="padding:6px 8px;">' + fmtFlow(it.main_net) + '</td>' +
+                '<td style="padding:6px 8px;">' + fmtPct(it.main_pct) + '</td>' +
+                '<td style="padding:6px 8px;font-size:12px;">' + fmtFlow(it.super_net) + '</td>' +
+                '<td style="padding:6px 8px;font-size:12px;">' + fmtFlow(it.big_net) + '</td>' +
+                '<td style="padding:6px 8px;font-size:12px;">' + fmtFlow(it.mid_net) + '</td>' +
+                '<td style="padding:6px 8px;font-size:12px;">' + fmtFlow(it.small_net) + '</td>' +
+                '<td style="padding:6px 8px;font-size:12px;color:#666;">' + (it.lead_stock || '—') + '</td>' +
+                '</tr>';
+        });
+        html += '</tbody></table>';
+        dom.innerHTML = html;
+    }
+
+    /** 资金流金额（元）→ 万/亿 格式化，红流入绿流出 */
+    function fmtFlow(v) {
+        if (v == null || isNaN(v)) return '<span style="color:#999;">—</span>';
+        var abs = Math.abs(v);
+        var val = v / 10000;
+        var unit = '万';
+        if (abs >= 100000000) { val = v / 100000000; unit = '亿'; }
+        var color = v > 0 ? '#e74c3c' : (v < 0 ? '#27ae60' : '#888');
+        var sign = v > 0 ? '+' : (v < 0 ? '-' : '');
+        return '<span style="color:' + color + ';font-weight:600;">' + sign +
+            Math.abs(val).toLocaleString('zh-CN', {maximumFractionDigits: 1}) + unit + '</span>';
+    }
+
+    /** 百分比格式化（红涨绿跌） */
+    function fmtPct(v) {
+        if (v == null || isNaN(v)) return '<span style="color:#999;">—</span>';
+        var color = v > 0 ? '#e74c3c' : (v < 0 ? '#27ae60' : '#888');
+        return '<span style="color:' + color + ';font-weight:600;">' + (v > 0 ? '+' : '') + v.toFixed(2) + '%</span>';
     }
 
     // 筛选

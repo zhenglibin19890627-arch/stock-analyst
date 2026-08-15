@@ -254,6 +254,27 @@ def init_database():
     """)
 
     # ============================================================
+    # 6.5 行业资金流向表 —— 市场行情页（东财行业资金流排行快照）
+    # ============================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS industry_fund_flow (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_date DATE NOT NULL,            -- 交易日（东财更新时间戳换算）
+            code TEXT NOT NULL,                  -- 行业代码（BKxxxx）
+            name TEXT NOT NULL,                  -- 行业名称
+            pct_change REAL,                     -- 涨跌幅(%)
+            main_net REAL,                       -- 主力净流入(元)
+            main_pct REAL,                       -- 主力净流入占比(%)
+            super_net REAL,                      -- 超大单净流入(元)
+            big_net REAL,                        -- 大单净流入(元)
+            mid_net REAL,                        -- 中单净流入(元)
+            small_net REAL,                      -- 小单净流入(元)
+            lead_stock TEXT,                     -- 主力净流入最大股
+            created_at TIMESTAMP DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+
+    # ============================================================
     # 7. 消息面数据表 —— 公告、研报等
     # ============================================================
     cursor.execute("""

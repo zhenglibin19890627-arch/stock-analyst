@@ -17,6 +17,7 @@
         <button class="topnav-tab" data-route="#holdings" onclick="navigateTo('#holdings')">💼 持仓管理</button>
         <button class="topnav-tab" data-route="#watchlist" onclick="navigateTo('#watchlist')">📋 自选股</button>
         <button class="topnav-tab" data-route="#trades" onclick="navigateTo('#trades')">📝 交易流水</button>
+        <button class="topnav-tab" data-route="#market" onclick="navigateTo('#market')">🌐 市场行情</button>
         <button class="topnav-tab" data-route="#report" onclick="navigateTo('#report')">📊 分析报告</button>
         <button class="topnav-tab" data-route="#dashboard" onclick="navigateTo('#dashboard')">📈 总览看板</button>
         <button class="topnav-tab" data-route="#backtest" onclick="navigateTo('#backtest')">🔬 回测中心</button>
@@ -181,6 +182,24 @@
         </div>
     </div>
 </div><!-- /view-report -->
+
+<!-- ========== 视图：市场行情（大盘指数 + 行业资金流向） ========== -->
+<div id="view-market" class="view">
+    <div class="card">
+        <div class="card-title">📊 大盘指数 <span style="font-size:13px;color:#888;font-weight:normal;">（主要指数行情与评级）</span></div>
+        <div id="marketIndexSection"><span style="color:#999;font-size:13px;">加载中...</span></div>
+    </div>
+    <div class="card">
+        <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+            <span>💰 行业资金流向 <span style="font-size:13px;color:#888;font-weight:normal;">（主力/大单净流入排行，红流入·绿流出）</span></span>
+            <span style="font-weight:normal;">
+                <span id="marketFlowMeta" style="font-size:13px;color:#888;margin-right:12px;"></span>
+                <button class="btn btn-primary btn-sm" id="marketFlowRefreshBtn" onclick="refreshIndustryFlow()">🔄 刷新</button>
+            </span>
+        </div>
+        <div id="marketFlowList"><span style="color:#999;font-size:13px;">加载中...</span></div>
+    </div>
+</div>
 
 <!-- ========== 视图：总览看板 (P2，含每日报告融合区) ========== -->
 <div id="view-dashboard" class="view">
