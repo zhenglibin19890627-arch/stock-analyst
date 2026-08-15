@@ -2954,7 +2954,7 @@
         html += '</div><!-- /report-top-grid -->';
 
         // 3. 四维评分详情（2×2网格，紧跟首屏评分卡后）
-        html += '<div class="card">';
+        html += '<div class="card dim-detail-card">';
         html += '<div class="card-title" style="font-size:16px;">四维评分详情</div>';
         html += '<div class="dim-grid">';
         html += _renderDimensionCard('kline', '技术面', dims.kline || dims.technical);
@@ -2964,11 +2964,8 @@
         html += '</div>';
         html += '</div>';
 
-        // 4. K线图（次要信息，下移）
-        html += '<div class="kline-card">';
-        html += '<div class="card-title" style="font-size:15px;margin-bottom:8px;">K线走势（最近20个交易日）</div>';
-        html += '<div id="klineChart"></div>';
-        html += '</div>';
+        // 4. K线图卡片已移除（020R：用户裁定报告页不再平铺K线卡片；
+        // K线数据仍可在「数据」页查看，评分雷达/详情/建议紧接展示）
 
         // 5. 投资建议详情
         html += '<div class="advice-card">';
@@ -3151,9 +3148,8 @@
 
         container.innerHTML = html;
 
-        // 渲染 ECharts 图表
+        // 渲染 ECharts 图表（020R：K线卡片已移除，仅雷达图）
         _renderRadarChart(dims);
-        _renderKlineChart(klineData);
     }
 
     // ============================================================
@@ -4066,9 +4062,9 @@
             radar: {
                 indicator: indicator,
                 shape: 'polygon',
-                radius: '65%',
+                radius: '72%',
                 splitNumber: 4,
-                axisName: { color: '#333', fontSize: 13, fontWeight: 600 },
+                axisName: { color: '#444', fontSize: 12, fontWeight: 600 },
                 splitLine: { lineStyle: { color: '#e0e0e0' } },
                 splitArea: { areaStyle: { color: ['#fafafa', '#f5f5f5', '#fafafa', '#f0f0f0'] } },
                 axisLine: { lineStyle: { color: '#ccc' } }
@@ -4081,7 +4077,7 @@
                     areaStyle: { color: 'rgba(26, 115, 232, 0.2)' },
                     lineStyle: { color: '#1a73e8', width: 2 },
                     itemStyle: { color: '#1a73e8' },
-                    symbolSize: 6
+                    symbolSize: 5
                 }]
             }]
         };
