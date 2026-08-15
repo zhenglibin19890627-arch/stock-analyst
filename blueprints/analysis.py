@@ -69,6 +69,32 @@ def _fundamental_detail_for_stock(stock_id):
         return None
 
 
+def _capital_detail_for_stock(stock_id):
+    """020R-38：读取 raw_capital_flow，计算资金面三个子项展示明细（主力/北向/两融）。
+
+    纯展示层增强：失败或数据不足时返回 None，不影响报告主流程。
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT trade_date, main_net_inflow, north_holding_change, margin_balance '
+            'FROM raw_capital_flow WHERE stock_id = ? ORDER BY trade_date ASC',
+            (stock_id,),
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        if not rows:
+            return None
+
+        from modules.capital_detail import compute_capital_detail
+
+        return compute_capital_detail(rows)
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning(f'资金面指标明细计算失败 stock_id={stock_id}: {e}')
+        return None
+
+
 @bp.route('/api/stocks/<int:stock_id>/analyze', methods=['POST'])
 def api_analyze_stock(stock_id):
     """执行四维分析引擎评分（统一走 advisor.generate_advice 入口，与每日报告一致）"""
@@ -405,6 +431,8 @@ def api_get_report_latest(stock_id):
     result['technical_detail'] = _technical_detail_for_stock(stock_id)
     # 020R-37：基本面指标明细（估值/盈利/成长/现金流/财务健康，供基本面卡展示）
     result['fundamental_detail'] = _fundamental_detail_for_stock(stock_id)
+    # 020R-38：资金面指标明细（主力/北向/两融，供资金面卡展示）
+    result['capital_detail'] = _capital_detail_for_stock(stock_id)
 
     return jsonify(result)
 
@@ -434,6 +462,8 @@ def api_advise_stock(stock_id):
             result['technical_detail'] = _technical_detail_for_stock(stock_id)
             # 020R-37：基本面指标明细（估值/盈利/成长/现金流/财务健康）
             result['fundamental_detail'] = _fundamental_detail_for_stock(stock_id)
+            # 020R-38：资金面指标明细（主力/北向/两融）
+            result['capital_detail'] = _capital_detail_for_stock(stock_id)
         return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'message': f'建议生成失败: {e!s}'}), 500

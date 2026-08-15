@@ -2797,6 +2797,7 @@
     var _reportStockId = null;
     var _reportTechDetail = null; // 020R-36：技术指标明细（供技术面卡渲染）
     var _reportFundDetail = null; // 020R-37：基本面指标明细（供基本面卡渲染）
+    var _reportCapDetail = null;  // 020R-38：资金面指标明细（供资金面卡渲染）
     var _radarChart = null;
     var _klineChart = null;
 
@@ -3084,9 +3085,10 @@
         html += '</div><!-- /report-top-grid -->';
 
         // 3. 四维评分详情（2×2网格，紧跟首屏评分卡后）
-        // 020R-36/37：技术/基本面指标明细并入对应维度卡内
+        // 020R-36/37/38：技术/基本面/资金面指标明细并入对应维度卡内
         _reportTechDetail = adviseData.technical_detail || null;
         _reportFundDetail = adviseData.fundamental_detail || null;
+        _reportCapDetail = adviseData.capital_detail || null;
         html += '<div class="card dim-detail-card">';
         html += '<div class="card-title" style="font-size:15px;margin-bottom:6px;">四维评分详情</div>';
         html += '<div class="dim-grid">';
@@ -4238,6 +4240,9 @@
         } else if (key === 'fundamental' && _reportFundDetail) {
             // 020R-37：基本面指标明细并入基本面卡（估值/盈利/成长/现金流/财务健康 + 基本面趋势）
             factorsHtml = _renderFundamentalRows(_reportFundDetail, factors);
+        } else if (key === 'capital_flow' && _reportCapDetail) {
+            // 020R-38：资金面指标明细并入资金面卡（主力资金/互联互通/杠杆资金）
+            factorsHtml = _renderCapitalRows(_reportCapDetail);
         } else if (topFactors.length === 0) {
             factorsHtml = '<span style="color:#bbb;font-size:12px;">暂无关键因子</span>';
         } else {
@@ -4371,6 +4376,60 @@
         if (factors && factors.fund_trend) {
             html += _row('基本面趋势', '<span style="color:#333;font-weight:400;">' + String(factors.fund_trend) + '</span>');
         }
+        return html;
+    }
+
+    /**
+     * 020R-38：资金面指标明细——状态语义着色（流入/买入/增加红，流出/卖出/减少绿）
+     */
+    function _capitalStateColor(state) {
+        if (!state) return '#666';
+        if (/(流入|买入|增加)/.test(state)) return '#e74c3c';
+        if (/(流出|卖出|减少)/.test(state)) return '#27ae60';
+        return '#666';
+    }
+
+    /** 万元金额 → 万/亿 显示（带符号） */
+    function _wanFmt(v) {
+        if (v == null || isNaN(v)) return '—';
+        var sign = v > 0 ? '+' : (v < 0 ? '-' : '');
+        var abs = Math.abs(v);
+        var text = abs >= 10000 ? (abs / 10000).toFixed(2) + '亿' : abs.toFixed(0) + '万';
+        return sign + text;
+    }
+
+    /**
+     * 020R-38：资金面指标明细行（并入资金面卡内）——主力资金/主力5日均/互联互通/杠杆资金
+     */
+    function _renderCapitalRows(cd) {
+        function _fv(value, state) {
+            var color = _capitalStateColor(state);
+            return '<span style="color:' + color + ';">' + value +
+                (state ? ' ' + state : '') + '</span>';
+        }
+        function _row(label, html) {
+            return '<div class="factor-row">' +
+                '<span class="factor-label">' + label + '</span>' +
+                '<span class="factor-val">' + html + '</span></div>';
+        }
+        var html = '<div style="font-size:11px;color:#999;margin-bottom:2px;">资金面指标明细' +
+            (cd.trade_date ? '（数据截至 ' + cd.trade_date + '）' : '') + '</div>';
+        // 1) 主力资金（权重 55%）
+        html += _row('主力资金',
+            cd.main_net != null ? _fv(_wanFmt(cd.main_net), cd.main_state) :
+            '<span style="color:#999;">数据缺失</span>');
+        // 主力 5 日均
+        if (cd.main_avg_5d != null) {
+            html += _row('主力5日均', '<span style="color:#333;font-weight:400;">' + _wanFmt(cd.main_avg_5d) + '</span>');
+        }
+        // 2) 互联互通（权重 10%）
+        html += _row('互联互通',
+            cd.north_net != null ? ('北向 ' + _fv(_wanFmt(cd.north_net), cd.north_state)) :
+            '<span style="color:#999;">数据缺失（北向数据源已停更）</span>');
+        // 3) 杠杆资金（权重 35%）
+        html += _row('杠杆资金',
+            cd.margin_chg != null ? ('融资余额 ' + _fv(_wanFmt(cd.margin_chg), cd.margin_state)) :
+            '<span style="color:#999;">数据缺失</span>');
         return html;
     }
 
