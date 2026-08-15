@@ -3120,6 +3120,8 @@
                 // data_quality 及右侧维度亮点卡内的数据完整度重复（020R-16）
                 detailText = detailText.replace(/\n- \*\*数据完整度\*\*[^\n]*/g, '');
                 detailText = detailText.replace(/\n## 数据完整度[\s\S]*$/g, '');
+                // 020R-43：风险提示块移至下方固定「风险提示」区，正文不再重复展示
+                detailText = detailText.replace(/\n- \*\*风险提示\*\*：[\s\S]*$/, '');
             }
             // 020R-14：markdown 渲染（marked）；未加载时降级为纯文本换行
             var _mdHtml = '';

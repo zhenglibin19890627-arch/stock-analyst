@@ -1,5 +1,13 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-15] 综合分析刷新前后格式统一（020R-43）
+
+- 用户反馈（中芯国际对比）：刷之前综合分析正文是结构化 markdown 但固定「风险提示」区显示暂无；刷之后正文变成一段纯文本段落，格式变了。
+- 根因：① 快照路径 report-latest 未返回 risk_warnings 字段（风险只在 markdown 里）；② 实时路径 advice_detail 是段落文本（_build_detail_text），而快照是结构化 markdown。
+- 修复：/advise、/analyze、/refresh-full 的 advice_detail 统一改用 `_build_markdown_single` 生成结构化 markdown（与快照路径同款）；report-latest 从日报 markdown 解析出 risk_warnings 字段返回；前端正文剥离「风险提示」块（与固定风险提示区去重）。
+- 效果：两条路径综合分析结构完全一致——正文（评分/操作建议/四维）+ 消息面摘要 + 风险提示（同 3 条）。
+- 验证：中芯国际实测——快照与实时均返回 3 条风险提示，advice_detail 均为 `### 中芯国际 (688981) — 🚀 v5引擎` 结构化 markdown。
+
 ## [2026-08-15] 刷新报告综合分析内容变化修复（020R-42）
 
 - 用户反馈：顺丰控股点刷新后综合分析卡片发生变化（操作建议变空、风险提示消失）。

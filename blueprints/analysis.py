@@ -133,6 +133,26 @@ def _news_detail_for_stock(stock_id):
         return None
 
 
+def _parse_markdown_risks(md):
+    """020R-43：从 markdown_content 解析「**风险提示**」列表（快照路径 risk_warnings 字段来源）。"""
+    risks = []
+    in_risk = False
+    for line in (md or '').split('\n'):
+        if '**风险提示**' in line:
+            in_risk = True
+            continue
+        if not in_risk:
+            continue
+        s = line.strip()
+        if s.startswith('- '):
+            risks.append(s[2:].strip())
+        elif s == '':
+            continue
+        else:
+            break
+    return risks
+
+
 def _enrich_data_warnings(result, stock_id):
     """020R-41：advise/analyze 响应补齐「数据完整度」行（与每日报告路径同口径）。
 
@@ -167,6 +187,10 @@ def api_analyze_stock(stock_id):
                 result['position_advice'] = result['price_advice']['action_suggestion']
             # 020R-41：补齐数据完整度行（与每日报告路径一致）
             _enrich_data_warnings(result, stock_id)
+            # 020R-43：advice_detail 统一为结构化 markdown（与快照路径一致，不再是一段纯文本）
+            from modules.advisor import _build_markdown_single
+
+            result['advice_detail'] = _build_markdown_single(result, result.get('previous_score'))
         return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'message': f'分析失败: {e!s}'}), 500
@@ -206,6 +230,10 @@ def api_refresh_full(stock_id):
                 result['position_advice'] = result['price_advice']['action_suggestion']
             # 020R-41：补齐数据完整度行（与每日报告路径一致）
             _enrich_data_warnings(result, stock_id)
+            # 020R-43：advice_detail 统一为结构化 markdown（与快照路径一致）
+            from modules.advisor import _build_markdown_single
+
+            result['advice_detail'] = _build_markdown_single(result, result.get('previous_score'))
 
         return jsonify(result)
     except Exception as e:
@@ -494,6 +522,8 @@ def api_get_report_latest(stock_id):
     result['capital_detail'] = _capital_detail_for_stock(stock_id)
     # 020R-39：消息面指标明细（情绪/股东行为，供消息面卡展示）
     result['news_detail'] = _news_detail_for_stock(stock_id)
+    # 020R-43：快照路径补齐 risk_warnings（从日报 markdown 解析，与实时路径一致）
+    result['risk_warnings'] = _parse_markdown_risks(row['markdown_content'])
 
     return jsonify(result)
 
@@ -521,6 +551,10 @@ def api_advise_stock(stock_id):
             result['generated_at'] = datetime.now(_CN_TZ).isoformat()
             # 020R-41：补齐数据完整度行（与每日报告路径一致）
             _enrich_data_warnings(result, stock_id)
+            # 020R-43：advice_detail 统一为结构化 markdown（与快照路径一致，不再是一段纯文本）
+            from modules.advisor import _build_markdown_single
+
+            result['advice_detail'] = _build_markdown_single(result, result.get('previous_score'))
             # 020R-35：技术指标明细（均线/MACD/RSI/KDJ/布林/量能）
             result['technical_detail'] = _technical_detail_for_stock(stock_id)
             # 020R-37：基本面指标明细（估值/盈利/成长/现金流/财务健康）
