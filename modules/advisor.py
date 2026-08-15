@@ -490,10 +490,8 @@ def _pick_top_factors(dim_key, factors_dict):
     count = 0
     for k in keys:
         if k in factors_dict and factors_dict[k] is not None:
-            val = factors_dict[k]
-            if isinstance(val, str) and len(val) > 50:
-                val = val[:50] + '...'
-            result[k] = val
+            # 020R-6：不再截断因子值——长文本完整入参，展示层负责换行完整显示
+            result[k] = factors_dict[k]
             count += 1
             if count >= 3:
                 break
@@ -502,10 +500,8 @@ def _pick_top_factors(dim_key, factors_dict):
         if count >= 4:
             break
         if k not in result and not k.startswith('_') and v is not None:
-            val = v
-            if isinstance(val, str) and len(val) > 50:
-                val = val[:50] + '...'
-            result[k] = val
+            # 020R-6：不再截断因子值（同上）
+            result[k] = v
             count += 1
     return result
 
@@ -1364,10 +1360,8 @@ def _build_news_factors(factors, stock_data, stock_id):
                 factors['news_activity'] = f'近日本{total}条'
             title = row['top_news_title']
             if title:
-                t = str(title)
-                if len(t) > 30:
-                    t = t[:30] + '...'
-                factors['top_news'] = t
+                # 020R-6：新闻标题不再截断（展示层换行完整显示）
+                factors['top_news'] = str(title)
     except Exception as e:
         logger.debug(f'[B20] news 明细读取失败 stock_id={stock_id}: {e}')
 
