@@ -629,11 +629,13 @@ def api_get_all_cost_adjustments():
     """全局成本修正历史列表（所有持仓，审计追溯）"""
     conn = get_connection()
     cursor = conn.cursor()
+    # 020R-22：直接用修正记录自带的 stock_id 关联股票——
+    # 此前经 holdings 关联，持仓被删后 holding 断链，h.stock_id(NULL) 还会覆盖
+    # pca.stock_id 导致股票代码/名称丢失
     cursor.execute("""
-        SELECT pca.*, h.stock_id, s.symbol, s.name
+        SELECT pca.*, s.symbol, s.name
         FROM position_cost_adjustments pca
-        LEFT JOIN holdings h ON pca.holding_id = h.id
-        LEFT JOIN stocks s ON h.stock_id = s.id
+        LEFT JOIN stocks s ON pca.stock_id = s.id
         ORDER BY pca.created_at DESC
     """)
     records = [dict(row) for row in cursor.fetchall()]
