@@ -3185,7 +3185,8 @@
                 };
                 var dwOrder = { 'bad': 0, 'warn': 1, 'info': 2, 'good': 3 };
                 var dwItems = adviseData.data_warnings.map(function(w) {
-                    return { text: w, state: _classifyDw(w) };
+                    // 020R-32：去掉每条前缀「数据完整度：」，只显示维度名与状态
+                    return { text: w.replace(/^数据完整度：/, ''), state: _classifyDw(w) };
                 }).sort(function(a, b) {
                     var oa = dwOrder[a.state] != null ? dwOrder[a.state] : 9;
                     var ob = dwOrder[b.state] != null ? dwOrder[b.state] : 9;
