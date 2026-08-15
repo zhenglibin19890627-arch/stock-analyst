@@ -1,5 +1,14 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-15] 个股报告页显示完整性修复（020M）
+
+- 背景：周六查看个股报告页显示不完整——当日(非交易日)无报告时，report-latest 走实时生成路径，且回退查询用全表 MAX(report_date)，部分股票已有当日行时其余股票回退失败。
+- 修复 1：周末/休市日（weekday>=5）跳过实时生成，直接回退该股票最新日报快照（含综合文本 markdown）；交易日实时路径补齐 `advice_detail`（与日报同源 `_build_markdown_single`）。
+- 修复 2：回退查询改为按股票取 `MAX(report_date)`，杜绝"别的股票才有报告的日期"导致本股票查无报告。
+- 修复 3：快照响应补齐 `action_advice`（取价格建议操作）、`latest_close`/`latest_close_date`（查最新K线）——评分卡"建议"行与"最新收盘"行不再缺失。
+- 数据清理（先备份 db_backup_20260815_133847_pre_0815_cleanup.db）：删除 10 只股票由实时生成意外写入的 08-15（周六）daily_reports 行，统一回到 08-14 真实交易日口径。
+- 验证：29/29 只股票 report-latest 字段齐全（advice_detail/action_advice/latest_close/latest_close_date/rating_date=08-14）。
+
 ## [2026-08-15] 前端数据完整性修复（020L：周末守卫 + 来源升级 + 同花顺回溯）
 
 - 前端审计发现三类问题：① 23 只 A股各有一条 08-09（周日）估算脏行，挤占资金面 LIMIT 10 展示名额；② 近 10 交易日窗口内 33 格新浪顶替 + 6 格估算兜底；③ 同花顺净额全窗口仅 71/230 格有值。

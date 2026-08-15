@@ -1,5 +1,7 @@
 """四维分析/评级/建议/v5 评分演示 API 蓝图(自 app.py 拆分,函数体零改动)。"""
 
+import logging
+
 from flask import Blueprint, jsonify, request
 
 from blueprints._utils import _derive_obos_signal, _resolve_report_type
@@ -117,29 +119,55 @@ def api_get_report_latest(stock_id):
     # B11-DETAIL-LOAD：当日无报告时，自动触发分析（静默）
     if not row:
         conn.close()
-        try:
-            from modules.advisor import generate_advice
+        # 020M：周末/休市日不实时生成——实时 advice 缺日报快照才有的综合文本(markdown)，
+        # 前端「投资建议详情-综合分析」会整块缺失；周末直接回退最新历史日报快照（完整展示）。
+        _is_weekend = datetime.now(_CN_TZ).weekday() >= 5
+        if _is_weekend:
+            logging.getLogger(__name__).info(
+                f'[report-latest] stock_id={stock_id} 当日({today})无报告且为周末，'
+                '跳过实时生成，直接回退最新日报快照（020M）'
+            )
+        else:
+            try:
+                from modules.advisor import generate_advice
 
-            advice = generate_advice(stock_id)
-            if advice.get('success'):
-                # 005: 追加 price_advice（与 /advise 端点一致）
-                from modules.price_advisor import generate_price_advice as _gpa2
+                advice = generate_advice(stock_id)
+                if advice.get('success'):
+                    # 005: 追加 price_advice（与 /advise 端点一致）
+                    from modules.price_advisor import generate_price_advice as _gpa2
 
-                advice['price_advice'] = _gpa2(stock_id, advice)
-                # 009补充：动态操作建议覆盖旧建议，避免矛盾
-                if advice.get('price_advice', {}).get('action_suggestion'):
-                    advice['position_advice'] = advice['price_advice']['action_suggestion']
-                # 分析成功，直接返回引擎结果
-                # 019D: 补充 generated_at（报告生成时刻，与 DB 行路径一致）
-                advice['generated_at'] = datetime.now(_CN_TZ).isoformat()
-                return jsonify(advice)
-        except Exception:
-            pass
+                    advice['price_advice'] = _gpa2(stock_id, advice)
+                    # 009补充：动态操作建议覆盖旧建议，避免矛盾
+                    if advice.get('price_advice', {}).get('action_suggestion'):
+                        advice['position_advice'] = advice['price_advice']['action_suggestion']
+                    # 020M：补齐综合文本（与日报快照同源 markdown），前端「综合分析」不再缺失
+                    try:
+                        from modules.advisor import _build_markdown_single as _bmd
+                        from modules.daily_report import _get_prev_score as _gps
+
+                        _prev = _gps(stock_id, today)
+                        advice['advice_detail'] = _bmd(advice, _prev)
+                    except Exception as _e_md:
+                        logging.getLogger(__name__).warning(
+                            f'[report-latest] advice_detail 构建失败: {_e_md}'
+                        )
+                    # 分析成功，直接返回引擎结果
+                    # 019D: 补充 generated_at（报告生成时刻，与 DB 行路径一致）
+                    advice['generated_at'] = datetime.now(_CN_TZ).isoformat()
+                    return jsonify(advice)
+            except Exception:
+                pass
 
         # 引擎也失败，回退到历史报告
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT MAX(report_date) as latest_date FROM daily_reports')
+        # 020M：按股票取最新报告日期（而非全表 MAX）——部分股票已有当日行时，
+        # 不会回退到"别的股票才有报告的日期"导致本股票查无报告
+        cursor.execute(
+            "SELECT MAX(report_date) as latest_date FROM daily_reports "
+            "WHERE stock_id = ? AND status='ok'",
+            (stock_id,),
+        )
         date_row = cursor.fetchone()
         latest_date = date_row['latest_date'] if date_row else None
 
@@ -244,6 +272,10 @@ def api_get_report_latest(stock_id):
 
     # 005: price_advice 实时计算（不使用日报缓存，确保持仓状态正确识别）
     # Bugfix: 日报缓存中的 price_advice 可能在持仓修复前生成，导致状态错误
+    # 020M：latest_close/latest_close_date 提升为结果字段（快照路径原缺，前端
+    # 「最新收盘」行不显示）
+    _latest_close = None
+    _latest_close_date = None
     price_advice = None
     try:
         from modules.price_advisor import generate_price_advice as _gpa
@@ -252,12 +284,14 @@ def api_get_report_latest(stock_id):
         _conn_pa = get_connection()
         _cur_pa = _conn_pa.cursor()
         _cur_pa.execute(
-            'SELECT close FROM raw_kline WHERE stock_id=? ORDER BY trade_date DESC LIMIT 1',
+            "SELECT close, substr(trade_date, 1, 10) AS td FROM raw_kline "
+            'WHERE stock_id=? ORDER BY trade_date DESC LIMIT 1',
             (stock_id,),
         )
         _r = _cur_pa.fetchone()
         _conn_pa.close()
         _latest_close = float(_r['close']) if _r and _r['close'] else None
+        _latest_close_date = _r['td'] if _r else None
         price_advice = _gpa(
             stock_id,
             {
@@ -267,8 +301,6 @@ def api_get_report_latest(stock_id):
             },
         )
     except Exception as _e:
-        import logging
-
         logging.getLogger(__name__).warning(f'report-latest price_advice 实时计算失败: {_e}')
 
     result = {
@@ -293,6 +325,10 @@ def api_get_report_latest(stock_id):
         'advice_detail': advice_detail,
         'position_advice': None,
         'price_advice': price_advice,
+        # 020M：补齐快照路径缺失的展示字段（实时 advise 路径有、快照路径原缺）
+        'action_advice': (price_advice or {}).get('action_suggestion'),
+        'latest_close': _latest_close,
+        'latest_close_date': _latest_close_date,
         'strongest_dim': strongest_dim,
         'weakest_dim': weakest_dim,
         'data_quality': data_quality if data_quality else None,
