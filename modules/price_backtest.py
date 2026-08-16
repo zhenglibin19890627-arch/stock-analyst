@@ -928,6 +928,76 @@ def compute_price_backtest_report(market='a_stock'):
         },
     }
 
+    # ---- 020R-52：真实样本口径（主口径）----
+    # 真实评级回测点 = anchor_rating_date 非空（回测时点有真实评级记录，无未来函数）；
+    # anchor_rating_date 为空 = 历史重建点（未来函数偏差，仅作参照）。
+    real_rows = [r for r in rows if r.get('anchor_rating_date')]
+    real_total = len(real_rows)
+
+    def _real_hit(field):
+        valid = [r for r in real_rows if r.get(field) is not None]
+        if not valid:
+            return None
+        return round(sum(1 for r in valid if r[field] == 1) / len(valid), 4)
+
+    def _real_avg_days(field_hit, field_days):
+        hit_rows = [
+            r for r in real_rows if r.get(field_hit) == 1 and r.get(field_days) is not None
+        ]
+        if not hit_rows:
+            return None
+        return round(sum(r[field_days] for r in hit_rows) / len(hit_rows), 1)
+
+    real_hit_rates = {
+        't5': {
+            'buy_range': _real_hit('t5_hit_buy_range'),
+            'target': _real_hit('t5_hit_target'),
+            'stop_loss': _real_hit('t5_hit_stop_loss'),
+            'take_profit': _real_hit('t5_hit_take_profit'),
+        },
+        't20': {
+            'buy_range': _real_hit('t20_hit_buy_range'),
+            'target': _real_hit('t20_hit_target'),
+            'stop_loss': _real_hit('t20_hit_stop_loss'),
+            'take_profit': _real_hit('t20_hit_take_profit'),
+        },
+    }
+    real_avg_days = {
+        't5': {
+            'buy_range': _real_avg_days('t5_hit_buy_range', 't5_days_to_buy_range'),
+            'target': _real_avg_days('t5_hit_target', 't5_days_to_target'),
+            'stop_loss': _real_avg_days('t5_hit_stop_loss', 't5_days_to_stop_loss'),
+            'take_profit': _real_avg_days('t5_hit_take_profit', 't5_days_to_take_profit'),
+        },
+        't20': {
+            'buy_range': _real_avg_days('t20_hit_buy_range', 't20_days_to_buy_range'),
+            'target': _real_avg_days('t20_hit_target', 't20_days_to_target'),
+            'stop_loss': _real_avg_days('t20_hit_stop_loss', 't20_days_to_stop_loss'),
+            'take_profit': _real_avg_days('t20_hit_take_profit', 't20_days_to_take_profit'),
+        },
+    }
+    real_risk_reward = None
+    if (
+        real_hit_rates['t20']['target'] is not None
+        and real_hit_rates['t20']['stop_loss'] is not None
+        and real_hit_rates['t20']['stop_loss'] > 0
+    ):
+        real_risk_reward = round(
+            real_hit_rates['t20']['target'] / real_hit_rates['t20']['stop_loss'], 2
+        )
+    real_composite_score = None
+    if (
+        real_hit_rates['t20']['target'] is not None
+        and real_hit_rates['t20']['buy_range'] is not None
+        and real_hit_rates['t20']['stop_loss'] is not None
+    ):
+        real_composite_score = round(
+            real_hit_rates['t20']['target'] * 0.4
+            + real_hit_rates['t20']['buy_range'] * 0.3
+            + (1 - real_hit_rates['t20']['stop_loss']) * 0.3,
+            4,
+        )
+
     # ---- 偏差分析 ----
     # 目标价平均偏差: 未命中案例中 (target_price - max_high) / target_price
     target_miss = [
@@ -1089,7 +1159,7 @@ def compute_price_backtest_report(market='a_stock'):
         'note': '近12天有真实评级数据，命中率可能更准确；之前时段存在未来函数偏差',
     }
 
-    # ---- 020R-20/21：客观解读（逐条观点+色调，前端卡片化逐条着色展示）----
+    # ---- 020R-52：真实样本优先解读（主口径=真实评级回测点，无未来函数）----
     interpretation_parts = []
     interpretation_tones = []
 
@@ -1099,41 +1169,81 @@ def compute_price_backtest_report(market='a_stock'):
 
     if total_points > 0:
         _add_interp(
-            f'价格建议回测基于 {total_points} 个回测点（无持仓 {len(no_pos)} 个 / 有持仓 {len(has_pos)} 个）。'
+            f'价格建议回测共 {total_points} 个回测点（无持仓 {len(no_pos)} 个 / 有持仓 {len(has_pos)} 个）：'
+            f'其中 {real_total} 个为真实评级回测点（无未来函数），'
+            f'其余 {total_points - real_total} 个为历史重建点（存在未来函数偏差，仅作参照）。'
         )
-        _t5_b = hit_rates['t5']['buy_range']
-        _t20_b = hit_rates['t20']['buy_range']
-        if _t20_b is not None:
-            _add_interp(
-                f'买入区间命中：T+5 {_t5_b * 100:.0f}%、T+20 {_t20_b * 100:.0f}%——'
-                + ('买入区间定价合理，回调到位概率较高。' if _t20_b >= 0.6 else '买入区间命中一般，可适当放宽或下移区间。'),
-                'good' if _t20_b >= 0.6 else 'bad',
-            )
-        if t20_target is not None:
-            _add_interp(
-                f'目标价命中：T+20 {t20_target * 100:.0f}%——'
-                + ('目标价设定合理，实现概率较高。' if t20_target >= 0.35 else '目标价偏乐观，实际达成概率有限。'),
-                'good' if t20_target >= 0.35 else 'bad',
-            )
-        if t20_stop is not None:
-            _add_interp(
-                f'止损线触发：T+20 {t20_stop * 100:.0f}%——'
-                + ('止损保护有效且触发频率适中。' if t20_stop <= 0.15 else '止损触发偏频繁，止损位可能偏紧。'),
-                'good' if t20_stop <= 0.15 else 'bad',
-            )
-        if risk_reward is not None:
-            _add_interp(
-                f'风险收益比 {risk_reward}（目标命中/止损触发）——'
-                + ('目标兑现机会大于止损风险。' if risk_reward >= 1 else '止损风险高于目标兑现机会，需谨慎。'),
-                'good' if risk_reward >= 1 else 'bad',
-            )
-        if composite_score is not None:
-            _add_interp(
-                f'价格建议综合得分 {composite_score:.3f}（目标价40% + 买入区间30% + 止损控制30%）。',
-                'good' if composite_score >= 0.6 else ('bad' if composite_score < 0.4 else 'neutral'),
-            )
-        if period_comparison.get('note'):
-            _add_interp(f'数据质量提示：{period_comparison["note"]}。', 'bad')
+        if real_total > 0:
+            if real_total < 30:
+                _add_interp(
+                    f'真实样本仅 {real_total} 个（<30），以下命中率仅供趋势参考，样本不足结论易反转。',
+                    'bad',
+                )
+            _r5b = real_hit_rates['t5']['buy_range']
+            _r20b = real_hit_rates['t20']['buy_range']
+            _rt = real_hit_rates['t20']['target']
+            _rs = real_hit_rates['t20']['stop_loss']
+            if _r20b is not None:
+                _add_interp(
+                    f'买入区间命中（真实样本）：T+5 {_r5b * 100:.0f}%、T+20 {_r20b * 100:.0f}%——'
+                    + ('买入区间定价合理，回调到位概率较高。' if _r20b >= 0.6 else '买入区间命中一般，可适当放宽或下移区间。'),
+                    'good' if _r20b >= 0.6 else 'bad',
+                )
+            if _rt is not None:
+                _add_interp(
+                    f'目标价命中（真实样本）：T+20 {_rt * 100:.0f}%——'
+                    + ('目标价设定合理，实现概率较高。' if _rt >= 0.35 else '目标价偏乐观，实际达成概率有限。'),
+                    'good' if _rt >= 0.35 else 'bad',
+                )
+            if _rs is not None:
+                _add_interp(
+                    f'止损线触发（真实样本）：T+20 {_rs * 100:.0f}%——'
+                    + ('止损保护有效且触发频率适中。' if _rs <= 0.15 else '止损触发偏频繁，止损位可能偏紧。'),
+                    'good' if _rs <= 0.15 else 'bad',
+                )
+            if real_risk_reward is not None:
+                _add_interp(
+                    f'风险收益比（真实样本）{real_risk_reward}（目标命中/止损触发）——'
+                    + ('目标兑现机会大于止损风险。' if real_risk_reward >= 1 else '止损风险高于目标兑现机会，需谨慎。'),
+                    'good' if real_risk_reward >= 1 else 'bad',
+                )
+            if real_total >= 30 and real_composite_score is not None:
+                _add_interp(
+                    f'价格建议综合得分（真实样本）{real_composite_score:.3f}'
+                    '（目标价40% + 买入区间30% + 止损控制30%）。',
+                    'good' if real_composite_score >= 0.6 else ('bad' if real_composite_score < 0.4 else 'neutral'),
+                )
+            # 全样本参照（含未来函数偏差的重建点，仅陈列不参与结论）
+            if t20_b is not None and t20_target is not None and t20_stop is not None:
+                _add_interp(
+                    f'全样本参照（含历史重建点）：买入区间 T+20 {t20_b * 100:.0f}%、'
+                    f'目标价 {t20_target * 100:.0f}%、止损 {t20_stop * 100:.0f}%——'
+                    '因含未来函数偏差，不作为定价结论依据。',
+                    'neutral',
+                )
+        else:
+            # 无真实样本：退回全样本解读（沿用旧逻辑），并前置数据质量警示
+            _add_interp('当前无真实评级回测点，以下结论来自历史重建点，存在未来函数偏差，可信度低。', 'bad')
+            _t5_b = hit_rates['t5']['buy_range']
+            _t20_b = hit_rates['t20']['buy_range']
+            if _t20_b is not None:
+                _add_interp(
+                    f'买入区间命中：T+5 {_t5_b * 100:.0f}%、T+20 {_t20_b * 100:.0f}%——'
+                    + ('买入区间定价合理，回调到位概率较高。' if _t20_b >= 0.6 else '买入区间命中一般，可适当放宽或下移区间。'),
+                    'good' if _t20_b >= 0.6 else 'bad',
+                )
+            if t20_target is not None:
+                _add_interp(
+                    f'目标价命中：T+20 {t20_target * 100:.0f}%——'
+                    + ('目标价设定合理，实现概率较高。' if t20_target >= 0.35 else '目标价偏乐观，实际达成概率有限。'),
+                    'good' if t20_target >= 0.35 else 'bad',
+                )
+            if t20_stop is not None:
+                _add_interp(
+                    f'止损线触发：T+20 {t20_stop * 100:.0f}%——'
+                    + ('止损保护有效且触发频率适中。' if t20_stop <= 0.15 else '止损触发偏频繁，止损位可能偏紧。'),
+                    'good' if t20_stop <= 0.15 else 'bad',
+                )
     else:
         _add_interp('暂无价格建议回测数据，无法解读。', 'bad')
 
@@ -1144,6 +1254,12 @@ def compute_price_backtest_report(market='a_stock'):
         'has_position_count': len(has_pos),
         'hit_rates': hit_rates,
         'avg_days': avg_days,
+        # 020R-52：真实样本口径（主口径，前端优先展示）
+        'real_sample': {'total': real_total},
+        'real_hit_rates': real_hit_rates,
+        'real_avg_days': real_avg_days,
+        'real_risk_reward': real_risk_reward,
+        'real_composite_score': real_composite_score,
         'deviation': deviation,
         'rating_stats': rating_stats,
         'risk_reward_ratio': risk_reward,

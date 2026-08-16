@@ -542,11 +542,24 @@ class BacktestEngine:
     def _build_interpretation(self, report):
         """根据真实样本统计生成客观解读评语（纯数据驱动，不硬编码买卖结论）。
 
-        基于：样本量 / 总体准确率 / 周期衰减趋势 / 动态准确率 / 分档表现。
+        基于：样本量 / 总体准确率 / 周期趋势 / 动态准确率 / 分档表现 / 引擎构成。
         阈值口径：≥60% 有效、45%~60% 一般/接近随机、<45% 偏弱。
         020R-21：每条观点附色调 tones（good=✓ 提示 / bad=⚠️ 预警 / neutral=中性），
         与 interpretation_parts 等长，前端逐条着色展示。
+        020R-52：总体准确率附二项检验显著性（正态近似）；周期趋势条件化（增/减/无单调）；
+        新增引擎构成声明（v5 新基线样本不足时明确"尚未验证当前规则"）。
         """
+        import math
+
+        def _binomial_p2(n: int, k: int) -> float | None:
+            """双尾二项检验 p 值（正态近似）：检验准确率是否偏离 50% 随机水平。"""
+            if n <= 0:
+                return None
+            phat = k / n
+            se = math.sqrt(0.25 / n)
+            z = abs(phat - 0.5) / se
+            return 2.0 * (1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0))))
+
         parts = []
         tones = []
 
@@ -563,36 +576,76 @@ class BacktestEngine:
 
         add(f'本报告基于 {total} 条真实评级回测样本（样本期 {report.get("date_range") or "—"}，已排除模拟回测数据）。')
 
-        # 总体准确率（T+1日主口径）
+        # 020R-52：引擎构成声明——v5 样本不足时明示"报告主要反映历史引擎表现"
+        es = report.get('engine_stats') or {}
+        v5n = es.get('v5', {}).get('total', 0) or 0
+        legacy_n = es.get('legacy', {}).get('total', 0) or 0
+        unmarked = es.get('未标记(历史)', {}).get('total', 0) or 0
+        if v5n or legacy_n or unmarked:
+            comp_parts = []
+            if v5n:
+                comp_parts.append(f'v5（当前规则）{v5n} 条')
+            if legacy_n:
+                comp_parts.append(f'经典引擎 {legacy_n} 条')
+            if unmarked:
+                comp_parts.append(f'历史引擎（未标记）{unmarked} 条')
+            add(f'引擎构成：{"、".join(comp_parts)}。')
+            if v5n < 30 and (legacy_n + unmarked) > 0:
+                add(
+                    f'当前 v5 规则样本仅 {v5n} 条（<30），本报告总体结论主要反映历史引擎表现，'
+                    '当前评分规则尚未积累足够回测样本、未被验证。',
+                    'bad',
+                )
+            elif v5n >= 30 and es.get('v5', {}).get('accuracy') is not None:
+                v5_acc = es['v5']['accuracy']
+                add(
+                    f'v5 规则样本 {v5n} 条，T+1 日准确率 {v5_acc * 100:.0f}%，已具备初步统计意义。',
+                    'good' if v5_acc >= 0.60 else ('neutral' if v5_acc >= 0.45 else 'bad'),
+                )
+
+        # 总体准确率（T+1日主口径，020R-52 附二项检验 + 成本提示）
         judged = report.get('correct_count', 0) + report.get('wrong_count', 0)
         acc = report.get('accuracy')
         if judged > 0 and acc is not None:
+            p_val = _binomial_p2(judged, report.get('correct_count', 0))
+            sig_txt = ''
+            if p_val is not None:
+                sig_txt = (
+                    f'（二项检验 p={p_val:.3f}，{"统计显著" if p_val < 0.05 else "统计不显著"}）'
+                )
             if acc >= 0.60:
-                add(f'短期方向判断有效：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定），显著高于随机水平。', 'good')
+                add(f'短期方向判断有效：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定）{sig_txt}，显著高于随机水平。', 'good')
             elif acc >= 0.45:
-                add(f'短期方向判断一般：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定），仅略高于随机，优势有限。', 'bad')
+                add(f'短期方向判断一般：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定）{sig_txt}，仅略高于随机，优势有限。', 'bad')
             else:
-                add(f'短期方向判断偏弱：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定），接近或低于随机水平。', 'bad')
+                add(f'短期方向判断偏弱：T+1日口径总体准确率 {acc * 100:.0f}%（{judged}条可判定）{sig_txt}，接近或低于随机水平。', 'bad')
+            add('注意：T+1 口径未扣除交易成本，统计显著不等于实际可盈利。', 'neutral')
 
-        # 周期衰减趋势
+        # 周期趋势（020R-52：条件化——增/减/无单调，按实际数据措辞）
         pa = report.get('period_accuracy', {})
         p1d = pa.get('1d', {}).get('accuracy')
         p1w = pa.get('1w', {}).get('accuracy')
         p1m = pa.get('1m', {}).get('accuracy')
-        if p1d is not None:
-            tail = []
-            if p1w is not None:
-                tail.append(f'T+1周 {p1w * 100:.0f}%')
-            if p1m is not None:
-                tail.append(f'T+1月 {p1m * 100:.0f}%')
-            if tail:
+        if p1d is not None and p1w is not None and p1m is not None:
+            if p1d > p1w > p1m:
                 add(
-                    f'周期衰减：准确率随持有期拉长递减（T+1日 {p1d * 100:.0f}% → ' + '、'.join(tail) + '），'
+                    f'周期衰减：准确率随持有期拉长递减（T+1日 {p1d * 100:.0f}% → T+1周 {p1w * 100:.0f}% → T+1月 {p1m * 100:.0f}%），'
                     '评级以短线方向参考为主，长期持有参考价值下降。',
                     'bad',
                 )
+            elif p1d < p1w < p1m:
+                add(
+                    f'周期增强：准确率随持有期拉长提升（T+1日 {p1d * 100:.0f}% → T+1周 {p1w * 100:.0f}% → T+1月 {p1m * 100:.0f}%），'
+                    '评级在中长期更具参考价值。',
+                    'good',
+                )
             else:
-                add(f'周期维度：T+1日准确率 {p1d * 100:.0f}%，周/月样本不足暂不评估。')
+                add(
+                    f'周期维度：准确率随持有期无单调趋势（T+1日 {p1d * 100:.0f}% / T+1周 {p1w * 100:.0f}% / T+1月 {p1m * 100:.0f}%），'
+                    '不同持有期表现不一。',
+                )
+        elif p1d is not None:
+            add(f'周期维度：T+1日准确率 {p1d * 100:.0f}%，周/月样本不足暂不评估。')
 
         # 动态准确率（评级有效期）
         dyn_n = report.get('dynamic_count', 0)

@@ -5036,6 +5036,21 @@
                     });
                     html += '</tbody></table>';
                 }
+                // 020R-52：引擎分层统计（v5 新基线 vs 历史引擎）
+                if (rpt.engine_stats && Object.keys(rpt.engine_stats).length) {
+                    html += '<h4 style="margin:16px 0 8px;">引擎分层统计<span style="font-size:12px;color:#999;font-weight:normal;">　（v5=当前规则新基线；未标记=历史引擎）</span></h4>';
+                    html += '<table class="bt-report-table" style="font-size:13px;"><thead><tr style="background:#f0f7ff;"><th style="padding:8px;text-align:left;">引擎</th><th style="padding:8px;text-align:center;">样本数</th><th style="padding:8px;text-align:center;">准确率</th><th style="padding:8px;text-align:center;">动态准确率</th><th style="padding:8px;text-align:center;">T+1月均收益</th></tr></thead><tbody>';
+                    var evOrder = ['v5', 'legacy', '未标记(历史)'];
+                    Object.keys(rpt.engine_stats).sort(function(a, b) { return evOrder.indexOf(a) - evOrder.indexOf(b); }).forEach(function(ev) {
+                        var es = rpt.engine_stats[ev];
+                        var evLabel = ev === 'v5' ? 'v5（当前规则）' : ev === 'legacy' ? '经典引擎' : '历史引擎（未标记）';
+                        var esAcc = es.accuracy !== null && es.accuracy !== undefined ? Math.round(es.accuracy * 100) + '%' : '—';
+                        var esDyn = es.dyn_accuracy !== null && es.dyn_accuracy !== undefined ? Math.round(es.dyn_accuracy * 100) + '%' : '—';
+                        var esAvg = es.avg_return_1m !== null && es.avg_return_1m !== undefined ? (es.avg_return_1m > 0 ? '+' : '') + es.avg_return_1m + '%' : '—';
+                        html += '<tr style="border-bottom:1px solid #eee;"><td style="padding:8px;">' + evLabel + '</td><td style="padding:8px;text-align:center;">' + es.total + '</td><td style="padding:8px;text-align:center;font-weight:700;">' + esAcc + '</td><td style="padding:8px;text-align:center;">' + esDyn + '</td><td style="padding:8px;text-align:center;">' + esAvg + '</td></tr>';
+                    });
+                    html += '</tbody></table>';
+                }
                 // 分级准确率
                 if (rpt.rating_stats) {
                     html += '<h4 style="margin:16px 0 8px;">分级准确率</h4>';
@@ -5081,15 +5096,26 @@
                     return;
                 }
                 var rpt = data.report;
+                // 020R-52：主口径=真实评级回测点（无未来函数）；无真实样本时退回全样本并显著警示
+                var useReal = !!(rpt.real_hit_rates && rpt.real_sample && rpt.real_sample.total > 0);
+                var hitR = useReal ? rpt.real_hit_rates : rpt.hit_rates;
+                var daysR = useReal ? (rpt.real_avg_days || rpt.avg_days) : rpt.avg_days;
+                var rrR = useReal ? rpt.real_risk_reward : rpt.risk_reward_ratio;
                 var html = '<div style="background:#f8f9fa;border:1px solid #e0e0e0;border-radius:8px;padding:16px;margin-top:16px;">';
                 html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">';
                 html += '<h4 style="margin:0;">价格建议命中率 <span style="font-size:12px;color:#888;font-weight:normal;">（回测点: ' + rpt.total_points + ' | 无持仓: ' + rpt.no_position_count + ' | 有持仓: ' + rpt.has_position_count + '）</span></h4>';
                 html += '<button class="btn btn-primary btn-sm" onclick="runPriceBacktest()">▶ 重新运行回测</button>';
                 html += '</div>';
+                // 020R-52：数据质量说明置顶
+                if (useReal) {
+                    html += '<div style="background:#e8f4fd;border:1px solid #b8dcf7;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#1565c0;">✅ 以下指标为<b>真实评级回测点</b>口径（无未来函数，N=' + rpt.real_sample.total + '）；历史重建点（' + (rpt.total_points - rpt.real_sample.total) + ' 个，含未来函数偏差）仅作参照，不参与结论。</div>';
+                } else {
+                    html += '<div style="background:#fff3cd;border:1px solid #ffeaa7;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#856404;">⚠️ 当前无真实评级回测点，以下指标来自历史重建点（未来函数偏差），可信度低，仅供参考。</div>';
+                }
                 // 核心指标卡片
-                var t5 = rpt.hit_rates.t5;
-                var t20 = rpt.hit_rates.t20;
-                var rr = rpt.risk_reward_ratio !== null && rpt.risk_reward_ratio !== undefined ? rpt.risk_reward_ratio.toFixed(2) : '—';
+                var t5 = hitR.t5;
+                var t20 = hitR.t20;
+                var rr = rrR !== null && rrR !== undefined ? rrR.toFixed(2) : '—';
                 function pct(v) { return v !== null && v !== undefined ? Math.round(v * 100) + '%' : '—'; }
                 function pctColor(v) {
                     if (v === null || v === undefined) return '#999';
@@ -5101,27 +5127,32 @@
                 html += '<div style="background:#fff;border-radius:8px;padding:12px;text-align:center;border:1px solid #eee;"><div style="font-size:11px;color:#888;margin-bottom:4px;">止损价命中率(T+20)</div><div style="font-size:24px;font-weight:700;color:' + pctColor(1 - (t20.stop_loss || 0)) + '">' + pct(t20.stop_loss) + '</div><div style="font-size:10px;color:#999;">越低越好</div></div>';
                 html += '<div style="background:#fff;border-radius:8px;padding:12px;text-align:center;border:1px solid #eee;"><div style="font-size:11px;color:#888;margin-bottom:4px;">风险收益比</div><div style="font-size:24px;font-weight:700;color:' + (rr !== '—' && parseFloat(rr) >= 1 ? '#27ae60' : rr !== '—' && parseFloat(rr) >= 0.5 ? '#e67e22' : '#999') + '">' + rr + '</div><div style="font-size:10px;color:#999;">目标命中/止损命中</div></div>';
                 html += '</div>';
-                // T+5 vs T+20 对比表
-                html += '<h4 style="margin:16px 0 8px;">T+5 vs T+20 命中率对比</h4>';
+                // T+5 vs T+20 对比表（020R-52：随主口径切换）
+                html += '<h4 style="margin:16px 0 8px;">T+5 vs T+20 命中率对比<span style="font-size:12px;color:#999;font-weight:normal;">　' + (useReal ? '（真实样本口径）' : '（全样本口径）') + '</span></h4>';
                 html += '<table class="bt-report-table" style="font-size:13px;"><thead><tr style="background:#f0f7ff;"><th style="padding:8px;text-align:left;">建议项</th><th style="padding:8px;text-align:center;">T+5 命中率</th><th style="padding:8px;text-align:center;">T+20 命中率</th><th style="padding:8px;text-align:center;">T+5 平均天数</th><th style="padding:8px;text-align:center;">T+20 平均天数</th></tr></thead><tbody>';
                 var items = [
-                    {name: '买入区间', t5h: t5.buy_range, t20h: t20.buy_range, t5d: rpt.avg_days.t5.buy_range, t20d: rpt.avg_days.t20.buy_range},
-                    {name: '目标价', t5h: t5.target, t20h: t20.target, t5d: rpt.avg_days.t5.target, t20d: rpt.avg_days.t20.target},
-                    {name: '止损价', t5h: t5.stop_loss, t20h: t20.stop_loss, t5d: rpt.avg_days.t5.stop_loss, t20d: rpt.avg_days.t20.stop_loss}
+                    {name: '买入区间', t5h: t5.buy_range, t20h: t20.buy_range, t5d: daysR.t5.buy_range, t20d: daysR.t20.buy_range},
+                    {name: '目标价', t5h: t5.target, t20h: t20.target, t5d: daysR.t5.target, t20d: daysR.t20.target},
+                    {name: '止损价', t5h: t5.stop_loss, t20h: t20.stop_loss, t5d: daysR.t5.stop_loss, t20d: daysR.t20.stop_loss}
                 ];
                 if (rpt.has_position_count > 0) {
-                    items.push({name: '止盈价(持仓)', t5h: t5.take_profit, t20h: t20.take_profit, t5d: rpt.avg_days.t5.take_profit, t20d: rpt.avg_days.t20.take_profit});
+                    items.push({name: '止盈价(持仓)', t5h: t5.take_profit, t20h: t20.take_profit, t5d: daysR.t5.take_profit, t20d: daysR.t20.take_profit});
                 }
                 items.forEach(function(it) {
                     function fmtDays(d) { return d !== null && d !== undefined ? d + '天' : '—'; }
                     html += '<tr style="border-bottom:1px solid #eee;"><td style="padding:8px;">' + it.name + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(it.t5h) + '">' + pct(it.t5h) + '</td><td style="padding:8px;text-align:center;font-weight:600;color:' + pctColor(it.t20h) + '">' + pct(it.t20h) + '</td><td style="padding:8px;text-align:center;">' + fmtDays(it.t5d) + '</td><td style="padding:8px;text-align:center;">' + fmtDays(it.t20d) + '</td></tr>';
                 });
                 html += '</tbody></table>';
+                // 020R-52：全样本参照行（含未来函数偏差的重建点，仅陈列）
+                if (useReal && rpt.hit_rates && rpt.hit_rates.t20) {
+                    var allT20 = rpt.hit_rates.t20;
+                    html += '<p style="font-size:12px;color:#999;margin:8px 0 4px;">全样本参照（含 ' + (rpt.total_points - rpt.real_sample.total) + ' 个历史重建点，未来函数偏差，不参与结论）：买入区间 T+20 ' + pct(allT20.buy_range) + '、目标价 ' + pct(allT20.target) + '、止损 ' + pct(allT20.stop_loss) + '。</p>';
+                }
                 // 分评级统计（无持仓/有持仓拆分，各组分母一致）
                 if (rpt.rating_stats) {
                     var ratingOrder = ['强烈推荐买入', '推荐买入', '持有观望', '建议减仓', '强烈建议卖出'];
                     var ratingKeys = Object.keys(rpt.rating_stats).sort(function(a, b) { return ratingOrder.indexOf(a) - ratingOrder.indexOf(b); });
-                    html += '<p style="font-size:12px;color:#888;margin:12px 0 4px;">已按持仓状态拆分统计，各表内分母一致可横向比较。</p>';
+                    html += '<p style="font-size:12px;color:#888;margin:12px 0 4px;">已按持仓状态拆分统计，各表内分母一致可横向比较。' + (useReal ? '（分评级表为全样本口径，含历史重建点，仅作参照）' : '') + '</p>';
                     // 表1：无持仓样本（买入区间/目标价/止损价）
                     html += '<h4 style="margin:16px 0 8px;">分评级命中率 — 无持仓样本 (T+20)</h4>';
                     html += '<table class="bt-report-table" style="font-size:13px;"><thead><tr style="background:#f0f7ff;"><th style="padding:8px;text-align:left;">评级</th><th style="padding:8px;text-align:center;">样本数</th><th style="padding:8px;text-align:center;">买入区间</th><th style="padding:8px;text-align:center;">目标价</th><th style="padding:8px;text-align:center;">止损价</th></tr></thead><tbody>';
