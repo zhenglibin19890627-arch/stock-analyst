@@ -5024,7 +5024,9 @@
             return 'good';
         }
         if (w.indexOf('数据源暂不可用') >= 0) return 'warn';
-        if (w.indexOf('暂无') >= 0) return 'warn';
+        // 020R-57-HF1：「暂无」仅对数据维度缺失告警；「业绩预期暂无（预告/快报）」
+        // 属正常状态（很多公司不发预告/快报），归为中性提示不告警
+        if (w.indexOf('暂无') >= 0 && w.indexOf('业绩预期') < 0) return 'warn';
         if (w.indexOf('最新') >= 0) return 'good';
         return 'info';
     }

@@ -627,12 +627,14 @@ def _build_data_freshness(stock_id):
         lines.append('K线：缺失 ⚠️')
         has_issue = True
 
-    # 2. 基本面（财报期为自然滞后，只展示报告期）
+    # 2. 基本面（财报期为自然滞后，只展示报告期；020R-57-HF1：缺失时与其它维度一致标 ⚠️）
     row = conn.execute(
         'SELECT MAX(report_date) d FROM raw_fundamental WHERE stock_id=?', (stock_id,)
     ).fetchone()
-    lines.append(f"基本面：最新财报期 {row['d'] if (row and row['d']) else '缺失'}")
-    if not (row and row['d']):
+    if row and row['d']:
+        lines.append(f"基本面：最新财报期 {row['d']}")
+    else:
+        lines.append('基本面：缺失 ⚠️')
         has_issue = True
 
     # 3. 资金面（来源：东财真实 / 新浪顶替 / 估算兜底）
