@@ -24,6 +24,7 @@ from datetime import timedelta as _td
 import numpy as np
 import pytest
 
+from database import db_manager
 from modules import data_collector as dc
 from modules.data_contract import StockData
 from modules.mock_data_provider import MockDataProvider
@@ -36,6 +37,16 @@ class _TradingDayDateTime(datetime):
     导致"回退 EM 逐只 + progress_cb"路径在周末无法被测试覆盖。
     """
     FIXED = datetime(2026, 8, 14, 15, 0, tzinfo=timezone(_td(hours=8)))
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.FIXED
+
+
+class _WeekendDateTime(datetime):
+    """021C：把 dc.datetime.now() 固定为周六（2026-08-15 12:00，weekday()==5），
+    用于测试 021C 新增的盘口周末守卫。"""
+    FIXED = datetime(2026, 8, 15, 12, 0, tzinfo=timezone(_td(hours=8)))
 
     @classmethod
     def now(cls, tz=None):
@@ -557,3 +568,92 @@ class TestEmBatchProgressCallback:
 
         result = dc.fetch_capital_flow_batch(['600276'])
         assert result['success_count'] == 1
+
+
+# ============================================================
+# 021C：五档盘口周末守卫 + 港股估值腾讯备源
+# ============================================================
+
+
+class TestOrderbookWeekendGuard:
+    """fetch_orderbook 非交易日（周末）跳过，防周末脏行"""
+
+    def _make_db(self, tmp_path, monkeypatch):
+        db_file = tmp_path / 'ob_weekend.db'
+        monkeypatch.setattr(db_manager, 'DB_PATH', str(db_file))
+        monkeypatch.setattr(db_manager, 'BACKUP_DIR', str(tmp_path / 'backups'))
+        db_manager.init_database()
+        conn = db_manager.get_connection()
+        conn.execute("INSERT INTO stocks (symbol, market, name) VALUES ('600276', 'a_stock', '恒瑞医药')")
+        conn.commit()
+        conn.close()
+
+    def test_weekend_skips(self, tmp_path, monkeypatch):
+        self._make_db(tmp_path, monkeypatch)
+        monkeypatch.setattr(dc, 'datetime', _WeekendDateTime)
+
+        def _boom(*args, **kwargs):
+            raise AssertionError('周末守卫未生效：不应调用 mootdx 实时行情')
+
+        monkeypatch.setattr(dc, '_fetch_realtime_quote_mootdx', _boom)
+
+        status, msg = dc.fetch_orderbook('600276', 'a_stock')
+        assert status == 'skipped'
+        assert '非交易日' in msg
+
+    def test_trading_day_still_runs(self, tmp_path, monkeypatch):
+        self._make_db(tmp_path, monkeypatch)
+        monkeypatch.setattr(dc, 'datetime', _TradingDayDateTime)
+
+        def _fake_quote(code):
+            return {
+                'price': 45.6, 'pct_change': 1.2, 'quote_time': '15:00:00',
+                'bid1_price': 45.5, 'bid1_vol': 100, 'bid2_price': None, 'bid2_vol': None,
+                'bid3_price': None, 'bid3_vol': None, 'bid4_price': None, 'bid4_vol': None,
+                'bid5_price': None, 'bid5_vol': None, 'ask1_price': 45.7, 'ask1_vol': 200,
+                'ask2_price': None, 'ask2_vol': None, 'ask3_price': None, 'ask3_vol': None,
+                'ask4_price': None, 'ask4_vol': None, 'ask5_price': None, 'ask5_vol': None,
+            }
+
+        monkeypatch.setattr(dc, '_fetch_realtime_quote_mootdx', _fake_quote)
+
+        status, msg = dc.fetch_orderbook('600276', 'a_stock')
+        assert status == 'success'
+        assert '已入库' in msg
+        conn = db_manager.get_connection()
+        row = conn.execute("SELECT latest_price FROM stock_orderbook WHERE stock_id=1").fetchone()
+        conn.close()
+        assert row and row['latest_price'] == 45.6
+
+
+class TestValuationTencentFallback:
+    """021C：港股估值 akshare(baidu 已失效) → 腾讯行情 PE/PB 兜底"""
+
+    def test_hk_tencent_fallback(self, tmp_path, monkeypatch):
+        db_file = tmp_path / 'val_hk.db'
+        monkeypatch.setattr(db_manager, 'DB_PATH', str(db_file))
+        monkeypatch.setattr(db_manager, 'BACKUP_DIR', str(tmp_path / 'backups'))
+        db_manager.init_database()
+        conn = db_manager.get_connection()
+        conn.execute("INSERT INTO stocks (symbol, market, name) VALUES ('HK3690', 'hk_stock', '美团-W')")
+        conn.execute("INSERT INTO raw_kline (stock_id, trade_date, close) VALUES (1, '2026-08-14', 100.0)")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(dc, '_fetch_valuation_akshare', lambda s, m: None)
+        monkeypatch.setattr(dc, '_fetch_valuation_baostock', lambda s, m: None)
+        monkeypatch.setattr(dc, '_fetch_valuation_tencent', lambda s, m: (12.3, 1.5))
+
+        status, msg = dc.fetch_valuation('HK3690', 'hk_stock', force_full=True)
+        assert status == 'success'
+        assert 'tencent' in msg
+
+        conn = db_manager.get_connection()
+        row = conn.execute(
+            'SELECT pe_ttm, pb_mrq, source, trade_date FROM stock_valuation WHERE stock_id=1'
+        ).fetchone()
+        conn.close()
+        assert row['pe_ttm'] == 12.3
+        assert row['pb_mrq'] == 1.5
+        assert row['source'] == 'tencent'
+        assert row['trade_date'] == '2026-08-14'  # 交易日戳记 = 最新K线日期，不盖周末

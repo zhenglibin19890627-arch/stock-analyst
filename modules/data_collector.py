@@ -629,11 +629,19 @@ def fetch_orderbook(symbol, market, force_full=False):
     """019Y T1：采集五档盘口快照（mootdx 实时行情）。
     每只股票每天仅保留最新一条快照（UNIQUE(stock_id, trade_date)，重复采集覆盖当日）。
     仅支持 A股（mootdx 港股支持有限）。失败不阻塞主流程。
+    021C：非交易日（周末）跳过——mootdx 周末返回上一交易日快照，
+    若盖当日日期会形成周末脏行（2026-08-15 实测 23 行），与资金面 020L 同原则。
     返回: (状态, 消息)
     """
     stock_id = get_stock_id(symbol, market)
     if not stock_id:
         return 'failed', f'数据库中未找到股票 {symbol}'
+
+    # 021C：周末守卫（与 fetch_capital_flow 020L 同原则）
+    if datetime.now(_CN_TZ).weekday() >= 5:
+        save_data_status(stock_id, 'orderbook', 'skipped', '非交易日跳过（mootdx 盘口）')
+        logger.info(f'[{symbol}] 非交易日（周末），跳过五档盘口采集')
+        return 'skipped', '非交易日跳过（mootdx 盘口）'
 
     mootdx_code = _mootdx_symbol(symbol, market)
     if not mootdx_code:
@@ -2171,7 +2179,7 @@ def _fetch_valuation_baostock(symbol, market):
 
 def fetch_valuation(symbol, market, force_full=False):
     """019Y T2：采集估值数据（PE/PB/PS/PCF/股息率）存入 stock_valuation 表。
-    降级链路：akshare → baostock（仅A股）→ 标记缺失。
+    降级链路：akshare → baostock（仅A股）→ 腾讯行情 PE/PB（仅港股，021C）→ 标记缺失。
     估值属低频数据（日级），同日跳过。
     返回: (状态, 消息)
     """
@@ -2223,11 +2231,50 @@ def fetch_valuation(symbol, market, force_full=False):
         except Exception as e:
             logger.warning(f'[{symbol}] baostock估值失败: {e}')
 
+    # 021C：港股第二备源——腾讯行情 PE(TTM)/PB 实时快照。
+    # 背景：akshare 港股 baidu 估值接口已失效（JSON 解析错误，2026-08-16 实测）、
+    # baostock 不支持港股，导致港股估值恒失败（HK3690 等）。
+    # 腾讯仅提供 PE/PB 两字段，其余字段保持缺失（诚实标注来源，不伪造）。
+    if not val and market == 'hk_stock':
+        try:
+            pe, pb = _fetch_valuation_tencent(symbol, market)
+            if pe is not None or pb is not None:
+                val = {
+                    'trade_date': None,  # 下方以最新K线日期为准（腾讯快照无日期字段）
+                    'pe_ttm': pe,
+                    'pb_mrq': pb,
+                    'pe': None,
+                    'ps_ttm': None,
+                    'ps': None,
+                    'pcf_ncf_ttm': None,
+                    'dv_ttm': None,
+                    'total_mv': None,
+                }
+                src = 'tencent'
+                logger.info(f'[{symbol}] 腾讯估值备用源命中: PE={pe}, PB={pb}')
+        except Exception as e:
+            logger.warning(f'[{symbol}] 腾讯估值备用源失败: {e}')
+
+    if not val or not val.get('trade_date'):
+        if val and src == 'tencent':
+            # 腾讯快照无日期：估值对应交易日 = 该股最新K线日期，避免周末脏日期
+            try:
+                conn_td = get_connection()
+                td_row = conn_td.execute(
+                    'SELECT MAX(trade_date) d FROM raw_kline WHERE stock_id=?', (stock_id,)
+                ).fetchone()
+                conn_td.close()
+                if td_row and td_row['d']:
+                    val['trade_date'] = str(td_row['d'])[:10]
+                    logger.info(f'[{symbol}] 腾讯估值交易日取最新K线: {val["trade_date"]}')
+            except Exception as e:
+                logger.warning(f'[{symbol}] 读取最新K线日期失败: {e}')
+
     if not val or not val.get('trade_date'):
         fail_msg = 'akshare与baostock估值均失败'
         if market == 'hk_stock':
             # baostock 不支持港股，仅 akshare 一路失败（诚实标注，不误导）
-            fail_msg = 'akshare估值失败（港股；baostock不支持港股）'
+            fail_msg = 'akshare与腾讯估值均失败（港股；baostock不支持港股）'
         save_data_status(stock_id, 'valuation', 'failed', fail_msg)
         return 'failed', fail_msg
 

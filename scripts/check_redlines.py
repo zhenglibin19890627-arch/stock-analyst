@@ -187,6 +187,14 @@ def capital_weekend_guard():
     return ok, ('fetch_capital_flow 周末守卫存在' if ok else '周末守卫缺失')
 
 
+@_check('R4')
+def orderbook_weekend_guard():
+    """021C：五档盘口（mootdx）非交易日跳过，防周末脏行"""
+    src = _read('modules/data_collector.py')
+    ok = '非交易日跳过（mootdx 盘口）' in src
+    return ok, ('盘口周末守卫存在' if ok else '盘口周末守卫缺失')
+
+
 @_check('R5')
 def net_calls_via_timeout_wrapper():
     """新浪/腾讯网络调用必须走模块级 _call_with_timeout，严禁裸调用"""

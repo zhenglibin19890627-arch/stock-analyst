@@ -8,7 +8,9 @@
 红线：不修改 data_collector.py / scoring_engine.py；本模块自管 industry_fund_flow 表。
 """
 
+import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -41,6 +43,15 @@ EM_BASE_PARAMS = {
 # 刷新失败冷却：连续失败后 10 分钟内不再硬闯东财，直接回放上次快照（020R-34）
 REFRESH_COOLDOWN_SECONDS = 600
 _last_failure_at = None
+
+# 021C：冷却状态落盘——内存态在服务重启（联调/看门狗拉起）时被清零，
+# 实测 2026-08-15 晚 23:14~23:28 重启后 1 分钟内连续硬闯东财 7 次。
+# 落盘文件与 logs/em_ban_state.json（东财熔断）同风格，重启后冷却仍生效。
+_COOLDOWN_STATE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'logs',
+    'industry_ff_cooldown.json',
+)
 
 
 def _num(v):
@@ -87,16 +98,34 @@ def _request_page_robust(page_no):
 
 
 def _mark_failure():
-    """记录一次刷新失败时间（供冷却判断）。"""
+    """记录一次刷新失败时间（内存 + 落盘双写，021C：重启不清零）。"""
     global _last_failure_at
-    _last_failure_at = datetime.now(_CN_TZ)
+    now = datetime.now(_CN_TZ)
+    _last_failure_at = now
+    try:
+        os.makedirs(os.path.dirname(_COOLDOWN_STATE_FILE), exist_ok=True)
+        with open(_COOLDOWN_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump({'failed_at': now.isoformat()}, f)
+    except OSError:
+        pass  # 落盘失败不影响主流程（内存态仍生效）
 
 
 def refresh_in_cooldown():
-    """刷新失败后冷却中？返回剩余秒数，否则 None。"""
-    if _last_failure_at is None:
+    """刷新失败后冷却中？返回剩余秒数，否则 None（内存 + 落盘双态）。"""
+    last = _last_failure_at
+    if last is None:
+        # 021C：内存态缺失（如服务重启）时读落盘状态
+        try:
+            with open(_COOLDOWN_STATE_FILE, encoding='utf-8') as f:
+                data = json.load(f)
+            last = datetime.fromisoformat(data.get('failed_at'))
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=_CN_TZ)
+        except (OSError, ValueError, KeyError, TypeError):
+            last = None
+    if last is None:
         return None
-    elapsed = (datetime.now(_CN_TZ) - _last_failure_at).total_seconds()
+    elapsed = (datetime.now(_CN_TZ) - last).total_seconds()
     if elapsed < REFRESH_COOLDOWN_SECONDS:
         return int(REFRESH_COOLDOWN_SECONDS - elapsed)
     return None
@@ -173,7 +202,7 @@ def refresh_industry_fund_flow():
     """抓取并落库 → (items, trade_date, updated_at)；失败记录冷却时间后抛出。"""
     try:
         items, updated_at = fetch_industry_fund_flow()
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         _mark_failure()
         raise
     trade_date = updated_at[:10] if updated_at else datetime.now(_CN_TZ).strftime('%Y-%m-%d')

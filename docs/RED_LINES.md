@@ -31,7 +31,7 @@
 | R1 | 估算/顶替数据必须带标记且**不参与评分**：估算兜底写入 `is_estimated=1`（仅展示）；评分读取必须过滤 `(is_estimated = 0 OR is_estimated IS NULL)` | 写入：`data_collector.py` 估算兜底路径；读取：`data_adapter.py` `_load_capital_*` | ✅ |
 | R2 | 资金面链序与防覆盖：东财三层 → 腾讯 westock → 新浪 lscjfb(`sina_main`) → 估算兜底；真实数据不可被降级源覆盖；写入模式 `UPDATE + INSERT OR IGNORE`，**严禁 `INSERT OR REPLACE INTO raw_capital_flow`**（会清除已有字段） | `data_collector.py` `fetch_capital_flow` / `_fetch_capital_flow_westock` / 新浪分支 | ✅ |
 | R3 | **M-2 日期严格匹配**：新浪 lscjfb / 腾讯 westock 逐日历史必须精确匹配目标日期（`opendate != target_date` 即放弃 / `EndDate != date_str` 即放弃），**严禁"取最新行"**；不匹配落回下一层 | `data_collector.py` 新浪分支 / `_fetch_capital_flow_westock` | ✅ |
-| R4 | 周末守卫：非交易日（周六/周日）资金面全链路跳过（019G/020L），防非交易日脏行 | `fetch_capital_flow` 开头 `datetime.now(_CN_TZ).weekday() >= 5` | ✅ |
+| R4 | 周末守卫：非交易日（周六/周日）资金面全链路跳过（019G/020L）；五档盘口 mootdx 同步跳过（021C 起，防周末脏行） | `fetch_capital_flow` / `fetch_orderbook` 开头 `weekday() >= 5` 校验 | ✅ |
 | R5 | 新浪/腾讯网络调用必须经模块级 `_call_with_timeout`，**严禁裸调用**（含 https 回退的第二次请求） | `data_collector.py` | ✅ |
 | — | ~~三处 `if False` 硬禁用估算源~~ | **已作废**：2026-08-16 复核，代码中已无 `if False`；该机制自 019E 起被 R1 的 `is_estimated` 标记机制取代（见附录 B） | — |
 
@@ -40,8 +40,8 @@
 | 编号 | 红线 | 锚点 | 自动核验 |
 |---|---|---|---|
 | R6 | 评级边界 **80/65/50/30** 三处一致且区间连续：`config.py` / `config_weights.json` / `scoring_engine.py`；`config_weights.json` 写入必须**无 BOM**（`json.dump`） | 启动自检 `validate_rating_config()` | ✅ |
-| R7 | `scoring_engine.py` v5 引擎核心不可改（含 002 校准：north 70/88、margin 68/88、main 85、vol_ratio 80）；预警/回测等模块必须**复用 `normalize_rating`，不得重实现"分数→评级"边界映射**（D4）。`alert_engine.RATING_ORDER` 档位顺序表属允许范围 | `scoring_engine.py` / `alert_engine.py` | ✅ |
-| R8 | `data_contract.py` StockData 契约不可破坏；业务逻辑**严禁耦合具体数据源原始字段**（akshare/tushare 等），必须经标准契约。字段集以 `data_contract.py` 定义为准（不硬编码数量——020R-45 起由 30 字段扩展至 32 字段）；新增/删改字段须走 §6 豁免登记 | `modules/data_contract.py` | ✅ |
+| R7 | `scoring_engine.py` v5 引擎核心不可改（002 校准档位 margin 68/88、main 85、vol_ratio 80 保持不变；020R-47 起互联互通子项已移除，资金面 4 子项：主力 0.50/机构持仓 0.20/杠杆 0.20/股东人数 0.10）；预警/回测等模块必须**复用 `normalize_rating`，不得重实现"分数→评级"边界映射**（D4）。`alert_engine.RATING_ORDER` 档位顺序表属允许范围 | `scoring_engine.py` / `alert_engine.py` | ✅ |
+| R8 | `data_contract.py` StockData 契约不可破坏；业务逻辑**严禁耦合具体数据源原始字段**（akshare/tushare 等），必须经标准契约。字段集以 `data_contract.py` 定义为准（不硬编码数量——020R-45 +2 字段、020R-47 移除 north_net_buy，资金面完整度集合 capital 现为 4 字段）；新增/删改字段须走 §6 豁免登记 | `modules/data_contract.py` | ✅ |
 
 ## 3. 写库不变量（P0）
 
