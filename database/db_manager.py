@@ -389,6 +389,7 @@ def init_database():
             action_advice TEXT,              -- 操作建议
             is_change INTEGER DEFAULT 0,     -- 是否与上次评级不同（1=变化）
             price_at_rating REAL,            -- 评级时的股价
+            engine_version TEXT,             -- 020R-51：产生该评级的引擎（v5/legacy；历史行为 NULL）
             UNIQUE(stock_id, rating_date),
             FOREIGN KEY (stock_id) REFERENCES stocks(id)
         )
@@ -1185,6 +1186,8 @@ def _migrate_columns(cursor):
         # 020O: 资金面表新增全资金净流入列（腾讯 hkfund TotalNetFlow，主力+散户主动净额；
         # 仅港股有值——A股 asfund 散户为被动镜像、全口径恒等0，无此数据）
         ('raw_capital_flow', 'total_net_inflow', 'REAL'),
+        # 020R-51: 评级历史表新增引擎版本列（回测报告按引擎分层统计；历史行保持 NULL）
+        ('ratings_history', 'engine_version', 'TEXT'),
     ]
     for table, column, col_type in migrations:
         try:

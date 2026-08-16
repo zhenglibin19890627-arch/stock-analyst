@@ -652,12 +652,17 @@ class BacktestEngine:
 
         if include_simulated:
             cursor.execute(
-                'SELECT * FROM backtest_results WHERE market = ? ORDER BY rating_date', (market,)
+                'SELECT br.*, rh.engine_version FROM backtest_results br '
+                'LEFT JOIN ratings_history rh ON rh.id = br.rating_id '
+                'WHERE br.market = ? ORDER BY br.rating_date',
+                (market,),
             )
         else:
             cursor.execute(
-                'SELECT * FROM backtest_results WHERE market = ? '
-                'AND (is_simulated IS NULL OR is_simulated = 0) ORDER BY rating_date',
+                'SELECT br.*, rh.engine_version FROM backtest_results br '
+                'LEFT JOIN ratings_history rh ON rh.id = br.rating_id '
+                'WHERE br.market = ? '
+                'AND (br.is_simulated IS NULL OR br.is_simulated = 0) ORDER BY br.rating_date',
                 (market,),
             )
         rows = [dict(r) for r in cursor.fetchall()]
@@ -777,6 +782,47 @@ class BacktestEngine:
         dates = [r['rating_date'] for r in rows if r.get('rating_date')]
         date_range = f'{min(dates)} ~ {max(dates)}' if dates else ''
 
+        # 020R-51：按引擎分层统计（ratings_history.engine_version；历史行为 NULL → 未标记）
+        engine_stats = {}
+        for r in rows:
+            ev = r.get('engine_version') or '未标记(历史)'
+            if ev not in engine_stats:
+                engine_stats[ev] = {
+                    'total': 0,
+                    'correct': 0,
+                    'wrong': 0,
+                    'neutral': 0,
+                    'dyn_correct': 0,
+                    'dyn_wrong': 0,
+                    'returns_1m': [],
+                }
+            es = engine_stats[ev]
+            es['total'] += 1
+            if r.get('is_correct') == 1:
+                es['correct'] += 1
+            elif r.get('is_correct') == 0:
+                es['wrong'] += 1
+            else:
+                es['neutral'] += 1
+            if r.get('dynamic_is_correct') == 1:
+                es['dyn_correct'] += 1
+            elif r.get('dynamic_is_correct') == 0:
+                es['dyn_wrong'] += 1
+            if r.get('return_1m') is not None:
+                es['returns_1m'].append(r['return_1m'])
+        for ev, es in engine_stats.items():
+            judged = es['correct'] + es['wrong']
+            es_dyn_judged = es['dyn_correct'] + es['dyn_wrong']
+            es['accuracy'] = round(es['correct'] / judged, 4) if judged > 0 else None
+            es['dyn_accuracy'] = (
+                round(es['dyn_correct'] / es_dyn_judged, 4) if es_dyn_judged > 0 else None
+            )
+            es['avg_return_1m'] = (
+                round(sum(es['returns_1m']) / len(es['returns_1m']), 2)
+                if es['returns_1m']
+                else None
+            )
+
         # 小样本警告
         small_sample = total < 30
 
@@ -795,6 +841,7 @@ class BacktestEngine:
             'date_range': date_range,
             'small_sample_warning': small_sample,
             'sample_period_note': f'样本期: {date_range} (共{len(set(dates))}个交易日)',
+            'engine_stats': engine_stats,
         }
         # 客观解读评语（纯数据驱动，基于真实样本统计）
         report['interpretation'] = self._build_interpretation(report)

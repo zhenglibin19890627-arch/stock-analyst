@@ -751,11 +751,15 @@ def _save_rating(stock_id, analysis, action_advice, is_changed, latest_close):
     row = cursor.fetchone()
     price = float(row['close']) if row and row['close'] is not None else None
 
+    # 020R-51：记录产生该评级的引擎版本（v5 路径经 _convert_v5_to_legacy 显式携带；
+    # legacy 路径无此键 → 标记 legacy；v5 降级回 legacy 时同样正确标记为 legacy）
+    engine_version = analysis.get('engine_version') or 'legacy'
+
     cursor.execute(
         """
         INSERT OR REPLACE INTO ratings_history
-        (stock_id, rating_date, rating, total_score, action_advice, is_change, price_at_rating)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (stock_id, rating_date, rating, total_score, action_advice, is_change, price_at_rating, engine_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """,
         (
             stock_id,
@@ -765,6 +769,7 @@ def _save_rating(stock_id, analysis, action_advice, is_changed, latest_close):
             action_advice,
             1 if is_changed else 0,
             price,
+            engine_version,
         ),
     )
 

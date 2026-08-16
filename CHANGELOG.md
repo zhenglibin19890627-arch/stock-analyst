@@ -1,5 +1,14 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-16] 回测新基线：评级引擎版本标记 + 技术面专项历史回测（020R-51）
+
+- 用户提问（已按建议实施）：能否用当前评分规则重写历史评分并重做回测。判断：**全历史重评不可行**——基本面/资金面/消息面缺少时点快照（raw_fundamental 无披露日期、资金面仅约 120 日、消息面无历史），重算必带前视偏差；故分两步：A 新基线从现在起 + 评级打引擎标记；B 技术面维度（K线时点完备）专项历史回测。
+- A 新基线：`ratings_history` 新增 `engine_version` 列（建表 + 幂等迁移，历史行 NULL）；`advisor._save_rating` 写入 v5/legacy（v5 经 `_convert_v5_to_legacy` 显式携带；legacy 与 v5 降级路径自动标记 legacy；`generate_advice` 未改动）；`backtest_engine.compute_market_report` 新增 `engine_stats` 分层统计（主/动态准确率、T+20 平均收益按引擎分组，历史行显示「未标记(历史)」）。
+- B 技术面专项回测：新模块 `modules/technical_backtest.py` + 一键脚本 `scripts/run_technical_backtest.py`——按历史时点逐日重算当前技术面 7 子项得分（复用 data_adapter 指标函数与 `scoring_engine.score_dimension`，日线窗口 60 根/周线 ISO 周/月线自然月/月线空头×0.85 惩罚全部与实盘一致，同源性校验 3/3 MATCH），统计 T+5/T+20 区间收益与方向命中率，报告写入 `reports/technical_backtest_YYYYMMDD.md`（已归档 docs/reports/）。
+- 首次结果（16778 观测，2023-04→2026-08，29 只全样本）：**分档信号弱**——偏多(≥65) T+20 平均 +0.08%（方向命中 41.3%）、中性 +0.25%、偏空(≤45) +1.11%（52.1%），均未跑赢全部观测基准 +0.42%；当前技术面分档在该样本期无稳定方向区分度，作为基线存档、滚动观察。
+- 红线：未触碰受保护对象（scoring_engine/data_contract/generate_advice 均未改）；ratings_history 不变量（UNIQUE + INSERT OR REPLACE）保持。
+- 验证：pytest 427 通过；check_redlines 28/28。
+
 ## [2026-08-16] 业绩快报并入业绩预期（020R-50）
 
 - 用户要求：中国中免发的是业绩快报（2026-07-15 公告，H1 归母净利 31.06 亿、同比 +19.49%）而非业绩预告，020R-49 只接预告接口（stock_yjyg_em）导致漏采。

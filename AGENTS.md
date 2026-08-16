@@ -141,6 +141,7 @@ curl http://127.0.0.1:5000/api/health
 | `sentiment_dict.py` | 情绪词典。 |
 | `mock_data_provider.py` | 模拟数据提供者（开发/测试用）。 |
 | `scoring_engine_validation.py` | 评分引擎自验证。 |
+| `technical_backtest.py` | 020R-51：技术面专项历史回测（当前技术规则按历史时点逐日重算，T+5/T+20 方向命中率，一键脚本 `scripts/run_technical_backtest.py`）。 |
 
 ---
 
