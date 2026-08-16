@@ -155,16 +155,29 @@ class TestDataFreshness:
         assert r['has_issue'] is True
         assert any('K线' in line and '⚠️' in line for line in r['lines'])
 
-    def test_news_stale_flag(self, db):
-        """新闻滞后 10 天 → ⚠️"""
+    def test_news_no_new_items_not_issue(self, db):
+        """020R-57：情绪每日更新（采集正常）但原文 10 天无更新 → 中性「无新消息」，不标 ⚠️"""
         _insert_kline(db, 1, _days_ago(1))
         _insert_fundamental(db, 1, '2026-06-30')
         _insert_capital(db, 1, _days_ago(1))
         _insert_sentiment(db, 1, _days_ago(1), _days_ago(10))
 
         r = _build_data_freshness(1)
+        assert r['has_issue'] is False
+        assert any('无新消息' in line for line in r['lines'])
+        assert not any('消息面' in line and '⚠️' in line for line in r['lines'])
+
+    def test_news_collection_stall_flag(self, db):
+        """020R-57：情绪表本身停更 10 天（真采集滞后）→ ⚠️"""
+        _insert_kline(db, 1, _days_ago(1))
+        _insert_fundamental(db, 1, '2026-06-30')
+        _insert_capital(db, 1, _days_ago(1))
+        _insert_sentiment(db, 1, _days_ago(10), _days_ago(12))
+
+        r = _build_data_freshness(1)
         assert r['has_issue'] is True
         assert any('消息面' in line and '⚠️' in line for line in r['lines'])
+        assert any('滞后' in line for line in r['lines'])
 
     def test_all_missing(self, db):
         """全部维度缺失 → ⚠️"""

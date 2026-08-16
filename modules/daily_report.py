@@ -667,6 +667,9 @@ def _build_data_freshness(stock_id):
         has_issue = True
 
     # 4. 消息面（情绪聚合 + 新闻原文新鲜度）
+    # 020R-57：区分「采集滞后」与「无新消息」——情绪表覆盖最新交易日=采集系统正常，
+    # 此时原文无更新只做中性提示（不标 ⚠️，如顺丰个股新闻稀疏属正常现象）；
+    # 只有情绪表本身停更（真·采集故障）才标 ⚠️。
     sent_row = conn.execute(
         'SELECT MAX(news_date) d FROM news_sentiment WHERE stock_id=?', (stock_id,)
     ).fetchone()
@@ -674,15 +677,23 @@ def _build_data_freshness(stock_id):
         "SELECT MAX(info_date) d FROM raw_sentiment WHERE stock_id=? AND info_type='news'",
         (stock_id,),
     ).fetchone()
+    sent_fresh = bool(sent_row and sent_row['d'] and str(sent_row['d']) >= str(latest_td))
     if news_row and news_row['d']:
         lag = _days_between(news_row['d'], today)
-        flag = ' ⚠️' if (lag is not None and lag > 7) else ''
-        if flag:
-            has_issue = True
-        lines.append(f"消息面：最新新闻 {news_row['d']}（滞后{lag}天{flag}）")
+        if lag is not None and lag > 7:
+            if sent_fresh:
+                lines.append(f"消息面：最近个股新闻 {news_row['d']}（近{lag}日无新消息，情绪每日更新）")
+            else:
+                has_issue = True
+                lines.append(f"消息面：最新新闻 {news_row['d']}（滞后{lag}天 ⚠️）")
+        else:
+            lines.append(f"消息面：最新新闻 {news_row['d']}（滞后{lag}天）")
     elif sent_row and sent_row['d']:
-        lines.append(f"消息面：情绪至 {sent_row['d']}（无新闻原文）⚠️")
-        has_issue = True
+        if sent_fresh:
+            lines.append(f"消息面：情绪至 {sent_row['d']}（无新闻原文，情绪每日更新）")
+        else:
+            has_issue = True
+            lines.append(f"消息面：情绪至 {sent_row['d']}（无新闻原文）⚠️")
     else:
         lines.append('消息面：缺失 ⚠️')
         has_issue = True

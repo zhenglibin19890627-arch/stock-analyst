@@ -3221,19 +3221,9 @@
             // 020R-16：数据完整度与提示并入维度亮点卡（不再与综合分析重复）
             // 020R-31：按数据状态分级提示效果——异常(红)/滞后(黄)/提示(灰)/正常(绿)
             // 020R-40：数据完整度为固定子项——无告警时按 data_quality 兜底、再兜底为「数据正常」
+            // 020R-57：分类逻辑统一委托 _classifyDataWarning（与看板三态标签同源）
             var _classifyDw = function(w) {
-                if (w.indexOf('⚠️') >= 0) return 'bad';
-                var m = /滞后(\d+)天/.exec(w);
-                if (m) {
-                    var n = parseInt(m[1], 10);
-                    if (n >= 5) return 'bad';
-                    if (n >= 1) return 'warn';
-                    return 'good';
-                }
-                if (w.indexOf('数据源暂不可用') >= 0) return 'warn';
-                if (w.indexOf('暂无') >= 0) return 'warn';
-                if (w.indexOf('最新') >= 0) return 'good';
-                return 'info';
+                return _classifyDataWarning(w);
             };
             var DW_STYLE = {
                 'bad':  { icon: '🔴', color: '#c62828', bg: '#ffebee', border: '#e57373', label: '异常' },
@@ -3584,13 +3574,10 @@
                 var color = r.score_change > 0 ? '#27ae60' : (r.score_change < 0 ? '#e74c3c' : '#888');
                 changeStr = '<span style="color:' + color + ';">' + arrow + ' ' + Math.abs(r.score_change).toFixed(1) + '</span>';
             }
-            // 数据完整度：从 data_warnings（JSON 字符串）判断是否存在 ⚠️ 项
+            // 020R-57：数据完整度三态标签（🔴异常/🟡滞后/✓正常，与报告页分类器同源）
             var dwList = [];
             try { dwList = JSON.parse(r.data_warnings || '[]'); } catch (e) { dwList = []; }
-            var dataIssues = dwList.filter(function(w) { return /⚠️/.test(w); });
-            var dataTag = dataIssues.length > 0
-                ? '<span style="color:#e65100;font-weight:600;cursor:help;" title="' + dataIssues.map(function(w){return w.replace(/"/g,'&quot;');}).join('\n') + '">⚠️</span>'
-                : '<span style="color:#27ae60;cursor:help;" title="数据完整，无滞后/替代源问题">✓</span>';
+            var dataTag = _dataWarningTag(_dataWarningSummary(dwList, r.generated_at));
             html += '<tr style="border-bottom:1px solid #eee;cursor:pointer;" onclick="viewReport(' + r.stock_id + ')" title="点击查看详细报告">';
             html += '<td style="padding:8px;"><strong>' + (r.stock_name || '') + '</strong><br><span style="color:#888;font-size:12px;">' + r.stock_code + '</span></td>';
             html += '<td style="padding:8px;">' + engineTag + '</td>';
@@ -3791,13 +3778,10 @@
                         (bg.main_net > 0 ? '▲' : '▼') + Math.abs(bg.main_net / 1e8).toFixed(1) + '亿' + streakTxt + '</span>';
                 }
             }
-            // 数据完整度：从 data_warnings（JSON 字符串）判断是否存在 ⚠️ 项（原每日报告表列）
+            // 020R-57：数据完整度三态标签（🔴异常/🟡滞后/✓正常，与报告页分类器同源）
             var dwList = [];
             try { dwList = JSON.parse(st.data_warnings || '[]'); } catch (e) { dwList = []; }
-            var dataIssues = dwList.filter(function(w) { return /⚠️/.test(w); });
-            var dataTag = dataIssues.length > 0
-                ? '<span style="color:#e65100;font-weight:600;cursor:help;" title="' + dataIssues.map(function(w){return w.replace(/"/g,'&quot;');}).join('\n') + '">⚠️</span>'
-                : '<span style="color:#27ae60;cursor:help;" title="数据完整，无滞后/替代源问题">✓</span>';
+            var dataTag = _dataWarningTag(_dataWarningSummary(dwList, st.generated_at));
 
             html += '<tr style="border-bottom:1px solid #eee;" id="dash-row-' + st.id + '">';
             html += '<td style="padding:10px;"><strong>' + (st.name || '') + obosBadge(st.obos_signal) + '</strong><br><span style="color:#888;font-size:12px;">' + st.symbol + '</span></td>';
@@ -5023,6 +5007,62 @@
     function _fmtGenTime(s) {
         if (!s || typeof s !== 'string') return '—';
         return s.slice(0, 16).replace('T', ' ');
+    }
+
+    /**
+     * 020R-57：数据完整度提示统一分类器（看板与报告页共用同一口径）
+     * bad=异常(🔴) / warn=滞后(🟡) / good=正常(✅) / info=提示(无告警)
+     */
+    function _classifyDataWarning(w) {
+        if (!w) return 'info';
+        if (w.indexOf('⚠️') >= 0) return 'bad';
+        var m = /滞后(\d+)天/.exec(w);
+        if (m) {
+            var n = parseInt(m[1], 10);
+            if (n >= 5) return 'bad';
+            if (n >= 1) return 'warn';
+            return 'good';
+        }
+        if (w.indexOf('数据源暂不可用') >= 0) return 'warn';
+        if (w.indexOf('暂无') >= 0) return 'warn';
+        if (w.indexOf('最新') >= 0) return 'good';
+        return 'info';
+    }
+
+    /**
+     * 020R-57：数据完整度汇总（看板三态标签用）——worst 取最差档，issues 收集异常/滞后行
+     */
+    function _dataWarningSummary(dwList, generatedAt) {
+        var worst = 'good';
+        var issues = [];
+        (dwList || []).forEach(function(w) {
+            var s = _classifyDataWarning(w);
+            if (s === 'bad') {
+                worst = 'bad';
+                issues.push(w);
+            } else if (s === 'warn') {
+                issues.push(w);
+                if (worst === 'good') worst = 'warn';
+            }
+        });
+        return { worst: worst, issues: issues, generatedAt: generatedAt };
+    }
+
+    /**
+     * 020R-57：三态数据标签 🔴异常 / 🟡滞后 / ✓正常（悬停列明细 + 检查时间）
+     */
+    function _dataWarningTag(summary) {
+        var title = (summary.issues || []).map(function(w) { return w.replace(/"/g, '&quot;'); }).join('\n');
+        if (summary.generatedAt) {
+            title += (title ? '\n' : '') + '检查于 ' + _fmtGenTime(summary.generatedAt);
+        }
+        if (summary.worst === 'bad') {
+            return '<span style="color:#e74c3c;font-weight:600;cursor:help;" title="' + title + '">🔴</span>';
+        }
+        if (summary.worst === 'warn') {
+            return '<span style="color:#e65100;font-weight:600;cursor:help;" title="' + title + '">🟡</span>';
+        }
+        return '<span style="color:#27ae60;cursor:help;" title="数据完整，无滞后/替代源问题">✓</span>';
     }
 
     // ========== M8-BACKTEST-003 回测中心 ==========
