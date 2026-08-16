@@ -4092,9 +4092,15 @@
     }
 
     function loadIndustryFlow() {
+        loadIndustryFlowFor(null);
+    }
+
+    // 020R-53：时间维度——支持按交易日回看历史快照
+    function loadIndustryFlowFor(date) {
         var dom = document.getElementById('marketFlowList');
         var meta = document.getElementById('marketFlowMeta');
-        fetch('/api/market/industry-fund-flow')
+        var url = '/api/market/industry-fund-flow' + (date ? '?date=' + encodeURIComponent(date) : '');
+        fetch(url)
             .then(function(r) { return safeJson(r); })
             .then(function(data) {
                 if (!data.success) {
@@ -4102,15 +4108,24 @@
                     return;
                 }
                 if (meta) {
-                    meta.textContent = data.trade_date
-                        ? ('交易日：' + data.trade_date + (data.updated_at ? ' · 更新：' + String(data.updated_at).slice(5, 16) : ''))
-                        : '';
+                    meta.innerHTML = renderMarketFlowDateSelect(data.dates || [], data.trade_date)
+                        + (data.updated_at ? '<span style="font-size:13px;color:#888;margin-left:10px;">更新：' + String(data.updated_at).slice(5, 16) + '</span>' : '');
                 }
-                renderIndustryFlowTable(data.items, dom);
+                renderIndustryFlowTable(data.items, dom, data.trade_date);
             })
             .catch(function(e) {
                 if (dom) dom.innerHTML = '<div class="empty">行业资金流请求失败：' + e + '</div>';
             });
+    }
+
+    function renderMarketFlowDateSelect(dates, selected) {
+        if (!dates || dates.length === 0) return '';
+        var html = '<span style="font-size:13px;color:#888;">交易日：</span><select id="marketFlowDateSel" style="font-size:13px;padding:2px 6px;border:1px solid #ccc;border-radius:4px;" onchange="loadIndustryFlowFor(this.value)">';
+        dates.forEach(function(d) {
+            html += '<option value="' + d + '"' + (d === selected ? ' selected' : '') + '>' + d + '</option>';
+        });
+        html += '</select>';
+        return html;
     }
 
     function refreshIndustryFlow() {
@@ -4122,19 +4137,17 @@
                 if (btn) { btn.disabled = false; btn.textContent = '🔄 刷新'; }
                 if (data.success) {
                     var meta = document.getElementById('marketFlowMeta');
-                    if (meta) {
-                        if (data.cooldown) {
-                            // 020R-34：冷却期回放快照，温和提示（不弹窗）
-                            meta.textContent = data.note || '限流冷却中，显示上次快照';
-                            meta.style.color = '#e65100';
-                        } else {
-                            meta.textContent = data.trade_date
-                                ? ('交易日：' + data.trade_date + (data.updated_at ? ' · 更新：' + String(data.updated_at).slice(5, 16) : ''))
-                                : '';
-                            meta.style.color = '#888';
+                    if (data.cooldown) {
+                        // 020R-34：冷却期回放快照，温和提示（不弹窗）
+                        if (meta) {
+                            meta.innerHTML = '<span style="color:#e65100;font-size:13px;margin-right:10px;">' + (data.note || '限流冷却中，显示上次快照') + '</span>'
+                                + renderMarketFlowDateSelect(data.dates || [], data.trade_date);
                         }
+                        renderIndustryFlowTable(data.items, document.getElementById('marketFlowList'), data.trade_date);
+                    } else {
+                        // 刷新成功：重读最新快照（含 5 日累计列）并同步日期下拉
+                        loadIndustryFlowFor();
                     }
-                    renderIndustryFlowTable(data.items, document.getElementById('marketFlowList'));
                 } else {
                     alert('行业资金流刷新失败：' + (data.error || '未知错误') + '。数据源限流时请稍后重试，页面仍显示上次快照。');
                 }
@@ -4145,7 +4158,7 @@
             });
     }
 
-    function renderIndustryFlowTable(items, dom) {
+    function renderIndustryFlowTable(items, dom, tradeDate) {
         if (!dom) return;
         if (!items || items.length === 0) {
             dom.innerHTML = '<div class="empty">暂无行业资金流数据，请点击「🔄 刷新」获取</div>';
@@ -4156,6 +4169,7 @@
             '<th style="padding:8px;border-bottom:2px solid #ddd;">行业</th>' +
             '<th style="padding:8px;border-bottom:2px solid #ddd;">涨跌幅</th>' +
             '<th style="padding:8px;border-bottom:2px solid #ddd;">主力净流入</th>' +
+            '<th style="padding:8px;border-bottom:2px solid #ddd;" title="截至该日（含）前 5 个交易日主力净流入累计">5日累计</th>' +
             '<th style="padding:8px;border-bottom:2px solid #ddd;">主力净占比</th>' +
             '<th style="padding:8px;border-bottom:2px solid #ddd;">超大单</th>' +
             '<th style="padding:8px;border-bottom:2px solid #ddd;">大单</th>' +
@@ -4170,6 +4184,7 @@
                 '<span style="color:#aaa;font-size:11px;margin-left:6px;">' + (it.code || '') + '</span></td>' +
                 '<td style="padding:6px 8px;">' + fmtPct(it.pct_change) + '</td>' +
                 '<td style="padding:6px 8px;">' + fmtFlow(it.main_net) + '</td>' +
+                '<td style="padding:6px 8px;" title="截至 ' + (tradeDate || '') + '（含）前 5 个交易日累计">' + fmtFlow(it.main_net_5d) + '</td>' +
                 '<td style="padding:6px 8px;">' + fmtPct(it.main_pct) + '</td>' +
                 '<td style="padding:6px 8px;font-size:12px;">' + fmtFlow(it.super_net) + '</td>' +
                 '<td style="padding:6px 8px;font-size:12px;">' + fmtFlow(it.big_net) + '</td>' +

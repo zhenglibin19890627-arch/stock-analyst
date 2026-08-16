@@ -233,3 +233,58 @@ def get_latest_industry_fund_flow():
         return items, trade_date, (crow['t'] if crow else None)
     finally:
         conn.close()
+
+
+def get_industry_fund_flow_dates():
+    """020R-53：可用交易日列表（新→旧），供前端时间维度选择。"""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            'SELECT DISTINCT trade_date FROM industry_fund_flow ORDER BY trade_date DESC'
+        ).fetchall()
+        return [str(r['trade_date']) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_industry_fund_flow_for_date(trade_date):
+    """020R-53：读取指定交易日快照 → (items, updated_at)。
+
+    items 每行附加 main_net_5d：截至该日（含）的前 5 个交易日主力净流入累计，
+    用于行业资金流向的时间维度趋势展示。
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT code, name, pct_change, main_net, main_pct, super_net, big_net, mid_net, small_net, lead_stock '
+            'FROM industry_fund_flow WHERE trade_date = ? ORDER BY main_net DESC',
+            (trade_date,),
+        )
+        items = [dict(r) for r in cursor.fetchall()]
+
+        # 截至该日的前 5 个交易日累计（含当日）
+        cursor.execute(
+            """
+            WITH recent AS (
+                SELECT DISTINCT trade_date FROM industry_fund_flow
+                WHERE trade_date <= ? ORDER BY trade_date DESC LIMIT 5
+            )
+            SELECT code, SUM(main_net) AS main_net_5d
+            FROM industry_fund_flow
+            WHERE trade_date IN (SELECT trade_date FROM recent)
+            GROUP BY code
+        """,
+            (trade_date,),
+        )
+        s5 = {r['code']: r['main_net_5d'] for r in cursor.fetchall()}
+        for it in items:
+            it['main_net_5d'] = s5.get(it['code'])
+
+        cursor.execute(
+            'SELECT MAX(created_at) AS t FROM industry_fund_flow WHERE trade_date = ?', (trade_date,)
+        )
+        crow = cursor.fetchone()
+        return items, (crow['t'] if crow else None)
+    finally:
+        conn.close()

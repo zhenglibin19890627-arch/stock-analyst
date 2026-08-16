@@ -196,6 +196,16 @@ def _run_full_report_flow():
     except Exception as e:
         logger.error(f'指数定时刷新异常（不阻塞调度）: {e}', exc_info=True)
 
+    # 020R-53：行业资金流向每日快照挂载点——与指数刷新同模式，每个报告日
+    # 落库一次当日行业资金快照，为市场行情页提供时间维度（历史回看 + 5日累计）。
+    # 东财接口失败时由 market_overview 冷却机制兜底，异常隔离不阻塞调度。
+    try:
+        from modules.market_overview import refresh_industry_fund_flow
+
+        refresh_industry_fund_flow()
+    except Exception as e:
+        logger.error(f'行业资金流向每日快照异常（不阻塞调度）: {e}', exc_info=True)
+
 
 def _schedule_next():
     """019X T2：窗3 结束后注册次日窗1（16:10）"""
