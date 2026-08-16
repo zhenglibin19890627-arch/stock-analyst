@@ -745,6 +745,24 @@ def _build_data_freshness(stock_id):
     return {'lines': lines, 'has_issue': has_issue}
 
 
+def _has_collection_today(stock_id, target_date):
+    """020R-58：该股当日是否有任何采集记录（data_status 当日行）。
+
+    异常时按 False（无采集）处理——宁可多采集一次也不静默缺数据。
+    """
+    try:
+        conn = get_connection()
+        row = conn.execute(
+            'SELECT 1 FROM data_status WHERE stock_id=? AND fetched_at LIKE ? LIMIT 1',
+            (stock_id, f'{target_date}%'),
+        ).fetchone()
+        conn.close()
+        return bool(row)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f'[020R-58] 采集记录检查异常 stock_id={stock_id}: {e}')
+        return False
+
+
 def _process_single_stock(stock, target_date, force, report_type='daily', skip_collect=False):
     """012-B: 单只股票处理（供 ThreadPoolExecutor 调用）
 
@@ -777,24 +795,29 @@ def _process_single_stock(stock, target_date, force, report_type='daily', skip_c
         existing = None
 
     if existing:
-        # 今日已有有效报告，直接使用已有数据，跳过采集+分析
-        logger.info(f'[{symbol}] 今日已有有效报告，跳过采集+分析')
-        engine = existing['engine_version'] or 'legacy'
-        total_score = existing['total_score'] or 0
-        rating_val = existing['rating'] or ''
-        score_change = existing['score_change']
+        # 020R-58：当日已有有效报告，但若该股今天没有任何采集记录
+        # （如报告由调度批次前的 advise 生成），仍补充采集并重新分析，
+        # 避免「报告先于批次生成」导致当日数据缺失（小米 08-16 案例）。
+        if skip_collect or _has_collection_today(stock_id, target_date):
+            # 今日已有有效报告，直接使用已有数据，跳过采集+分析
+            logger.info(f'[{symbol}] 今日已有有效报告，跳过采集+分析')
+            engine = existing['engine_version'] or 'legacy'
+            total_score = existing['total_score'] or 0
+            rating_val = existing['rating'] or ''
+            score_change = existing['score_change']
 
-        return {
-            'stock_id': stock_id,
-            'symbol': symbol,
-            'name': name,
-            'status': 'ok',
-            'engine': engine,
-            'score': total_score,
-            'rating': rating_val,
-            'score_change': score_change,
-            'reused': True,
-        }
+            return {
+                'stock_id': stock_id,
+                'symbol': symbol,
+                'name': name,
+                'status': 'ok',
+                'engine': engine,
+                'score': total_score,
+                'rating': rating_val,
+                'score_change': score_change,
+                'reused': True,
+            }
+        logger.info(f'[{symbol}] 今日已有有效报告但无当日采集记录，补充采集后重新分析')
 
     # FIX-A 改动2：每只股票先采集后分析
     # 012-B 增强：线程内更新进度 stage（采集阶段），前端进度条可显示"当前在干什么"

@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from database import db_manager
-from modules.daily_report import _build_data_freshness, _days_between
+from modules.daily_report import _build_data_freshness, _days_between, _has_collection_today
 
 
 @pytest.fixture()
@@ -218,3 +218,33 @@ class TestDataFreshness:
 
         r = _build_data_freshness(1)
         assert any('业绩预期' in line and '快报 1 条' in line and '20260630' in line for line in r['lines'])
+
+
+class TestHasCollectionToday:
+    """020R-58：当日采集记录检查（报告复用前的保护条件）"""
+
+    def test_today_record_true(self, db):
+        today = datetime.now().strftime('%Y-%m-%d')
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO data_status (stock_id, dimension, status, message, fetched_at) "
+            "VALUES (1, 'kline', 'success', 't', datetime('now', 'localtime'))"
+        )
+        conn.commit()
+        conn.close()
+        assert _has_collection_today(1, today) is True
+
+    def test_no_record_false(self, db):
+        today = datetime.now().strftime('%Y-%m-%d')
+        assert _has_collection_today(1, today) is False
+
+    def test_other_day_false(self, db):
+        today = datetime.now().strftime('%Y-%m-%d')
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO data_status (stock_id, dimension, status, message, fetched_at) "
+            "VALUES (1, 'kline', 'success', 't', '2026-08-10 02:26:00')"
+        )
+        conn.commit()
+        conn.close()
+        assert _has_collection_today(1, today) is False
