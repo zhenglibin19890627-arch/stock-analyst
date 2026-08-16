@@ -36,7 +36,6 @@ from modules.scoring_engine import (
     score_ma,
     score_main_capital,
     score_margin_capital,
-    score_north_capital,
     score_obos,
     score_profitability,
     score_sentiment,
@@ -502,27 +501,6 @@ class TestCapitalScoring:
         assert positive == 95.0
         assert negative == 42.0
 
-    # --- score_north_capital 互联互通 ---
-    # 019T T2（开放项 A）：缺失 70 → 50，实测档位不变
-    def test_north_capital_missing_returns_neutral(self):
-        score, _ = score_north_capital(_sd())
-        assert score == 50.0
-
-    @pytest.mark.parametrize(
-        'north,expected',
-        [
-            (3000, 88.0),  # 大幅买入
-            (500, 70.0),  # 温和买入
-            (0, 70.0),  # 小幅买入
-            (-500, 52.0),  # 小幅卖出
-            (-3000, 40.0),  # 温和卖出
-            (-3001, 15.0),  # 大幅卖出
-        ],
-    )
-    def test_north_capital_levels(self, north, expected):
-        score, _ = score_north_capital(_sd(north_net_buy=north))
-        assert score == expected
-
     # --- score_margin_capital 杠杆资金 ---
     # 019T T2（开放项 A）：缺失 68 → 50，实测档位不变
     def test_margin_capital_missing_returns_neutral(self):
@@ -544,15 +522,20 @@ class TestCapitalScoring:
         score, _ = score_margin_capital(_sd(margin_balance_chg=margin))
         assert score == expected
 
-    # --- 019T T2 配置回归：degradation 类型 ---
+    # --- 019T T2 配置回归：degradation 类型（020R-47 更新：互联互通子项已移除） ---
     def test_capital_subitems_degradation_019T(self):
-        """019T T2：main_capital 已改 A 类归零（无 default_fills）；north/margin 保持 B 类"""
+        """020R-47：资金面 4 子项——main 归零型、margin 降权型、inst_hold/holder_count 归零型；权重合计 1.0"""
         by_key = {si.key: si for si in CAPITAL_SUBITEMS}
+        assert set(by_key.keys()) == {'main_capital', 'margin_capital', 'inst_hold', 'holder_count'}
         main_si = by_key['main_capital']
         assert main_si.degradation == 'zero'
         assert main_si.default_fills == {}
-        assert by_key['north_capital'].degradation == 'reduce'
+        assert abs(main_si.base_weight - 0.50) < 1e-9
         assert by_key['margin_capital'].degradation == 'reduce'
+        assert by_key['inst_hold'].degradation == 'zero'
+        assert by_key['holder_count'].degradation == 'zero'
+        total = sum(si.base_weight for si in CAPITAL_SUBITEMS)
+        assert abs(total - 1.0) < 1e-9
 
 
 # ============================================================

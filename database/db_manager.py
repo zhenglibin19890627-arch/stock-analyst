@@ -295,6 +295,21 @@ def init_database():
     """)
 
     # ============================================================
+    # 6.7 南向资金（港股通）大盘快照 —— 020R-47（仅展示参考，不参评）
+    # ============================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS south_fund_flow (
+            trade_date TEXT PRIMARY KEY,          -- 交易日 YYYY-MM-DD
+            net_buy REAL,                         -- 当日成交净买额(亿元)
+            buy_amount REAL,                      -- 买入成交额(亿元)
+            sell_amount REAL,                     -- 卖出成交额(亿元)
+            cumulative_net REAL,                  -- 历史累计净买额(亿元)
+            hold_market_value REAL,               -- 持股市值(亿元)
+            fetched_at TIMESTAMP DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+
+    # ============================================================
     # 7. 消息面数据表 —— 公告、研报等
     # ============================================================
     cursor.execute("""

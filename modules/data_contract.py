@@ -235,7 +235,6 @@ class StockData(BaseModel):
         }
         CAPITAL = {
             'main_net_inflow',
-            'north_net_buy',
             'margin_balance_chg',
             'holder_count_change_pct',
             'institution_hold_ratio',
@@ -264,8 +263,8 @@ class StockData(BaseModel):
         - technical: 12个可选字段
         - fundamental: 9个可选字段
         - news: 5个字段 (news_sentiment, holder_increase, news_count, news_positive_ratio, news_negative_count)
-        - capital: 5个字段 (main_net_inflow, north_net_buy, margin_balance_chg,
-          holder_count_change_pct, institution_hold_ratio)  # 020R-45 从3扩展至5
+        - capital: 4个字段 (main_net_inflow, margin_balance_chg,
+          holder_count_change_pct, institution_hold_ratio)  # 020R-45 从3扩展至5；020R-47 移除 north 后为4
         """
         tech_total = 12
         tech_present = 12 - len(self.missing_fields('technical'))
@@ -276,8 +275,8 @@ class StockData(BaseModel):
         news_total = 5  # B22: 从2扩展至5
         news_present = 5 - len(self.missing_fields('news'))
 
-        capital_total = 5  # 020R-45: 从3扩展至5
-        capital_present = 5 - len(self.missing_fields('capital'))
+        capital_total = 4  # 020R-47: 互联互通子项移除后从5减至4
+        capital_present = 4 - len(self.missing_fields('capital'))
 
         self.data_quality = DataQuality(
             technical=round(tech_present / tech_total, 2),

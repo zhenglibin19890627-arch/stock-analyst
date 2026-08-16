@@ -50,8 +50,9 @@ _V5_SUBITEM_LABELS = {
     'sentiment': '市场情绪',
     'holder': '股东行为',
     'main_capital': '主力资金',
-    'north_capital': '互联互通',
     'margin_capital': '杠杆资金',
+    'inst_hold': '机构持仓',
+    'holder_count': '股东人数',
 }
 
 
@@ -1023,7 +1024,7 @@ def _build_v5_factors(stock_id, stock_data, v5_result, dim_key):
             'current_ratio',
         ],
         'news': ['news_sentiment', 'holder_increase'],
-        'capital_flow': ['main_net_inflow', 'north_net_buy', 'margin_balance_chg'],
+        'capital_flow': ['main_net_inflow', 'margin_balance_chg'],  # 020R-47: north 移除
     }
     dim_fields = dim_field_map.get(dim_key, [])
     for field in dim_fields:

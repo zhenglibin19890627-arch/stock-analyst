@@ -70,13 +70,16 @@ def _fundamental_detail_for_stock(stock_id):
 
 
 def _capital_detail_for_stock(stock_id):
-    """020R-38/45：读取 raw_capital_flow + holder_structure，计算资金面子项展示明细。
+    """020R-38/45/47：读取 raw_capital_flow + holder_structure（+港股南向参考），计算资金面子项展示明细。
 
     纯展示层增强：失败或数据不足时返回 None，不影响报告主流程。
     """
     try:
         conn = get_connection()
         cursor = conn.cursor()
+        cursor.execute('SELECT market FROM stocks WHERE id = ?', (stock_id,))
+        mrow = cursor.fetchone()
+        is_hk = bool(mrow and mrow['market'] == 'hk_stock')
         cursor.execute(
             'SELECT trade_date, main_net_inflow, north_holding_change, margin_balance '
             'FROM raw_capital_flow WHERE stock_id = ? ORDER BY trade_date ASC',
@@ -92,12 +95,23 @@ def _capital_detail_for_stock(stock_id):
         )
         hs_row = cursor.fetchone()
         conn.close()
-        if not rows and not hs_row:
+
+        south_flow = None
+        if is_hk:
+            # 020R-47：港股展示南向资金大盘参考（不参评）
+            try:
+                from modules.south_flow import get_latest_south_flow
+
+                south_flow = get_latest_south_flow()
+            except Exception as e:  # noqa: BLE001
+                logging.getLogger(__name__).warning(f'南向资金快照读取失败 stock_id={stock_id}: {e}')
+
+        if not rows and not hs_row and not south_flow:
             return None
 
         from modules.capital_detail import compute_capital_detail
 
-        return compute_capital_detail(rows, dict(hs_row) if hs_row else None)
+        return compute_capital_detail(rows, dict(hs_row) if hs_row else None, south_flow)
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).warning(f'资金面指标明细计算失败 stock_id={stock_id}: {e}')
         return None

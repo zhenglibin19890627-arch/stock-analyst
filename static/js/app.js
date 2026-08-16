@@ -4477,7 +4477,7 @@
         }
         var html = '<div style="font-size:11px;color:#999;margin-bottom:2px;">资金面指标明细' +
             (cd.trade_date ? '（数据截至 ' + cd.trade_date + '）' : '') + '</div>';
-        // 1) 主力资金（权重 55%）
+        // 1) 主力资金（权重 50%，020R-47：承接原互联互通权重）
         html += _row('主力资金',
             cd.main_net != null ? _fv(_wanFmt(cd.main_net), cd.main_state) :
             '<span style="color:#999;">数据缺失</span>');
@@ -4485,11 +4485,7 @@
         if (cd.main_avg_5d != null) {
             html += _row('主力5日均', '<span style="color:#333;font-weight:400;">' + _wanFmt(cd.main_avg_5d) + '</span>');
         }
-        // 2) 互联互通（权重 10%）
-        html += _row('互联互通',
-            cd.north_net != null ? ('北向 ' + _fv(_wanFmt(cd.north_net), cd.north_state)) :
-            '<span style="color:#999;">数据缺失（北向数据源已停更）</span>');
-        // 3) 杠杆资金（权重 20%）
+        // 2) 杠杆资金（权重 20%）
         html += _row('杠杆资金',
             cd.margin_chg != null ? ('融资余额 ' + _fv(_wanFmt(cd.margin_chg), cd.margin_state)) :
             '<span style="color:#999;">数据缺失</span>');
@@ -4503,6 +4499,14 @@
             cd.holder_count_change_pct != null
                 ? ('户数环比 ' + _fv((cd.holder_count_change_pct > 0 ? '+' : '') + cd.holder_count_change_pct + '%', cd.holder_state))
                 : '<span style="color:#999;">数据缺失（A股专属）</span>');
+        // 6) 南向资金参考（020R-47，仅港股展示，不参评）
+        if (cd.south_net_buy != null) {
+            var southBody = '今日净买 ' + (cd.south_net_buy > 0 ? '+' : '') + cd.south_net_buy + ' 亿元';
+            if (cd.south_hold_mv != null) southBody += ' · 持股市值 ' + cd.south_hold_mv + ' 万亿港元';
+            if (cd.south_date) southBody += '（' + cd.south_date + '）';
+            html += _row('南向资金（参考）',
+                '<span style="color:#888;font-weight:400;">' + southBody + ' · 不参评</span>');
+        }
         return html;
     }
 

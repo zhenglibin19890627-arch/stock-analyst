@@ -7,12 +7,13 @@
 """
 
 
-def compute_capital_detail(cap_rows, holder_structure=None):
-    """cap_rows: raw_capital_flow 行 dict 列表（升序）；holder_structure: 最新一期快照 dict。
+def compute_capital_detail(cap_rows, holder_structure=None, south_flow=None):
+    """cap_rows: raw_capital_flow 行 dict 列表（升序）；holder_structure: 最新一期快照 dict；
+    south_flow: 南向资金大盘快照 dict（仅港股展示参考，020R-47）。
 
-    返回展示明细 dict；cap_rows 与 holder_structure 都为空时返回 None。
+    返回展示明细 dict；三个入参都为空时返回 None。
     """
-    if not cap_rows and not holder_structure:
+    if not cap_rows and not holder_structure and not south_flow:
         return None
 
     d = {'trade_date': str(cap_rows[-1].get('trade_date'))[:10]} if cap_rows else {}
@@ -115,5 +116,12 @@ def compute_capital_detail(cap_rows, holder_structure=None):
             else:
                 d['inst_state'] = '机构极少关注'
         d['inst_report_date'] = holder_structure.get('inst_report_date')
+
+    # 5) 南向资金参考（020R-47，仅港股展示，不参评）
+    if south_flow:
+        d['south_date'] = south_flow.get('trade_date')
+        d['south_net_buy'] = south_flow.get('net_buy')
+        d['south_hold_mv'] = south_flow.get('hold_market_value')
+        d['south_cumulative'] = south_flow.get('cumulative_net')
 
     return d

@@ -1726,6 +1726,47 @@ def _save_holder_structure(stock_id: int, data):
 
 
 # ============================================================
+# 020R-47：南向资金（港股通）大盘快照采集（仅展示参考，不参评）
+# 数据源：akshare stock_hsgt_hist_em(symbol='南向资金')——实测仍正常更新。
+# ============================================================
+
+
+def _num_or_none_flow(v):
+    try:
+        if v is None or v == '-' or v == '':
+            return None
+        if pd.isna(v):
+            return None
+        return round(float(v), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_south_flow_snapshot():
+    """020R-47：抓取南向资金最新一行 → dict；失败返回 None。
+
+    单位：当日净买/买卖额=亿元；持股市值换算为万亿。
+    """
+    try:
+        df = ak.stock_hsgt_hist_em(symbol='南向资金')
+        if df is None or df.empty:
+            return None
+        row = df.iloc[-1]
+        hold_mv = _num_or_none_flow(row.get('持股市值'))
+        return {
+            'trade_date': str(row.get('日期'))[:10],
+            'net_buy': _num_or_none_flow(row.get('当日成交净买额')),
+            'buy_amount': _num_or_none_flow(row.get('买入成交额')),
+            'sell_amount': _num_or_none_flow(row.get('卖出成交额')),
+            'cumulative_net': _num_or_none_flow(row.get('历史累计净买额')),
+            'hold_market_value': round(hold_mv / 1e12, 2) if hold_mv is not None else None,
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f'[020R-47 南向资金] 抓取失败(静默降级): {e}')
+        return None
+
+
+# ============================================================
 # 港股 —— 基本面数据
 # ============================================================
 

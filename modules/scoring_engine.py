@@ -195,18 +195,17 @@ NEWS_SUBITEMS: list[SubItem] = [
     SubItem('股东行为', 'holder', ['holder_increase'], 0.30, 'zero'),
 ]
 
-# --- 资金面 5 子项（020R-45 扩展：新增机构持仓/股东人数，权重重排，豁免见 RED_LINES.md §6） ---
-# B26：北向资金数据源自2024-08-16起停更（港交所政策变更），降权0.30→0.10
+# --- 资金面 4 子项（020R-45 扩展 + 020R-47 删除互联互通：北向数据政策性断供，无替代源） ---
+# 豁免见 RED_LINES.md §6。A/H 两市场统一此结构。
 CAPITAL_SUBITEMS: list[SubItem] = [
     SubItem(
         '主力资金',
         'main_capital',
         ['main_net_inflow'],
-        0.40,  # 020R-45: 0.55→0.40
+        0.50,  # 020R-45: 0.55→0.40；020R-47: 0.40→0.50（承接互联互通释放权重）
         'zero',  # 019T T2: C类(keep_default 填充) → A类(归零)；缺失=无信息，不占权重
     ),
-    SubItem('互联互通', 'north_capital', ['north_net_buy'], 0.10, 'reduce'),
-    SubItem('杠杆资金', 'margin_capital', ['margin_balance_chg'], 0.20, 'reduce'),  # 020R-45: 0.35→0.20
+    SubItem('杠杆资金', 'margin_capital', ['margin_balance_chg'], 0.20, 'reduce'),
     # 020R-45 新增：机构持仓（六类机构持股汇总/总股本，A股专属，缺失归零）
     SubItem('机构持仓', 'inst_hold', ['institution_hold_ratio'], 0.20, 'zero'),
     # 020R-45 新增：股东人数（户数环比，筹码集中度，A股专属，缺失归零）
@@ -795,31 +794,6 @@ def score_main_capital(data: StockData) -> tuple[float, dict]:
         return 20.0, {**detail, 'note': '大幅净流出'}
 
 
-def score_north_capital(data: StockData) -> tuple[float, dict]:
-    """互联互通子项评分：北向/港股通净买入（缺失返回中性 50）
-
-    019T T2（开放项 A 同批修复）：缺失分支 70 → 50（去除中性偏暖残存）；
-    degradation 仍为 B 类 reduce，实测档位不变。
-    """
-    north = data.north_net_buy
-    if north is None:
-        return 50.0, {'note': '互联互通数据缺失，返回中性分'}
-
-    detail = {'north_net_buy': f'{north:.2f}万元'}
-    if north >= 3000:
-        return 88.0, {**detail, 'note': '北向大幅买入'}  # O2-A+: 85→88
-    elif north >= 500:
-        return 70.0, {**detail, 'note': '北向温和买入'}
-    elif north >= 0:
-        return 70.0, {**detail, 'note': '北向小幅买入'}
-    elif north >= -500:
-        return 52.0, {**detail, 'note': '北向小幅卖出'}
-    elif north >= -3000:
-        return 40.0, {**detail, 'note': '北向温和卖出'}
-    else:
-        return 15.0, {**detail, 'note': '北向大幅卖出'}
-
-
 def score_margin_capital(data: StockData) -> tuple[float, dict]:
     """杠杆资金子项评分：融资余额变化（缺失返回中性 50）
 
@@ -909,9 +883,8 @@ SCORING_FUNCTIONS: dict[str, Callable[[StockData], tuple[float, dict]]] = {
     # 消息面
     'sentiment': score_sentiment,
     'holder': score_holder,
-    # 资金面
+    # 资金面（020R-47：互联互通已移除）
     'main_capital': score_main_capital,
-    'north_capital': score_north_capital,
     'margin_capital': score_margin_capital,
     # 020R-45 新增：机构持仓/股东人数
     'inst_hold': score_inst_hold,
@@ -1213,9 +1186,9 @@ def analyze(data: StockData) -> AnalysisResult:
     if was_rescaled:
         warnings.append(f'维度权重已重新归一化（活跃维度: {sorted(available_dims)}）')
 
-    # B10: 资金面受限标注（北向资金/两融数据源不可用时提示用户）
-    if data.north_net_buy is None and data.margin_balance_chg is None:
-        warnings.append('资金面提示：北向资金/两融数据源暂不可用，当前评分仅基于主力资金流向')
+    # B10/020R-47：两融数据源不可用时提示用户（互联互通子项已移除，不再提及北向）
+    if data.margin_balance_chg is None:
+        warnings.append('资金面提示：两融数据源暂不可用，当前评分基于主力资金/机构持仓/股东人数等')
 
     # 9. 组装结果
     # B12-T3: score_date 使用 K 线数据的 trade_date（而非 datetime.now()）

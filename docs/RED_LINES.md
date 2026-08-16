@@ -89,6 +89,7 @@
 | 009 | `price_advisor.py` | 从"不可改"转为"可修改（仅限后处理集成方式）" | 评审 009 |
 | 2026-08-16 | `tests/`（3 文件） | 测试按 020H/020R-19/019G 新语义修复；`scripts/check_redlines.py` + `tests/test_redlines.py` 新增 | 用户（021A 治理） |
 | 2026-08-16 | `data_contract.py` / `data_adapter.py` / `data_collector.py` / `db_manager.py` / **R7 `scoring_engine.py`** | 020R-45：StockData 新增 2 个资金面-筹码结构字段（holder_count_change_pct / institution_hold_ratio，缺失=权重归零型）+ `holder_structure` 新表 + 采集/适配；**资金面新增「股东人数(0.10)」「机构持仓(0.20)」两子项并重排权重（主力 0.55→0.40、两融 0.35→0.20、北向 0.10 不变）；002 校准档位（north 70/88、margin 68/88、main 85、vol_ratio 80）保持不变** | 用户（020R-45 批准） |
+| 2026-08-16 | **R7 `scoring_engine.py`** / **R8 `data_contract.py`** / `advisor.py` / `tests/` | 020R-47：**删除互联互通子项**（北向数据 2024-08 政策性断供，调研确认无替代源）——主力资金 0.40→0.50、A/H 两市场资金面统一为 4 子项（主力 0.50/机构持仓 0.20/杠杆 0.20/股东人数 0.10）；删除 `score_north_capital` 及注册；`north_net_buy` 移出资金面完整度集合（capital 5→4 字段）；南向资金仅展示不参评 | 用户（020R-47 批准） |
 
 ---
 
