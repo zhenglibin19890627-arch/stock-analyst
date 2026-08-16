@@ -430,6 +430,36 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
     # 4. 读取基本面
     fund = _read_fundamental_data(stock_id)
 
+    # 4.5 020R-49：业绩预告（归母净利润口径，预告期晚于最新正式财报期时有效）
+    forecast_np_yoy = None
+    forecast_confidence = None
+    try:
+        conn = get_connection()
+        fc = conn.execute(
+            "SELECT report_period, change_pct, forecast_type FROM raw_forecast "
+            "WHERE stock_id = ? AND indicator LIKE '%净利润%' "
+            "ORDER BY report_period DESC, announce_date DESC LIMIT 1",
+            (stock_id,),
+        ).fetchone()
+        conn.close()
+        if fc and fc['report_period'] and fund and fund.get('report_date'):
+            fund_period = str(fund['report_date'])[:10].replace('-', '')
+            fc_period = str(fc['report_period'])[:8]
+            if fc_period > fund_period:
+                ft = fc['forecast_type'] or ''
+                forecast_np_yoy = fc['change_pct']
+                if ft in ('首亏', '续亏') and forecast_np_yoy is None:
+                    forecast_np_yoy = -100.0  # 亏损无幅度，按强负增长处理
+                if ft == '扭亏' and forecast_np_yoy is None:
+                    forecast_np_yoy = None  # 扭亏幅度未知，不采信
+                if forecast_np_yoy is not None:
+                    if ft in ('略增', '略减', '续盈', '不确定'):
+                        forecast_confidence = 0.6
+                    else:
+                        forecast_confidence = 0.8
+    except Exception as e:  # noqa: BLE001 —— 预告表缺失/字段漂移时静默降级为不采信
+        logger.warning(f'[020R-49] 业绩预告读取失败 stock_id={stock_id}: {e}')
+
     # 5. 读取资金面
     cap_rows = _read_capital_data(stock_id, limit=10)
 
@@ -529,6 +559,9 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
         gross_margin=fund.get('gross_margin') if fund else None,
         revenue_yoy=fund.get('revenue_growth') if fund else None,
         net_profit_yoy=fund.get('profit_growth') if fund else None,
+        # 020R-49：业绩预告增强
+        forecast_np_yoy=forecast_np_yoy,
+        forecast_confidence=forecast_confidence,
         ocf_to_profit=fund.get('ocf_to_net_profit') if fund else None,
         debt_to_asset=fund.get('debt_ratio') if fund else None,
         current_ratio=fund.get('current_ratio') if fund else None,

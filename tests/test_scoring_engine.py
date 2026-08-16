@@ -360,6 +360,29 @@ class TestFundamentalScoring:
     def test_growth_all_missing_returns_neutral(self):
         assert score_growth(_sd())[0] == 50.0
 
+    # --- 020R-49：业绩预告折价融合 ---
+    def test_growth_forecast_blends_with_official(self):
+        """明确型预告(置信0.8)：fw=0.48 → 净利 10×0.52 + 50×0.48 = 29.2 → 72 分档"""
+        score, detail = score_growth(
+            _sd(net_profit_yoy=10, forecast_np_yoy=50, forecast_confidence=0.8)
+        )
+        assert score == pytest.approx(72.0, abs=1e-6)
+        assert detail.get('forecast')
+
+    def test_growth_forecast_only_when_official_missing(self):
+        """正式净利缺失时按预告值计分：-30 → 12 分档"""
+        score, _ = score_growth(
+            _sd(forecast_np_yoy=-30, forecast_confidence=0.8)
+        )
+        assert score == 12.0
+
+    def test_growth_forecast_vague_lower_weight(self):
+        """模糊型预告(置信0.6)：fw=0.36 → 净利 50×0.64 + 0×0.36 = 32 → 85 分档"""
+        score, _ = score_growth(
+            _sd(net_profit_yoy=50, forecast_np_yoy=0, forecast_confidence=0.6)
+        )
+        assert score == pytest.approx(85.0, abs=1e-6)
+
     # --- score_cashflow 现金流质量 ---
     @pytest.mark.parametrize(
         'ocf,expected',

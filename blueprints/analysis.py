@@ -76,7 +76,7 @@ def _technical_detail_for_stock(stock_id):
 
 
 def _fundamental_detail_for_stock(stock_id):
-    """020R-37：读取 raw_fundamental 最新一期，计算基本面五类子项展示明细。
+    """020R-37/49：读取 raw_fundamental 最新一期 + 最新业绩预告，计算基本面五类子项展示明细。
 
     纯展示层增强：失败或数据不足时返回 None，不影响报告主流程。
     """
@@ -90,13 +90,21 @@ def _fundamental_detail_for_stock(stock_id):
             (stock_id,),
         )
         row = cursor.fetchone()
+        # 020R-49：最新归母净利润业绩预告
+        cursor.execute(
+            "SELECT report_period, indicator, change_desc, change_pct, forecast_type, announce_date "
+            "FROM raw_forecast WHERE stock_id = ? AND indicator LIKE '%净利润%' "
+            'ORDER BY report_period DESC, announce_date DESC LIMIT 1',
+            (stock_id,),
+        )
+        fc_row = cursor.fetchone()
         conn.close()
-        if not row:
+        if not row and not fc_row:
             return None
 
         from modules.fundamental_detail import compute_fundamental_detail
 
-        return compute_fundamental_detail(dict(row))
+        return compute_fundamental_detail(dict(row) if row else None, dict(fc_row) if fc_row else None)
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).warning(f'基本面指标明细计算失败 stock_id={stock_id}: {e}')
         return None

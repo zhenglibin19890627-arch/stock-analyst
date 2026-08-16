@@ -6,8 +6,8 @@
 """
 
 
-def compute_fundamental_detail(f):
-    """f: raw_fundamental 行 dict → 展示明细 dict（缺失字段不出现）。"""
+def compute_fundamental_detail(f, forecast=None):
+    """f: raw_fundamental 行 dict；forecast: 最新归母净利润预告行 dict（020R-49，可 None）→ 展示明细 dict。"""
     d = {}
     if f.get('report_date'):
         d['report_date'] = str(f['report_date'])[:10]
@@ -148,5 +148,11 @@ def compute_fundamental_detail(f):
             d['cr_state'] = '偏紧'
         else:
             d['cr_state'] = '紧张'
+
+    # 6) 业绩预告（020R-49：展示 + 成长性评分折价融合）
+    if forecast:
+        d['forecast_type'] = forecast.get('forecast_type')
+        d['forecast_period'] = str(forecast.get('report_period') or '')[:8]
+        d['forecast_change_pct'] = forecast.get('change_pct')
 
     return d

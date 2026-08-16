@@ -4423,9 +4423,11 @@
     function _fundStateColor(state) {
         if (!state) return '#666';
         var GOOD = ['低估', '破净', '合理偏低', '优秀', '良好', '高', '中高',
-                    '高增长', '较快增长', '稳步增长', '充裕', '健康', '低杠杆', '充足'];
+                    '高增长', '较快增长', '稳步增长', '充裕', '健康', '低杠杆', '充足',
+                    '预增', '略增', '续盈', '扭亏'];
         var BAD = ['偏高', '高估', '严重高估', '负值', '较差', '亏损', '低',
-                   '小幅下滑', '明显下滑', '偏弱', '为负·警惕', '高杠杆', '极高杠杆', '偏紧', '紧张'];
+                   '小幅下滑', '明显下滑', '偏弱', '为负·警惕', '高杠杆', '极高杠杆', '偏紧', '紧张',
+                   '预减', '略减', '首亏', '续亏'];
         if (GOOD.indexOf(state) >= 0) return '#e74c3c';
         if (BAD.indexOf(state) >= 0) return '#27ae60';
         return '#666';
@@ -4460,6 +4462,18 @@
         html += _row('成长性',
             (fd.revenue_growth != null ? ('营收 ' + _fv((fd.revenue_growth > 0 ? '+' : '') + fd.revenue_growth + '%', fd.rg_state)) : '') +
             (fd.profit_growth != null ? (' · 净利 ' + _fv((fd.profit_growth > 0 ? '+' : '') + fd.profit_growth + '%', fd.pg_state)) : ''));
+        // 3.5) 业绩预告（020R-49：折价参与成长性评分）
+        if (fd.forecast_type) {
+            var fcBody = fd.forecast_type;
+            if (fd.forecast_change_pct != null) {
+                fcBody += ' ' + (fd.forecast_change_pct > 0 ? '+' : '') + fd.forecast_change_pct + '%';
+            }
+            if (fd.forecast_period) {
+                var fp = String(fd.forecast_period);
+                fcBody += '（' + fp.slice(0, 4) + '年' + fp.slice(4, 6) + '月报预告）';
+            }
+            html += _row('业绩预告', _fv(fcBody, fd.forecast_type));
+        }
         // 4) 现金流质量
         html += _row('现金流质量',
             fd.ocf_to_profit != null ? ('经营现金流/净利润 ' + _fv(fd.ocf_to_profit, fd.ocf_state)) : '');

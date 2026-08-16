@@ -725,8 +725,8 @@ def score_profitability(data: StockData) -> tuple[float, dict]:
 
 
 def score_growth(data: StockData) -> tuple[float, dict]:
-    """成长性子项评分：营收增长 + 净利润增长"""
-    rev_yoy, np_yoy = data.revenue_yoy, data.net_profit_yoy
+    """成长性子项评分：营收增长 + 净利润增长（020R-49 起含业绩预告折价融合）"""
+    rev_yoy = data.revenue_yoy
     scores = []
     detail = {}
 
@@ -746,20 +746,32 @@ def score_growth(data: StockData) -> tuple[float, dict]:
         detail['revenue_yoy'] = f'{rev_yoy:.2f}%'
         scores.append(rev_s)
 
-    if np_yoy is not None:
-        if np_yoy >= 50:
+    # 020R-49：净利同比按「预告×0.6×置信度 + 正式×(1-…)」折价融合
+    np_yoy = data.net_profit_yoy
+    np_used = np_yoy
+    if data.forecast_np_yoy is not None:
+        conf = data.forecast_confidence if data.forecast_confidence is not None else 0.8
+        fw = 0.6 * conf
+        if np_yoy is not None:
+            np_used = np_yoy * (1 - fw) + data.forecast_np_yoy * fw
+        else:
+            np_used = data.forecast_np_yoy
+        detail['forecast'] = f'含预告折价(置信{conf:.1f})'
+
+    if np_used is not None:
+        if np_used >= 50:
             np_s = 96.0
-        elif np_yoy >= 30:
+        elif np_used >= 30:
             np_s = 85.0
-        elif np_yoy >= 15:
+        elif np_used >= 15:
             np_s = 72.0
-        elif np_yoy >= 0:
+        elif np_used >= 0:
             np_s = 52.0
-        elif np_yoy >= -20:
+        elif np_used >= -20:
             np_s = 30.0
         else:
             np_s = 12.0
-        detail['net_profit_yoy'] = f'{np_yoy:.2f}%'
+        detail['net_profit_yoy'] = f'{np_used:.2f}%'
         scores.append(np_s)
 
     if not scores:
