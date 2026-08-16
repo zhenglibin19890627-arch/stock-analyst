@@ -47,15 +47,17 @@
 ### 关键 API 端点（app.py）
 
 - `GET /` — 首页
-- `GET /api/health` — 健康检查
+- `GET /api/health` — 健康检查（仅运维：watchdog/start.bat 依赖）
 - `POST /api/init-db` — 初始化数据库
 - `GET|POST /api/stocks` — 自选股增查
 - `POST /api/collect/<stock_id>` — 触发单只股票数据采集
-- `POST /api/analyze/<stock_id>` — 四维分析评分
-- `GET /api/v5/scoring-demo` — v5.0 评分引擎演示
+- `POST /api/stocks/<stock_id>/analyze` — 四维分析评分
+- `GET /api/v5/scoring-demo` — v5.0 评分引擎演示（仅调试）
 - `POST /api/daily-report/generate` — 生成每日报告
-- `GET /api/daily-report/<date>` — 按日期取报告
+- `GET /api/daily-report/latest` — 取最新报告
 - `GET|POST /api/backtest/*` — 评级回测
+
+> 021D 起已删除的旧端点：`/api/stocks/<id>/refresh-full`、`/api/stocks/<id>/analysis`、`/api/stocks/<id>/ratings`、`/api/ratings`、`/api/backtest/simulate`、`/api/backtest/status`、`/api/daily-report/<date>`、`/api/daily-report/history`、`/api/watchlist/groups`、`/api/portfolio/groups/<id>`（PUT/DELETE）、`/api/positions/<id>/cost-adjustments`、`/api/portfolio/realized-pnl`、`/api/alerts/rules/<id>`（PUT）、`/api/alerts/scan`——详见 CHANGELOG 021D。
 
 ---
 

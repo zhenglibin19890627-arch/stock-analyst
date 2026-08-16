@@ -99,15 +99,9 @@ def test_stock_detail_endpoints(client_with_stock):
         f'/api/stocks/{stock_id}/restricted-release',
         f'/api/stocks/{stock_id}/status',
         f'/api/stocks/{stock_id}/news',
-        f'/api/stocks/{stock_id}/analysis',
-        f'/api/stocks/{stock_id}/ratings',
     ]
     for path in paths:
         _assert_ok(client.get(path))
-
-
-def test_ratings_list(client):
-    _assert_ok(client.get('/api/ratings'))
 
 
 # ---- portfolio 蓝图 ----
@@ -120,7 +114,6 @@ def test_portfolio_endpoints(client):
         '/api/portfolio/watchlist-scores',
         '/api/portfolio/trades',
         '/api/portfolio/cost-adjustments',
-        '/api/portfolio/realized-pnl',
     ]
     for path in paths:
         _assert_ok(client.get(path))
@@ -131,7 +124,6 @@ def test_portfolio_endpoints(client):
 def test_report_endpoints(client):
     paths = [
         '/api/daily-report/latest',
-        '/api/daily-report/history',
     ]
     for path in paths:
         _assert_ok(client.get(path))
@@ -168,7 +160,6 @@ def test_report_generate_debounce_returns_message(client, monkeypatch):
 # ---- backtest / export / index / alerts 蓝图 ----
 
 def test_backtest_endpoints(client):
-    _assert_ok(client.get('/api/backtest/status'))
     _assert_ok(client.get('/api/backtest/market-report'))
 
 

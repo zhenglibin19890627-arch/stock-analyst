@@ -5,7 +5,7 @@
 不修改 price_advisor.py（红线），复制算法常量保持同步。
 
 回测逻辑：
-  1. 对每只股票，使用当前最新评级（与 run_historical_simulation 一致）
+  1. 对每只股票，使用当前最新评级（与历史模拟回测同口径；run_historical_simulation 已随 021D 删除）
   2. 从第35个交易日开始，每隔5天取一个回测点
   3. 在每个回测点，用该日之前的K线计算历史技术指标，生成价格建议
   4. 取后续T+5/T+20的K线，基于日内high/low判定命中
@@ -677,7 +677,7 @@ def run_price_backtest(market=None, force=False):
         stock_id = stock['id']
         stock_market = stock['market']
 
-        # 1. 获取当前最新评级（与 run_historical_simulation 一致）
+        # 1. 获取当前最新评级（与历史模拟回测同口径；run_historical_simulation 已随 021D 删除）
         stock_data = load_stockdata_from_db(stock_id)
         if stock_data is None:
             logger.info(f'price_backtest stock_id={stock_id}: StockData构建失败，跳过')

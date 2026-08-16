@@ -78,44 +78,6 @@ def api_create_alert_rule():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
-@bp.route('/api/alerts/rules/<int:rule_id>', methods=['PUT'])
-def api_update_alert_rule(rule_id):
-    """修改预警规则（threshold/enabled）。
-    Body: {threshold?, enabled?}
-    """
-    try:
-        data = request.get_json(silent=True) or {}
-        fields = []
-        params = []
-
-        if 'threshold' in data:
-            fields.append('threshold=?')
-            params.append(data['threshold'])
-        if 'enabled' in data:
-            fields.append('enabled=?')
-            params.append(1 if data['enabled'] else 0)
-
-        if not fields:
-            return jsonify(
-                {'success': False, 'message': '无可更新字段（支持 threshold/enabled）'}
-            ), 400
-
-        fields.append("updated_at=datetime('now', 'localtime')")
-        params.append(rule_id)
-
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(f'UPDATE alert_rules SET {", ".join(fields)} WHERE id=?', params)
-        if cursor.rowcount == 0:
-            conn.close()
-            return jsonify({'success': False, 'message': f'规则 id={rule_id} 不存在'}), 404
-        conn.commit()
-        conn.close()
-        return jsonify({'success': True, 'message': '规则更新成功'})
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-
 @bp.route('/api/alerts/rules/<int:rule_id>', methods=['DELETE'])
 def api_delete_alert_rule(rule_id):
     """删除预警规则（软删除 enabled=0，保留历史关联）。
@@ -212,18 +174,6 @@ def api_mark_all_alerts_read():
         return jsonify(
             {'success': True, 'message': f'已标记 {affected} 条预警为已读', 'updated': affected}
         )
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-
-@bp.route('/api/alerts/scan', methods=['POST'])
-def api_trigger_alert_scan():
-    """手动触发一次预警扫描（调试/补扫用，不影响定时调度）"""
-    try:
-        from modules.alert_engine import scan_once
-
-        result = scan_once()
-        return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
 

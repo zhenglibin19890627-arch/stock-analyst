@@ -2,8 +2,6 @@
 
 from flask import Blueprint, jsonify, request
 
-from database.db_manager import get_connection
-
 bp = Blueprint('backtest', __name__)
 
 @bp.route('/api/backtest/market-report')
@@ -51,46 +49,6 @@ def api_backtest_rerun():
         engine = BacktestEngine()
         result = engine.batch_backtest(market=market, days=days, force=force)
         return jsonify({'success': True, 'result': result})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@bp.route('/api/backtest/simulate', methods=['POST'])
-def api_backtest_simulate():
-    """M9-PREFILL：技术面模拟回测回填（60天）
-    手动触发，幂等执行。
-    """
-    try:
-        from modules.backtest_engine import run_historical_simulation
-
-        result = run_historical_simulation()
-        return jsonify({'success': True, 'result': result})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@bp.route('/api/backtest/status')
-def api_backtest_status():
-    """回测概览（用于看板）"""
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) as cnt FROM backtest_results')
-        total_bt = cursor.fetchone()['cnt']
-        cursor.execute('SELECT COUNT(*) as cnt FROM ratings_history WHERE price_at_rating > 0')
-        total_ratings = cursor.fetchone()['cnt']
-        cursor.execute('SELECT market, COUNT(*) as cnt FROM backtest_results GROUP BY market')
-        market_dist = {r['market']: r['cnt'] for r in cursor.fetchall()}
-        conn.close()
-        return jsonify(
-            {
-                'success': True,
-                'total_backtests': total_bt,
-                'total_ratings_with_price': total_ratings,
-                'coverage': round(total_bt / total_ratings, 4) if total_ratings > 0 else 0,
-                'market_distribution': market_dist,
-            }
-        )
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

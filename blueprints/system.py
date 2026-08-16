@@ -37,7 +37,7 @@ def api_db_stats():
 
 @bp.route('/api/health', methods=['GET'])
 def api_health():
-    """健康检查接口（供启动脚本 curl 验证）"""
+    """健康检查接口（⚠️ 仅运维：watchdog 每分钟巡检 + start.bat 启动校验依赖此端点，勿删）"""
     return jsonify(
         {
             'success': True,
@@ -61,7 +61,9 @@ _ROLLBACK_AUDIT_LOG = os.path.join(
 
 @bp.route('/api/engine/status')
 def api_engine_status():
-    """获取当前灰度状态：mode/whitelist/blacklist/熔断状态/各股票引擎分配"""
+    """获取当前灰度状态：mode/whitelist/blacklist/熔断状态/各股票引擎分配
+    ⚠️ 仅运维：前端无入口，供灰度切换人工核查（勿删）。
+    """
     from modules.engine_switcher import get_grayscale_status
 
     return jsonify(get_grayscale_status())
@@ -69,7 +71,7 @@ def api_engine_status():
 
 @bp.route('/api/engine/rollback-all', methods=['POST'])
 def api_engine_rollback_all():
-    """一键全量回退：将所有股票切回 legacy 引擎
+    """一键全量回退：将所有股票切回 legacy 引擎（⚠️ 仅运维：前端无入口，勿删）
 
     P3-A 强制修正项2：
     - 需要 confirm=true 查询参数，缺失时返回 400

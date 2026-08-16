@@ -1364,37 +1364,6 @@ def get_latest_reports():
     return {'success': True, 'report_date': latest_date, 'reports': reports}
 
 
-def get_reports_by_date(report_date):
-    """获取指定日期的报告（013-Hotfix：优先 daily，无 daily 时取 intraday）"""
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    # 013-Hotfix: 优先取 daily，无 daily 时取 intraday，避免同一天混合返回导致列表重复
-    cursor.execute(
-        """
-        SELECT * FROM daily_reports
-        WHERE report_date = ? AND report_type = 'daily' AND status = 'ok'
-        ORDER BY total_score DESC
-    """,
-        (report_date,),
-    )
-    reports = [dict(r) for r in cursor.fetchall()]
-
-    if not reports:
-        cursor.execute(
-            """
-            SELECT * FROM daily_reports
-            WHERE report_date = ? AND report_type = 'intraday' AND status = 'ok'
-            ORDER BY total_score DESC
-        """,
-            (report_date,),
-        )
-        reports = [dict(r) for r in cursor.fetchall()]
-
-    conn.close()
-    return {'success': True, 'report_date': report_date, 'reports': reports}
-
-
 def get_report_history(page=1, page_size=30):
     """获取报告历史（分页）"""
     conn = get_connection()

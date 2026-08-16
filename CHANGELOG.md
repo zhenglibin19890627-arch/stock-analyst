@@ -1,5 +1,16 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-16] 无效接口清理（021D）
+
+- 背景：全量审计 91 个路由 × 前端三种 URL 构造方式 × 测试 × 运维引用交叉比对。
+- A 类（无任何调用者）删除 11 项：`POST /api/stocks/<id>/refresh-full`、`POST /api/backtest/simulate`、`POST/PUT/DELETE /api/watchlist/groups(/<id>)` ×3、`PUT /api/alerts/rules/<id>`、`POST /api/alerts/scan`、`GET /api/positions/<holding_id>/cost-adjustments`、`PUT/DELETE /api/portfolio/groups/<id>` ×2、`GET /api/daily-report/<report_date>`。
+- B 类（仅测试引用，功能已被取代）删除 6 项：`GET /api/stocks/<id>/analysis`、`GET /api/stocks/<id>/ratings`、`GET /api/ratings`、`GET /api/backtest/status`、`GET /api/daily-report/history`、`GET /api/portfolio/realized-pnl`；`POST /api/batch-analyze` 保留（qa_019f 验收脚本核心入口）。
+- 关联孤儿函数清理：`daily_report.get_reports_by_date`、`backtest_engine.run_historical_simulation`（price_backtest 注释同步改为同口径说明）。
+- C 类（运维/调试口，保留并加「仅运维/调试」标注）：`/api/health`、`/api/engine/status`、`/api/engine/rollback-all`、`/api/v5/scoring-demo|analyze|validation`。
+- 同步：`tests/test_routes.py` 冒烟清单更新；`AGENTS.md` §3 端点清单修正（原 `POST /api/analyze/<id>` 为过期文档）并附删除记录。
+- 净减：17 个路由函数 + 2 个模块函数，约 430 行代码，零前端改动。
+- 验证：pytest 全绿；check_redlines 28/28；ruff 通过；服务重启后健康 200。
+
 ## [2026-08-16] 多周期技术面一期：周线/月线聚合与展示（020R-48）
 
 - 用户要求（路线已批）：月线定大方向、周线做买卖点参考、弱化日线——一期先采集/聚合+展示，二期切评分。

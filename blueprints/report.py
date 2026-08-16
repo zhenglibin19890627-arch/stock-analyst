@@ -94,21 +94,3 @@ def api_daily_report_latest():
     from modules.daily_report import get_latest_reports
 
     return jsonify(get_latest_reports())
-
-
-@bp.route('/api/daily-report/<report_date>')
-def api_daily_report_by_date(report_date):
-    """获取指定日期的报告"""
-    from modules.daily_report import get_reports_by_date
-
-    return jsonify(get_reports_by_date(report_date))
-
-
-@bp.route('/api/daily-report/history')
-def api_daily_report_history():
-    """报告历史列表（分页）"""
-    from modules.daily_report import get_report_history
-
-    page = int(request.args.get('page', 1))
-    page_size = int(request.args.get('page_size', 30))
-    return jsonify(get_report_history(page, page_size))

@@ -4,7 +4,7 @@ import logging
 
 from flask import Blueprint, jsonify, request
 
-from blueprints._utils import _derive_obos_signal, _resolve_report_type
+from blueprints._utils import _resolve_report_type
 from database.db_manager import get_connection
 
 bp = Blueprint('analysis', __name__)
@@ -249,67 +249,6 @@ def api_analyze_stock(stock_id):
         return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'message': f'分析失败: {e!s}'}), 500
-
-
-@bp.route('/api/stocks/<int:stock_id>/refresh-full', methods=['POST'])
-def api_refresh_full(stock_id):
-    """011：强制全量刷新数据 + 重新分析。
-    绕过所有增量缓存，重新采集全部维度数据。
-    """
-    from modules.advisor import generate_advice
-    from modules.data_collector import collect_stock_data
-
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT symbol, name, market FROM stocks WHERE id = ?', (stock_id,))
-    stock = cursor.fetchone()
-    conn.close()
-
-    if not stock:
-        return jsonify({'success': False, 'message': '股票不存在'}), 404
-
-    symbol = stock['symbol']
-    market = stock['market']
-
-    try:
-        # 步骤1：强制全量采集
-        collect_stock_data(symbol, market, force_full=True)
-
-        # 步骤2：重新分析
-        result = generate_advice(stock_id)
-        if result.get('success'):
-            from modules.price_advisor import generate_price_advice
-
-            result['price_advice'] = generate_price_advice(stock_id, result)
-            if result.get('price_advice', {}).get('action_suggestion'):
-                result['position_advice'] = result['price_advice']['action_suggestion']
-            # 020R-41：补齐数据完整度行（与每日报告路径一致）
-            _enrich_data_warnings(result, stock_id)
-            # 020R-43：advice_detail 统一为结构化 markdown（与快照路径一致）
-            from modules.advisor import _build_markdown_single
-
-            result['advice_detail'] = _build_markdown_single(result, result.get('previous_score'))
-
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'全量刷新失败: {e!s}'}), 500
-
-
-@bp.route('/api/stocks/<int:stock_id>/analysis', methods=['GET'])
-def api_get_analysis(stock_id):
-    """查看最近的分析结果"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT * FROM analysis_results WHERE stock_id = ?
-        ORDER BY analysis_date DESC LIMIT 5
-    """,
-        (stock_id,),
-    )
-    rows = [dict(row) for row in cursor.fetchall()]
-    conn.close()
-    return jsonify({'success': True, 'data': rows, 'count': len(rows)})
 
 
 @bp.route('/api/stocks/<int:stock_id>/report-latest', methods=['GET'])
@@ -623,121 +562,6 @@ def api_advise_stock(stock_id):
         return jsonify({'success': False, 'message': f'建议生成失败: {e!s}'}), 500
 
 
-@bp.route('/api/stocks/<int:stock_id>/ratings', methods=['GET'])
-def api_get_ratings(stock_id):
-    """查看评级历史记录"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT rh.*, s.symbol, s.name
-        FROM ratings_history rh
-        JOIN stocks s ON rh.stock_id = s.id
-        WHERE rh.stock_id = ?
-        ORDER BY rh.rating_date DESC LIMIT 10
-    """,
-        (stock_id,),
-    )
-    rows = [dict(row) for row in cursor.fetchall()]
-    conn.close()
-    return jsonify({'success': True, 'data': rows, 'count': len(rows)})
-
-
-@bp.route('/api/ratings', methods=['GET'])
-def api_get_ratings_list():
-    """
-    评级列表：返回所有已分析股票的最新评级结果。
-    B11-SCORE-SYNC：数据源统一为 daily_reports 表（与看板/日报同源）。
-    支持排序：sort_by=rating_time|total_score，order=desc|asc
-    支持筛选：rating=强烈推荐买入|推荐买入|持有观望|建议减仓|强烈建议卖出
-    """
-    sort_by = request.args.get('sort_by', 'rating_time')
-    order = request.args.get('order', 'desc')
-    rating_filter = request.args.get('rating', '')
-
-    # 白名单防注入
-    valid_sort = {
-        'rating_time': 'dr.generated_at',
-        'total_score': 'dr.total_score',
-        'rating': 'dr.rating',
-        'symbol': 's.symbol',
-    }
-    sort_col = valid_sort.get(sort_by, 'dr.generated_at')
-    sort_dir = 'DESC' if order.lower() == 'desc' else 'ASC'
-
-    # B11-SCORE-SYNC：从 daily_reports 表读取最新一期报告（与看板/日报同源）
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    # 先查最新报告日期
-    cursor.execute('SELECT MAX(report_date) as latest_date FROM daily_reports')
-    date_row = cursor.fetchone()
-    latest_date = date_row['latest_date'] if date_row else None
-
-    if not latest_date:
-        conn.close()
-        return jsonify({'success': True, 'ratings': [], 'count': 0})
-
-    # 019D: 统一口径，调用共享辅助函数（daily 优先，无 daily 时取 intraday）
-    target_type = _resolve_report_type(cursor, latest_date)
-
-    sql = """
-        SELECT dr.stock_code, dr.stock_name, dr.total_score, dr.rating,
-               dr.rating_label, dr.engine_version, dr.generated_at,
-               dr.prev_score, dr.score_change, dr.key_factors,
-               dr.report_date, dr.report_type, dr.status as report_status,
-               s.id as stock_id, s.symbol, s.name, s.market,
-               sg.name as group_name
-        FROM daily_reports dr
-        JOIN stocks s ON dr.stock_id = s.id
-        LEFT JOIN groups sg ON s.group_id = sg.id AND sg.type='watchlist'
-        WHERE dr.report_date = ? AND dr.status = 'ok' AND dr.report_type = ?
-    """
-    params = [latest_date, target_type]
-
-    if rating_filter:
-        sql += ' AND dr.rating_label = ?'
-        params.append(rating_filter)
-
-    sql += f' ORDER BY {sort_col} {sort_dir}'
-
-    cursor.execute(sql, params)
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
-
-    # 适配前端期望的字段名（保持与旧 analysis_results 接口兼容）
-    from datetime import datetime, timezone
-    from datetime import timedelta as _td
-
-    _now = datetime.now(timezone(_td(hours=8)))
-    for row in rows:
-        # 兼容旧字段名
-        row['rating_time'] = row.get('generated_at', '')
-        row['created_at'] = row.get('generated_at', '')
-        # DEV-TASKS-20260727-003：超买超卖信号（从已有 key_factors 派生）
-        row['obos_signal'] = _derive_obos_signal(row.get('key_factors'))
-        # 数据时效标识
-        row['data_stale'] = False
-        rt = row.get('generated_at') or ''
-        if rt:
-            try:
-                rt_dt = datetime.fromisoformat(rt)
-                if rt_dt.tzinfo is None:
-                    rt_dt = rt_dt.replace(tzinfo=timezone(_td(hours=8)))
-                hours_diff = (_now - rt_dt).total_seconds() / 3600
-                row['data_stale'] = hours_diff > 24
-            except (ValueError, TypeError):
-                pass
-
-    return jsonify(
-        {
-            'success': True,
-            'ratings': rows,
-            'count': len(rows),
-        }
-    )
-
-
 # ============================================================
 # 持仓管理 API
 # ============================================================
@@ -746,6 +570,7 @@ def api_get_ratings_list():
 @bp.route('/api/v5/scoring-demo', methods=['GET'])
 def api_v5_scoring_demo():
     """v5.0 评分引擎演示接口（使用 MockDataProvider 生成模拟数据并评分）
+    ⚠️ 仅调试/演示：前端无入口，app.py 启动横幅指引手动访问；test_routes 引用（勿删）。
 
     Query params:
       - scenario: normal / boundary / partial（默认 normal）
@@ -803,6 +628,7 @@ def api_v5_scoring_demo():
 @bp.route('/api/v5/scoring-analyze', methods=['POST'])
 def api_v5_scoring_analyze():
     """v5.0 评分引擎分析接口（接收 StockData JSON，返回评分结果）
+    ⚠️ 仅调试：前端无入口，供手动契约调试（勿删）。
 
     Body: StockData 契约字段（至少需 code/market/trade_date/close 四个必填项）
     """
@@ -835,6 +661,7 @@ def api_v5_scoring_analyze():
 @bp.route('/api/v5/scoring-validation', methods=['GET'])
 def api_v5_scoring_validation():
     """v5.0 评分引擎验证接口（运行 exhaustive 56 条极端值快速检查）
+    ⚠️ 仅调试：前端无入口，评分引擎自验证工具（勿删）。
 
     返回每条用例的评分摘要及 NaN/Inf/范围检查结果。
     """

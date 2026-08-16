@@ -93,7 +93,8 @@ def _derive_obos_signal(key_factors_raw):
 def _resolve_report_type(cursor, report_date):
     """019D 统一口径：判定当日应取 daily 还是 intraday（daily 优先）。
 
-    与 /api/ratings 原有逻辑完全一致，提取为共享辅助函数供所有读取入口复用，
+    与看板评分表原有逻辑完全一致（原 /api/ratings 口径，该端点已随 021D 删除），
+    提取为共享辅助函数供所有读取入口复用，
     防止未来新入口遗漏 daily-优先 / status='ok' 口径。
     """
     cursor.execute(

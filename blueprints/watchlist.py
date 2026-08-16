@@ -230,65 +230,6 @@ def api_delete_group(group_id):
     return jsonify({'success': True, 'migrated_count': migrated_count, 'type': group_type})
 
 
-# ============================================================
-# 兼容别名：旧路径 /api/watchlist/groups 和 /api/portfolio/groups
-# 内部转发到统一接口
-# ============================================================
-
-
-@bp.route('/api/watchlist/groups', methods=['POST'])
-def api_create_watchlist_group_compat():
-    """兼容旧路径：创建 watchlist 分组（默认同步创建 portfolio 同名分组）"""
-    data = request.get_json(silent=True) or {}
-    data['type'] = 'watchlist'
-    data.setdefault('sync_to_other_type', True)
-    # 直接调用统一逻辑
-    name = data.get('name', '').strip()
-    if not name:
-        return jsonify({'success': False, 'message': '分组名称不能为空'}), 400
-    conn = get_connection()
-    cursor = conn.cursor()
-    counterpart_created = False
-    try:
-        cursor.execute('INSERT INTO groups (name, type) VALUES (?, "watchlist")', (name,))
-        group_id = cursor.lastrowid
-        cursor.execute('SELECT id FROM groups WHERE name=? AND type="portfolio"', (name,))
-        if not cursor.fetchone():
-            cursor.execute('INSERT INTO groups (name, type) VALUES (?, "portfolio")', (name,))
-            counterpart_created = True
-        conn.commit()
-        conn.close()
-        return jsonify(
-            {
-                'success': True,
-                'group_id': group_id,
-                'counterpart_created': counterpart_created,
-                'counterpart_type': 'portfolio',
-            }
-        )
-    except Exception as e:
-        conn.close()
-        if 'UNIQUE' in str(e):
-            return jsonify({'success': False, 'message': '分组名称已存在'}), 400
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-
-@bp.route('/api/watchlist/groups/<int:group_id>', methods=['PUT'])
-def api_update_watchlist_group_compat(group_id):
-    """兼容旧路径：更新 watchlist 分组名（同步更新 portfolio 同名分组）"""
-    data = request.get_json(silent=True) or {}
-    data.setdefault('sync_to_other_type', True)
-    # 转发到统一接口逻辑
-    request._cached_json = (data, True)
-    return api_update_group(group_id)
-
-
-@bp.route('/api/watchlist/groups/<int:group_id>', methods=['DELETE'])
-def api_delete_watchlist_group_compat(group_id):
-    """兼容旧路径：删除 watchlist 分组"""
-    return api_delete_group(group_id)
-
-
 @bp.route('/api/stocks', methods=['GET'])
 def api_get_stocks():
     """获取所有自选股"""
@@ -1043,15 +984,3 @@ def api_create_portfolio_group():
         if 'UNIQUE' in str(e):
             return jsonify({'success': False, 'message': '分组名称已存在'}), 400
         return jsonify({'success': False, 'message': str(e)}), 500
-
-
-@bp.route('/api/portfolio/groups/<int:group_id>', methods=['PUT'])
-def api_update_portfolio_group(group_id):
-    """修改持仓分组名（兼容别名：同步更新 watchlist 同名分组）"""
-    return api_update_group(group_id)
-
-
-@bp.route('/api/portfolio/groups/<int:group_id>', methods=['DELETE'])
-def api_delete_portfolio_group(group_id):
-    """删除持仓分组（兼容别名：仅删除当前类型）"""
-    return api_delete_group(group_id)

@@ -776,8 +776,9 @@ def _save_rating(stock_id, analysis, action_advice, is_changed, latest_close):
 def _save_analysis_results_for_v5(stock_id, analysis, operation_suggestion='', report_date=None):
     """P3-A 引擎对齐修复：v5路径同步写入 analysis_results 表
 
-    确保 /api/ratings（读 analysis_results）与每日报告（读 daily_reports）
-    数据源一致。仅当走 v5 引擎时调用；旧引擎路径内部分析时会自行写入。
+    确保 analysis_results 与每日报告（daily_reports）数据源一致
+    （原 /api/ratings 读 analysis_results，该端点已随 021D 删除）。
+    仅当走 v5 引擎时调用；旧引擎路径内部分析时会自行写入。
     """
     try:
         dims = analysis.get('dimensions', {})
@@ -1430,7 +1431,7 @@ def generate_advice(stock_id, report_date=None):
                 # P3-A: 记录 v5 成功（重置熔断计数）
                 record_v5_success(stock_id)
                 # P3-A 引擎对齐修复：v5路径同步写入 analysis_results 表
-                # 确保 /api/ratings（读 analysis_results）与每日报告数据源一致
+                # 确保 analysis_results 与每日报告数据源一致（原 /api/ratings 已随 021D 删除）
                 _save_analysis_results_for_v5(stock_id, analysis, '', report_date=report_date)
             else:
                 logger.warning(f'[stock_id={stock_id}] v5引擎返回None，降级到旧引擎')
