@@ -361,6 +361,92 @@ def _read_holder_structure(stock_id: int) -> dict | None:
         conn.close()
 
 
+def get_latest_forecast_info(stock_id: int, fund_period: str | None = None) -> dict | None:
+    """020R-49/50：读取最新业绩预期（业绩快报优先于业绩预告），统一供评分与展示使用。
+
+    - fund_period: 最新正式财报期（YYYYMMDD 字符串）。给定时仅采纳报告期严格晚于
+      该期的预期（财报披露后预告/快报自动失效）；为 None 时不校验窗口。
+    - 同报告期下快报胜出（快报为核算完成后的点值，可信度高于预告区间）。
+    - 置信度：快报 0.9；预告明确型 0.8（预增/预减/扭亏等）、模糊型 0.6（略增/略减/续盈/不确定）。
+    - 预告 首亏/续亏 无幅度按 -100%；扭亏 幅度未知不采信。
+
+    返回 dict(report_period, change_pct, forecast_type, confidence) 或 None。
+    """
+    conn = get_connection()
+    try:
+        ex = conn.execute(
+            'SELECT report_period, np_yoy, announce_date FROM raw_express '
+            'WHERE stock_id = ? ORDER BY report_period DESC, announce_date DESC LIMIT 1',
+            (stock_id,),
+        ).fetchone()
+        fc = conn.execute(
+            "SELECT report_period, change_pct, forecast_type, announce_date FROM raw_forecast "
+            "WHERE stock_id = ? AND indicator LIKE '%净利润%' "
+            'ORDER BY report_period DESC, announce_date DESC LIMIT 1',
+            (stock_id,),
+        ).fetchone()
+    except Exception as e:  # noqa: BLE001 —— 表缺失时按无预期处理
+        logger.warning(f'[020R-50] 业绩预期读取失败 stock_id={stock_id}: {e}')
+        return None
+    finally:
+        conn.close()
+
+    candidates: list[dict] = []
+
+    # 业绩快报：点值净利同比，缺失（NaN）不采信
+    if ex and ex['np_yoy'] is not None:
+        try:
+            candidates.append(
+                {
+                    'period': str(ex['report_period'])[:8],
+                    'change_pct': float(ex['np_yoy']),
+                    'forecast_type': '业绩快报',
+                    'confidence': 0.9,
+                }
+            )
+        except (TypeError, ValueError):
+            pass
+
+    # 业绩预告：归母净利润口径
+    if fc:
+        ft = fc['forecast_type'] or ''
+        pct = fc['change_pct']
+        if ft in ('首亏', '续亏') and pct is None:
+            pct = -100.0  # 亏损无幅度，按强负增长处理
+        if ft == '扭亏' and pct is None:
+            pct = None  # 扭亏幅度未知，不采信
+        if pct is not None:
+            try:
+                candidates.append(
+                    {
+                        'period': str(fc['report_period'])[:8],
+                        'change_pct': float(pct),
+                        'forecast_type': ft or '业绩预告',
+                        'confidence': 0.6 if ft in ('略增', '略减', '续盈', '不确定') else 0.8,
+                    }
+                )
+            except (TypeError, ValueError):
+                pass
+
+    if fund_period:
+        candidates = [c for c in candidates if c['period'] > fund_period]
+    if not candidates:
+        return None
+
+    # 报告期最新者优先；同报告期快报（is_express=1）胜出
+    candidates.sort(
+        key=lambda c: (c['period'], 1 if c['forecast_type'] == '业绩快报' else 0),
+        reverse=True,
+    )
+    best = candidates[0]
+    return {
+        'report_period': best['period'],
+        'change_pct': best['change_pct'],
+        'forecast_type': best['forecast_type'],
+        'confidence': best['confidence'],
+    }
+
+
 # ================================================================
 # 四、主函数：组装 StockData
 # ================================================================
@@ -430,35 +516,23 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
     # 4. 读取基本面
     fund = _read_fundamental_data(stock_id)
 
-    # 4.5 020R-49：业绩预告（归母净利润口径，预告期晚于最新正式财报期时有效）
+    # 4.5 020R-49/50：业绩预期（快报优先于预告，报告期晚于最新正式财报期时有效）
     forecast_np_yoy = None
     forecast_confidence = None
+    forecast_type = None
     try:
-        conn = get_connection()
-        fc = conn.execute(
-            "SELECT report_period, change_pct, forecast_type FROM raw_forecast "
-            "WHERE stock_id = ? AND indicator LIKE '%净利润%' "
-            "ORDER BY report_period DESC, announce_date DESC LIMIT 1",
-            (stock_id,),
-        ).fetchone()
-        conn.close()
-        if fc and fc['report_period'] and fund and fund.get('report_date'):
-            fund_period = str(fund['report_date'])[:10].replace('-', '')
-            fc_period = str(fc['report_period'])[:8]
-            if fc_period > fund_period:
-                ft = fc['forecast_type'] or ''
-                forecast_np_yoy = fc['change_pct']
-                if ft in ('首亏', '续亏') and forecast_np_yoy is None:
-                    forecast_np_yoy = -100.0  # 亏损无幅度，按强负增长处理
-                if ft == '扭亏' and forecast_np_yoy is None:
-                    forecast_np_yoy = None  # 扭亏幅度未知，不采信
-                if forecast_np_yoy is not None:
-                    if ft in ('略增', '略减', '续盈', '不确定'):
-                        forecast_confidence = 0.6
-                    else:
-                        forecast_confidence = 0.8
-    except Exception as e:  # noqa: BLE001 —— 预告表缺失/字段漂移时静默降级为不采信
-        logger.warning(f'[020R-49] 业绩预告读取失败 stock_id={stock_id}: {e}')
+        fund_period = (
+            str(fund['report_date'])[:10].replace('-', '')
+            if fund and fund.get('report_date')
+            else None
+        )
+        fc_info = get_latest_forecast_info(stock_id, fund_period)
+        if fc_info:
+            forecast_np_yoy = fc_info['change_pct']
+            forecast_confidence = fc_info['confidence']
+            forecast_type = fc_info['forecast_type']
+    except Exception as e:  # noqa: BLE001 —— 预告/快报表缺失时静默降级为不采信
+        logger.warning(f'[020R-49] 业绩预期读取失败 stock_id={stock_id}: {e}')
 
     # 5. 读取资金面
     cap_rows = _read_capital_data(stock_id, limit=10)
@@ -559,9 +633,10 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
         gross_margin=fund.get('gross_margin') if fund else None,
         revenue_yoy=fund.get('revenue_growth') if fund else None,
         net_profit_yoy=fund.get('profit_growth') if fund else None,
-        # 020R-49：业绩预告增强
+        # 020R-49/50：业绩预期增强（预告/快报折价融合）
         forecast_np_yoy=forecast_np_yoy,
         forecast_confidence=forecast_confidence,
+        forecast_type=forecast_type,
         ocf_to_profit=fund.get('ocf_to_net_profit') if fund else None,
         debt_to_asset=fund.get('debt_ratio') if fund else None,
         current_ratio=fund.get('current_ratio') if fund else None,

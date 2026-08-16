@@ -746,7 +746,7 @@ def score_growth(data: StockData) -> tuple[float, dict]:
         detail['revenue_yoy'] = f'{rev_yoy:.2f}%'
         scores.append(rev_s)
 
-    # 020R-49：净利同比按「预告×0.6×置信度 + 正式×(1-…)」折价融合
+    # 020R-49/50：净利同比按「预期×0.6×置信度 + 正式×(1-…)」折价融合
     np_yoy = data.net_profit_yoy
     np_used = np_yoy
     if data.forecast_np_yoy is not None:
@@ -756,7 +756,8 @@ def score_growth(data: StockData) -> tuple[float, dict]:
             np_used = np_yoy * (1 - fw) + data.forecast_np_yoy * fw
         else:
             np_used = data.forecast_np_yoy
-        detail['forecast'] = f'含预告折价(置信{conf:.1f})'
+        fc_src = '快报' if data.forecast_type == '业绩快报' else '预告'
+        detail['forecast'] = f'含{fc_src}折价(置信{conf:.1f})'
 
     if np_used is not None:
         if np_used >= 50:

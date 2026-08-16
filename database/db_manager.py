@@ -975,6 +975,27 @@ def init_database():
         )
     """)
 
+    # 业绩快报（东财 stock_yjkb_em，A股；020R-50：财报前点值预估，可信度高于预告）
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS raw_express (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stock_id INTEGER NOT NULL,
+            symbol TEXT,                     -- 股票代码（冗余，便于排查）
+            report_period TEXT,              -- 报告期（如 20260630）
+            eps REAL,                        -- 每股收益（元）
+            revenue REAL,                    -- 营业收入（元）
+            revenue_yoy REAL,                -- 营业收入同比增长（%）
+            np REAL,                         -- 净利润（元）
+            np_yoy REAL,                     -- 净利润同比增长（%）
+            roe REAL,                        -- 净资产收益率（%）
+            announce_date TEXT,              -- 公告日期
+            data_source TEXT DEFAULT 'akshare_em',
+            fetched_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+            UNIQUE(stock_id, report_period),
+            FOREIGN KEY (stock_id) REFERENCES stocks(id)
+        )
+    """)
+
     # 索引：未读预警列表（高频查询）
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_alert_history_unread

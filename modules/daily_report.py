@@ -677,15 +677,24 @@ def _build_data_freshness(stock_id):
         lines.append('消息面：缺失 ⚠️')
         has_issue = True
 
-    # 5. 业绩预告
+    # 5. 业绩预告/业绩快报（020R-50 快报并入）
     fc = conn.execute(
         'SELECT COUNT(*) n, MAX(report_period) p FROM raw_forecast WHERE stock_id=?',
         (stock_id,),
     ).fetchone()
+    ex = conn.execute(
+        'SELECT COUNT(*) n, MAX(report_period) p FROM raw_express WHERE stock_id=?',
+        (stock_id,),
+    ).fetchone()
+    fc_parts = []
     if fc and fc['n']:
-        lines.append(f"业绩预告：{fc['n']} 条（最新报告期 {fc['p']}）")
+        fc_parts.append(f"预告 {fc['n']} 条（最新报告期 {fc['p']}）")
+    if ex and ex['n']:
+        fc_parts.append(f"快报 {ex['n']} 条（最新报告期 {ex['p']}）")
+    if fc_parts:
+        lines.append(f"业绩预期：{'；'.join(fc_parts)}")
     else:
-        lines.append('业绩预告：最近三期暂无')
+        lines.append('业绩预期：最近三期暂无（预告/快报）')
 
     conn.close()
     return {'lines': lines, 'has_issue': has_issue}

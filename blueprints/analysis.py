@@ -76,7 +76,8 @@ def _technical_detail_for_stock(stock_id):
 
 
 def _fundamental_detail_for_stock(stock_id):
-    """020R-37/49：读取 raw_fundamental 最新一期 + 最新业绩预告，计算基本面五类子项展示明细。
+    """020R-37/49/50：读取 raw_fundamental 最新一期 + 最新业绩预期（快报优先于预告），
+    计算基本面五类子项展示明细。
 
     纯展示层增强：失败或数据不足时返回 None，不影响报告主流程。
     """
@@ -90,21 +91,20 @@ def _fundamental_detail_for_stock(stock_id):
             (stock_id,),
         )
         row = cursor.fetchone()
-        # 020R-49：最新归母净利润业绩预告
-        cursor.execute(
-            "SELECT report_period, indicator, change_desc, change_pct, forecast_type, announce_date "
-            "FROM raw_forecast WHERE stock_id = ? AND indicator LIKE '%净利润%' "
-            'ORDER BY report_period DESC, announce_date DESC LIMIT 1',
-            (stock_id,),
-        )
-        fc_row = cursor.fetchone()
         conn.close()
-        if not row and not fc_row:
+        # 020R-49/50：与评分同一套取用逻辑（get_latest_forecast_info），保证展示与打分一致
+        fund_period = (
+            str(row['report_date'])[:10].replace('-', '') if row and row['report_date'] else None
+        )
+        from modules.data_adapter import get_latest_forecast_info
+
+        fc_info = get_latest_forecast_info(stock_id, fund_period)
+        if not row and not fc_info:
             return None
 
         from modules.fundamental_detail import compute_fundamental_detail
 
-        return compute_fundamental_detail(dict(row) if row else None, dict(fc_row) if fc_row else None)
+        return compute_fundamental_detail(dict(row) if row else None, fc_info)
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).warning(f'基本面指标明细计算失败 stock_id={stock_id}: {e}')
         return None

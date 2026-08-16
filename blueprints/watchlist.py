@@ -502,6 +502,7 @@ def api_collect_data(stock_id):
             'fundamental': '基本面',
             'capital': '资金面',
             'forecast': '业绩预告',
+            'express': '业绩快报',
             'sentiment': '消息面',
         }
         summary[dim_names.get(dim, dim)] = {'status': status, 'message': msg}
@@ -575,7 +576,7 @@ def api_get_fundamental(stock_id):
 
 @bp.route('/api/stocks/<int:stock_id>/forecast', methods=['GET'])
 def api_get_forecast(stock_id):
-    """查看采集到的业绩预告数据"""
+    """查看采集到的业绩预告 + 业绩快报（020R-50 起快报并入响应 express 字段）"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -589,6 +590,18 @@ def api_get_forecast(stock_id):
         (stock_id,),
     )
     rows = [dict(row) for row in cursor.fetchall()]
+
+    # 020R-50：业绩快报（东财 stock_yjkb_em）
+    cursor.execute(
+        """
+        SELECT report_period, eps, revenue, revenue_yoy, np, np_yoy, roe,
+               announce_date, data_source, fetched_at
+        FROM raw_express WHERE stock_id = ?
+        ORDER BY report_period DESC, announce_date DESC
+    """,
+        (stock_id,),
+    )
+    express = [dict(row) for row in cursor.fetchall()]
     conn.close()
 
     # 金额换算为亿元/万元展示（DB 存元）
@@ -596,8 +609,15 @@ def api_get_forecast(stock_id):
         row['forecast_value_fmt'] = _fmt_wan(row.get('forecast_value'))
         row['last_year_value_fmt'] = _fmt_wan(row.get('last_year_value'))
         row['change_pct_fmt'] = _fmt_pct(row.get('change_pct'))
+    for row in express:
+        row['revenue_fmt'] = _fmt_wan(row.get('revenue'))
+        row['np_fmt'] = _fmt_wan(row.get('np'))
+        row['revenue_yoy_fmt'] = _fmt_pct(row.get('revenue_yoy'))
+        row['np_yoy_fmt'] = _fmt_pct(row.get('np_yoy'))
 
-    return jsonify({'success': True, 'data': rows, 'count': len(rows)})
+    return jsonify(
+        {'success': True, 'data': rows, 'express': express, 'count': len(rows)}
+    )
 
 
 @bp.route('/api/stocks/<int:stock_id>/capital', methods=['GET'])

@@ -1206,6 +1206,99 @@ def collect_forecast(stock_id, symbol, market='a_stock'):
         return 'failed', str(e)
 
 
+# ============================================================
+# 业绩快报采集（东财 stock_yjkb_em，A股）020R-50
+# ============================================================
+# 全市场快报 DataFrame 缓存：按报告期 key，1 小时 TTL（与预告共用 TTL 常量）
+_EXPRESS_CACHE = {'data': {}, 'ts': 0.0}
+
+
+def _get_express_df_for_period(period):
+    """拉取指定报告期的全市场业绩快报（带 1 小时内存缓存），返回 DataFrame 或 None"""
+    global _EXPRESS_CACHE
+    now_ts = time.time()
+    cached = _EXPRESS_CACHE['data'].get(period)
+    if cached is not None and (now_ts - _EXPRESS_CACHE['ts']) < _FORECAST_CACHE_TTL:
+        return cached
+    try:
+        import akshare as ak
+
+        logger.info(f'[业绩快报] 请求 stock_yjkb_em(date={period})')
+        df = ak.stock_yjkb_em(date=period)
+        if df is None or df.empty:
+            logger.warning(f'[业绩快报] 报告期 {period} 返回空数据')
+            return None
+        df['_code6'] = df['股票代码'].astype(str).str.zfill(6)
+        _EXPRESS_CACHE['data'][period] = df
+        _EXPRESS_CACHE['ts'] = now_ts
+        return df
+    except Exception as e:
+        logger.warning(f'[业绩快报] 报告期 {period} 获取失败: {e}')
+        return None
+
+
+def collect_express(stock_id, symbol, market='a_stock'):
+    """采集单只股票业绩快报（东财），写入 raw_express。
+
+    港股无东财业绩快报数据，跳过。
+    按报告期（今年中报→一季报→去年年报）逐期尝试，写入全部命中的快报行。
+    返回 (status, message)。
+    """
+    if market != 'a_stock':
+        save_data_status(stock_id, 'express', 'skipped', '港股无东财业绩快报数据')
+        return 'skipped', '港股无东财业绩快报数据'
+
+    try:
+        written = 0
+        used_periods = []
+        for period in _forecast_report_periods():
+            df = _get_express_df_for_period(period)
+            if df is None or df.empty:
+                continue
+            stock_rows = df[df['_code6'] == symbol]
+            if stock_rows.empty:
+                continue
+            used_periods.append(period)
+            conn = get_connection()
+            cursor = conn.cursor()
+            for _, row in stock_rows.iterrows():
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO raw_express
+                        (stock_id, symbol, report_period, eps, revenue, revenue_yoy,
+                         np, np_yoy, roe, announce_date, data_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'akshare_em')
+                """,
+                    (
+                        stock_id,
+                        symbol,
+                        period,
+                        _safe_num(row.get('每股收益')),
+                        _safe_num(row.get('营业收入-营业收入')),
+                        _safe_num(row.get('营业收入-同比增长')),
+                        _safe_num(row.get('净利润-净利润')),
+                        _safe_num(row.get('净利润-同比增长')),
+                        _safe_num(row.get('净资产收益率')),
+                        str(row.get('公告日期') or '')[:10],
+                    ),
+                )
+                written += 1
+            conn.commit()
+            conn.close()
+
+        if written > 0:
+            msg = f'业绩快报已入库 {written} 条（报告期: {", ".join(used_periods)}）'
+            save_data_status(stock_id, 'express', 'success', msg)
+            return 'success', msg
+        msg = f'最近三个报告期暂无业绩快报（{", ".join(_forecast_report_periods())}）'
+        save_data_status(stock_id, 'express', 'success', msg)
+        return 'success', msg
+    except Exception as e:
+        logger.warning(f'[{symbol}] 业绩快报采集失败: {e}')
+        save_data_status(stock_id, 'express', 'failed', str(e))
+        return 'failed', str(e)
+
+
 def _safe_num(v):
     """安全数值转换：None/NaN/非数值 → None"""
     try:
@@ -5376,6 +5469,21 @@ def collect_stock_data(symbol, market, force_full=False):
             type(e).__name__,
             str(e),
             dimension='forecast',
+            traceback_str=traceback.format_exc(),
+        )
+
+    # 业绩快报（A股；港股跳过）020R-50
+    try:
+        results['express'] = collect_express(stock_id, symbol, market)
+    except Exception as e:
+        results['express'] = ('failed', f'业绩快报采集异常: {e}')
+        logger.warning(f'[{symbol}] 业绩快报采集失败: {e}')
+        _log_error_to_db(
+            stock_id,
+            'data_collector',
+            type(e).__name__,
+            str(e),
+            dimension='express',
             traceback_str=traceback.format_exc(),
         )
 

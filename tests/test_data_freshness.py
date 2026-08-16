@@ -173,7 +173,7 @@ class TestDataFreshness:
         assert any('缺失' in line for line in r['lines'])
 
     def test_forecast_present(self, db):
-        """业绩预告有数据 → 行说明条数与报告期"""
+        """业绩预告有数据 → 行说明条数与报告期（020R-50 起标签为「业绩预期」）"""
         _insert_kline(db, 1, _days_ago(1))
         _insert_fundamental(db, 1, '2026-06-30')
         _insert_capital(db, 1, _days_ago(1))
@@ -187,4 +187,21 @@ class TestDataFreshness:
         conn.close()
 
         r = _build_data_freshness(1)
-        assert any('业绩预告' in line and '20260630' in line for line in r['lines'])
+        assert any('业绩预期' in line and '预告 1 条' in line and '20260630' in line for line in r['lines'])
+
+    def test_express_present(self, db):
+        """业绩快报有数据 → 行说明条数与报告期（020R-50）"""
+        _insert_kline(db, 1, _days_ago(1))
+        _insert_fundamental(db, 1, '2026-06-30')
+        _insert_capital(db, 1, _days_ago(1))
+        _insert_sentiment(db, 1, _days_ago(1), _days_ago(1))
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO raw_express (stock_id, symbol, report_period, np_yoy) "
+            "VALUES (1, '601888', '20260630', 19.49)"
+        )
+        conn.commit()
+        conn.close()
+
+        r = _build_data_freshness(1)
+        assert any('业绩预期' in line and '快报 1 条' in line and '20260630' in line for line in r['lines'])

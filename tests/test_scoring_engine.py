@@ -383,6 +383,20 @@ class TestFundamentalScoring:
         )
         assert score == pytest.approx(85.0, abs=1e-6)
 
+    # --- 020R-50：业绩快报（置信0.9）---
+    def test_growth_express_confidence_0_9(self):
+        """快报(置信0.9)：fw=0.54 → 净利 10×0.46 + 50×0.54 = 31.6 → 85 分档"""
+        score, detail = score_growth(
+            _sd(
+                net_profit_yoy=10,
+                forecast_np_yoy=50,
+                forecast_confidence=0.9,
+                forecast_type='业绩快报',
+            )
+        )
+        assert score == pytest.approx(85.0, abs=1e-6)
+        assert '快报' in detail.get('forecast', '')
+
     # --- score_cashflow 现金流质量 ---
     @pytest.mark.parametrize(
         'ocf,expected',

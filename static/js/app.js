@@ -1061,6 +1061,25 @@
                 html += '<div class="alert alert-info">最近三个报告期暂无业绩预告</div>';
             }
 
+            // 业绩快报（东财 stock_yjkb_em，A股；020R-50，财报前点值预估）
+            html += '<h4 style="margin: 24px 0 8px;">📋 业绩快报<span style="font-size:12px;color:#999;font-weight:normal;">　来源：东财业绩快报（akshare）</span></h4>';
+            if (forecast.express && forecast.express.length > 0) {
+                html += '<table><thead><tr><th>报告期</th><th>每股收益</th><th>营业收入</th><th>营收同比</th><th>净利润</th><th>净利同比</th><th>公告日期</th></tr></thead><tbody>';
+                forecast.express.forEach(e => {
+                    const pctColor = (e.np_yoy ?? 0) > 0 ? '#c62828' : (e.np_yoy ?? 0) < 0 ? '#1565c0' : '#666';
+                    html += '<tr><td>' + (e.report_period || '—') + '</td>' +
+                        '<td>' + (e.eps != null ? e.eps : '—') + '</td>' +
+                        '<td>' + (e.revenue_fmt || '—') + '</td>' +
+                        '<td>' + (e.revenue_yoy_fmt || '—') + '</td>' +
+                        '<td>' + (e.np_fmt || '—') + '</td>' +
+                        '<td style="color:' + pctColor + ';font-weight:600;">' + (e.np_yoy_fmt || '—') + '</td>' +
+                        '<td>' + (e.announce_date || '—') + '</td></tr>';
+                });
+                html += '</tbody></table>';
+            } else {
+                html += '<div class="alert alert-info">最近三个报告期暂无业绩快报</div>';
+            }
+
             // 资金面数据
             // 019E Task 4.1：动态表头——存在估算行时标注“含估算兜底数据”
             // 019K Task 4：动态表头——存在 THS 顶替行时标注“同花顺顶替（全部资金口径）”
@@ -4424,10 +4443,10 @@
         if (!state) return '#666';
         var GOOD = ['低估', '破净', '合理偏低', '优秀', '良好', '高', '中高',
                     '高增长', '较快增长', '稳步增长', '充裕', '健康', '低杠杆', '充足',
-                    '预增', '略增', '续盈', '扭亏'];
+                    '预增', '略增', '续盈', '扭亏', '快报增'];
         var BAD = ['偏高', '高估', '严重高估', '负值', '较差', '亏损', '低',
                    '小幅下滑', '明显下滑', '偏弱', '为负·警惕', '高杠杆', '极高杠杆', '偏紧', '紧张',
-                   '预减', '略减', '首亏', '续亏'];
+                   '预减', '略减', '首亏', '续亏', '快报减'];
         if (GOOD.indexOf(state) >= 0) return '#e74c3c';
         if (BAD.indexOf(state) >= 0) return '#27ae60';
         return '#666';
@@ -4462,7 +4481,7 @@
         html += _row('成长性',
             (fd.revenue_growth != null ? ('营收 ' + _fv((fd.revenue_growth > 0 ? '+' : '') + fd.revenue_growth + '%', fd.rg_state)) : '') +
             (fd.profit_growth != null ? (' · 净利 ' + _fv((fd.profit_growth > 0 ? '+' : '') + fd.profit_growth + '%', fd.pg_state)) : ''));
-        // 3.5) 业绩预告（020R-49：折价参与成长性评分）
+        // 3.5) 业绩预告/业绩快报（020R-49/50：折价参与成长性评分）
         if (fd.forecast_type) {
             var fcBody = fd.forecast_type;
             if (fd.forecast_change_pct != null) {
@@ -4470,9 +4489,20 @@
             }
             if (fd.forecast_period) {
                 var fp = String(fd.forecast_period);
-                fcBody += '（' + fp.slice(0, 4) + '年' + fp.slice(4, 6) + '月报预告）';
+                if (fd.forecast_type === '业绩快报') {
+                    fcBody += '（' + fp.slice(0, 4) + '年' + fp.slice(4, 6) + '月快报）';
+                } else {
+                    fcBody += '（' + fp.slice(0, 4) + '年' + fp.slice(4, 6) + '月报预告）';
+                }
             }
-            html += _row('业绩预告', _fv(fcBody, fd.forecast_type));
+            if (fd.forecast_type === '业绩快报') {
+                var exState = fd.forecast_change_pct > 0 ? '快报增' :
+                    (fd.forecast_change_pct < 0 ? '快报减' : null);
+                html += _row('业绩快报',
+                    '<span style="color:' + _fundStateColor(exState) + ';">' + fcBody + '</span>');
+            } else {
+                html += _row('业绩预告', _fv(fcBody, fd.forecast_type));
+            }
         }
         // 4) 现金流质量
         html += _row('现金流质量',

@@ -533,6 +533,78 @@ class TestForecastCollection:
 
 
 # ============================================================
+# 业绩快报采集 collect_express（mock 数据源 + 隔离临时库）020R-50
+# ============================================================
+
+
+class TestExpressCollection:
+    """业绩快报：写入与防重、数值入库、港股跳过"""
+
+    def test_collect_express_writes_and_dedup(self, tmp_path, monkeypatch):
+        """写入命中快报行，重复采集不产生重复（UNIQUE + INSERT OR REPLACE）"""
+        import pandas as pd
+
+        db_file = tmp_path / 'ex_test.db'
+        monkeypatch.setattr(db_manager, 'DB_PATH', str(db_file))
+        monkeypatch.setattr(db_manager, 'BACKUP_DIR', str(tmp_path / 'backups'))
+        db_manager.init_database()
+        conn = db_manager.get_connection()
+        conn.execute(
+            "INSERT INTO stocks (symbol, market, name) VALUES ('601888', 'a_stock', '中国中免')"
+        )
+        conn.commit()
+        conn.close()
+
+        df = pd.DataFrame(
+            {
+                '股票代码': [601888],
+                '每股收益': [1.4983],
+                '营业收入-营业收入': [2.759172e10],
+                '营业收入-同比增长': [-1.985834],
+                '净利润-净利润': [3.106485e9],
+                '净利润-同比增长': [19.491537],
+                '每股净资产': [27.6335],
+                '净资产收益率': [5.46],
+                '公告日期': ['2026-07-15'],
+                '_code6': ['601888'],
+            }
+        )
+        monkeypatch.setattr(
+            dc, '_get_express_df_for_period', lambda p: df if p == '20260630' else None
+        )
+
+        status, msg = dc.collect_express(1, '601888', 'a_stock')
+        assert status == 'success'
+        assert '1' in msg
+
+        # 重复采集：防重后行数不变
+        dc.collect_express(1, '601888', 'a_stock')
+        conn = db_manager.get_connection()
+        n = conn.execute('SELECT COUNT(*) FROM raw_express').fetchone()[0]
+        assert n == 1
+        # 数值正确入库（元）
+        np_yoy = conn.execute('SELECT np_yoy FROM raw_express').fetchone()[0]
+        assert np_yoy == pytest.approx(19.491537)
+        rev = conn.execute('SELECT revenue FROM raw_express').fetchone()[0]
+        assert rev == 2.759172e10
+        # data_status 写入
+        st = conn.execute("SELECT status FROM data_status WHERE dimension='express'").fetchone()[0]
+        assert st == 'success'
+        conn.close()
+
+    def test_collect_express_hk_skipped(self, tmp_path, monkeypatch):
+        """港股跳过（无东财业绩快报），状态写 skipped"""
+        db_file = tmp_path / 'ex_hk.db'
+        monkeypatch.setattr(db_manager, 'DB_PATH', str(db_file))
+        monkeypatch.setattr(db_manager, 'BACKUP_DIR', str(tmp_path / 'backups'))
+        db_manager.init_database()
+
+        status, msg = dc.collect_express(1, 'HK3690', 'hk_stock')
+        assert status == 'skipped'
+        assert '港股' in msg
+
+
+# ============================================================
 # EM 回退逐只采集的进度回调（日报动效逐只更新）
 # ============================================================
 

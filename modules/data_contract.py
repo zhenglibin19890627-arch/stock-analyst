@@ -106,12 +106,15 @@ class StockData(BaseModel):
     gross_margin: float | None = Field(default=None, description='销售毛利率(%)')
     revenue_yoy: float | None = Field(default=None, description='营收同比增长率(%)')
     net_profit_yoy: float | None = Field(default=None, description='净利润同比增长率(%)')
-    # 020R-49：业绩预告增强（仅成长性评分折价融合，非独立子项）
+    # 020R-49/50：业绩预期增强（仅成长性评分折价融合，非独立子项）
     forecast_np_yoy: float | None = Field(
-        default=None, description='业绩预告净利同比中值(%)，仅当预告期晚于最新正式财报期时有效'
+        default=None, description='业绩预期净利同比(%)（预告中值/快报点值），仅当报告期晚于最新正式财报期时有效'
     )
     forecast_confidence: float | None = Field(
-        default=None, ge=0.0, le=1.0, description='预告可信度折价（明确型0.8/模糊型0.6）'
+        default=None, ge=0.0, le=1.0, description='预期可信度折价（快报0.9/预告明确0.8/预告模糊0.6）'
+    )
+    forecast_type: str | None = Field(
+        default=None, description='业绩预期类型（预告类型，或"业绩快报"）'
     )
     ocf_to_profit: float | None = Field(default=None, description='经营现金流/净利润')
     debt_to_asset: float | None = Field(default=None, description='资产负债率(%)')
@@ -382,9 +385,10 @@ class StockData(BaseModel):
             'gross_margin': self.gross_margin,
             'revenue_yoy': self.revenue_yoy,
             'net_profit_yoy': self.net_profit_yoy,
-            # 020R-49
+            # 020R-49/50
             'forecast_np_yoy': self.forecast_np_yoy,
             'forecast_confidence': self.forecast_confidence,
+            'forecast_type': self.forecast_type,
             'ocf_to_profit': self.ocf_to_profit,
             'debt_to_asset': self.debt_to_asset,
             'current_ratio': self.current_ratio,
