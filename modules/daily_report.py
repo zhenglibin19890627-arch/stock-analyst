@@ -706,6 +706,28 @@ def _build_data_freshness(stock_id):
     else:
         lines.append('业绩预期：最近三期暂无（预告/快报）')
 
+    # 6. 020R-54：行业资金背景（所属行业当日主力资金 + 排名 + 连续方向；无匹配时静默跳过）
+    try:
+        irow = conn.execute('SELECT industry, market FROM stocks WHERE id=?', (stock_id,)).fetchone()
+        if irow and irow['industry'] and irow['market'] != 'hk_stock':
+            from modules.market_overview import get_industry_flow_bg
+
+            bg = get_industry_flow_bg(irow['industry'])
+            if bg and bg.get('main_net') is not None:
+                yi = abs(bg['main_net']) / 1e8
+                direction = '流入' if bg['main_net'] > 0 else '流出'
+                streak_txt = ''
+                if bg.get('streak_days', 0) > 0:
+                    streak_txt = f"，连续流入{bg['streak_days']}日"
+                elif bg.get('streak_days', 0) < 0:
+                    streak_txt = f"，连续流出{abs(bg['streak_days'])}日"
+                lines.append(
+                    f"行业资金背景：{bg['board']} 主力净{direction} {yi:.1f}亿"
+                    f"（第{bg['rank']}/{bg['total']}名{streak_txt}）"
+                )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f'[020R-54] 行业资金背景读取失败 stock_id={stock_id}: {e}')
+
     conn.close()
     return {'lines': lines, 'has_issue': has_issue}
 

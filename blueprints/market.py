@@ -16,6 +16,7 @@ def api_market_industry_fund_flow():
         from modules.market_overview import (
             get_industry_fund_flow_dates,
             get_industry_fund_flow_for_date,
+            get_industry_flow_summary,
         )
 
         dates = get_industry_fund_flow_dates()
@@ -26,6 +27,8 @@ def api_market_industry_fund_flow():
         date_arg = (request.args.get('date') or '').strip()
         trade_date = date_arg if date_arg in dates else dates[0]
         items, updated_at = get_industry_fund_flow_for_date(trade_date)
+        # 020R-54：市场资金温度计（全行业合计 + 流入/流出家数）
+        summary = get_industry_flow_summary(trade_date)
         return jsonify(
             {
                 'success': True,
@@ -34,6 +37,7 @@ def api_market_industry_fund_flow():
                 'items': items,
                 'dates': dates,
                 'count': len(items),
+                'summary': summary,
             }
         )
     except Exception as e:  # noqa: BLE001

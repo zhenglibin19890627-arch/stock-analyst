@@ -158,6 +158,25 @@ def _capital_detail_for_stock(stock_id):
         return None
 
 
+def _industry_flow_bg_for_stock(stock_id):
+    """020R-54：个股所属行业资金背景（市场行情数据关联）。
+
+    纯展示层增强：港股/无行业/板块未匹配时返回 None，不影响建议主流程。
+    """
+    try:
+        conn = get_connection()
+        row = conn.execute('SELECT industry, market FROM stocks WHERE id = ?', (stock_id,)).fetchone()
+        conn.close()
+        if not row or not row['industry'] or row['market'] == 'hk_stock':
+            return None
+        from modules.market_overview import get_industry_flow_bg
+
+        return get_industry_flow_bg(row['industry'])
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning(f'行业资金背景读取失败 stock_id={stock_id}: {e}')
+        return None
+
+
 def _news_detail_for_stock(stock_id):
     """020R-39：读取 news_sentiment 最新聚合 + 股东增持标志，计算消息面两个子项展示明细。
 
@@ -565,6 +584,8 @@ def api_advise_stock(stock_id):
             result['capital_detail'] = _capital_detail_for_stock(stock_id)
             # 020R-39：消息面指标明细（情绪/股东行为）
             result['news_detail'] = _news_detail_for_stock(stock_id)
+            # 020R-54：行业资金背景（所属行业当日资金流向 + 排名 + 连续方向；港股/无匹配为 None）
+            result['industry_flow_bg'] = _industry_flow_bg_for_stock(stock_id)
         return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'message': f'建议生成失败: {e!s}'}), 500

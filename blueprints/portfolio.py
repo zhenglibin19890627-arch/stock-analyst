@@ -1,6 +1,7 @@
 """持仓/组合/流水/成本修正/价格刷新 API 蓝图(自 app.py 拆分,函数体零改动)。"""
 
 import json
+import logging
 
 from flask import Blueprint, jsonify, request
 
@@ -329,6 +330,17 @@ def api_portfolio_watchlist_scores():
 
     conn.close()
 
+    # 020R-54：行业资金背景——最新交易日全板块一次计算，逐股按行业名匹配（港股/未匹配为 None）
+    industry_bg_map = {}
+    match_board_name = None
+    try:
+        from modules.market_overview import get_industry_flow_bg_map, match_board_name as _mbn
+
+        industry_bg_map = get_industry_flow_bg_map()
+        match_board_name = _mbn
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning(f'[020R-54] 行业资金背景加载失败: {e}')
+
     stocks = []
     for r in rows:
         qty = r.get('quantity') or 0
@@ -359,6 +371,15 @@ def api_portfolio_watchlist_scores():
         # 行业分类（从 stocks.industry 读取，INDUSTRY-DYNAMIC）
         industry = r.get('industry') or '未分类'
 
+        # 020R-54：行业资金背景（展示层关联，不影响评分）
+        industry_flow_bg = None
+        if r.get('market') != 'hk_stock' and industry != '未分类' and industry_bg_map and match_board_name:
+            try:
+                board = match_board_name(industry, list(industry_bg_map.keys()))
+                industry_flow_bg = industry_bg_map.get(board) if board else None
+            except Exception:  # noqa: BLE001
+                industry_flow_bg = None
+
         stocks.append(
             {
                 'id': r['id'],
@@ -366,6 +387,7 @@ def api_portfolio_watchlist_scores():
                 'name': r['name'],
                 'market': r['market'],
                 'industry': industry,
+                'industry_flow_bg': industry_flow_bg,
                 'cost_price': round(cost, 2) if cost else None,
                 'quantity': qty,
                 'latest_price': price,

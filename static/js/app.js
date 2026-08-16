@@ -3778,6 +3778,19 @@
             }
             var mvStr = st.market_value != null ? formatCNY(st.market_value) : '—';
             var industryTag = st.industry === '未分类' ? '<span style="color:#f39c12;">⚠️ 未分类</span>' : st.industry;
+            // 020R-54：行业资金背景徽标（所属行业当日主力方向 + 连续天数）
+            var flowBadge = '';
+            if (st.industry_flow_bg && st.industry_flow_bg.main_net != null) {
+                var bg = st.industry_flow_bg;
+                var dir = bg.main_net > 0 ? '流入' : (bg.main_net < 0 ? '流出' : '');
+                if (dir) {
+                    var bc = bg.main_net > 0 ? '#c62828' : '#1565c0';
+                    var streakTxt = bg.streak_days > 0 ? ' 连续' + bg.streak_days + '日' : (bg.streak_days < 0 ? ' 连续' + Math.abs(bg.streak_days) + '日' : '');
+                    flowBadge = '<span style="color:' + bc + ';font-size:11px;margin-left:4px;white-space:nowrap;" title="' +
+                        bg.board + '：主力净' + dir + ' ' + Math.abs(bg.main_net / 1e8).toFixed(1) + ' 亿（第 ' + bg.rank + '/' + bg.total + ' 名，' + bg.trade_date + '）">' +
+                        (bg.main_net > 0 ? '▲' : '▼') + Math.abs(bg.main_net / 1e8).toFixed(1) + '亿' + streakTxt + '</span>';
+                }
+            }
             // 数据完整度：从 data_warnings（JSON 字符串）判断是否存在 ⚠️ 项（原每日报告表列）
             var dwList = [];
             try { dwList = JSON.parse(st.data_warnings || '[]'); } catch (e) { dwList = []; }
@@ -3795,7 +3808,7 @@
             html += '<td style="padding:10px;text-align:center;">' + dataTag + '</td>';
             html += '<td style="padding:10px;font-size:12px;color:#666;white-space:nowrap;">' + _fmtGenTime(st.generated_at) + '</td>';
             html += '<td style="padding:10px;font-size:12px;color:#888;white-space:nowrap;">' + (st.report_date || '<span style="color:#ccc;">暂无</span>') + '</td>';
-            html += '<td style="padding:10px;font-size:13px;">' + industryTag + '</td>';
+            html += '<td style="padding:10px;font-size:13px;">' + industryTag + flowBadge + '</td>';
             html += '<td style="padding:10px;">' + mvStr + '</td>';
             html += '<td style="padding:10px;"><button class="btn btn-sm" style="padding:4px 10px;font-size:12px;" onclick="viewReport(' + st.id + ')">📊 详情</button></td>';
             html += '</tr>';
@@ -4111,7 +4124,7 @@
                     meta.innerHTML = renderMarketFlowDateSelect(data.dates || [], data.trade_date)
                         + (data.updated_at ? '<span style="font-size:13px;color:#888;margin-left:10px;">更新：' + String(data.updated_at).slice(5, 16) + '</span>' : '');
                 }
-                renderIndustryFlowTable(data.items, dom, data.trade_date);
+                renderIndustryFlowTable(data.items, dom, data.trade_date, data.summary);
             })
             .catch(function(e) {
                 if (dom) dom.innerHTML = '<div class="empty">行业资金流请求失败：' + e + '</div>';
@@ -4158,18 +4171,53 @@
             });
     }
 
-    function renderIndustryFlowTable(items, dom, tradeDate) {
+    // 020R-54：市场资金温度计（全行业主力净流入合计 + 流入/流出家数）
+    function renderIndustryFlowSummary(summary) {
+        if (!summary || summary.total_net === null || summary.total_net === undefined) return '';
+        var tot = summary.total_net;
+        var color = tot > 0 ? '#c62828' : tot < 0 ? '#1565c0' : '#666';
+        var dirTxt = tot > 0 ? '净流入 ' : tot < 0 ? '净流出 ' : '净额 ';
+        var inflowPct = summary.total > 0 ? Math.round(summary.inflow_count / summary.total * 100) : 0;
+        return '<div style="background:#f8f9fa;border:1px solid #e0e0e0;border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;flex-wrap:wrap;gap:10px;">' +
+            '<span style="font-weight:600;">🌡️ 市场资金温度（' + summary.trade_date + '）</span>' +
+            '<span style="color:' + color + ';font-weight:700;">全行业主力' + dirTxt + Math.abs(tot / 1e8).toFixed(1) + ' 亿</span>' +
+            '<span style="font-size:12px;color:#555;">流入 <b style="color:#c62828;">' + summary.inflow_count + '</b> 家 / 流出 <b style="color:#1565c0;">' + summary.outflow_count + '</b> 家 / 持平 ' + summary.flat_count + ' 家</span>' +
+            '<span style="flex:1;min-width:120px;height:8px;background:#1565c0;border-radius:4px;position:relative;overflow:hidden;">' +
+            '<span style="position:absolute;left:0;top:0;bottom:0;width:' + inflowPct + '%;background:#c62828;border-radius:4px 0 0 4px;"></span></span>' +
+            '</div>';
+    }
+
+    function renderIndustryFlowTable(items, dom, tradeDate, summary) {
         if (!dom) return;
         if (!items || items.length === 0) {
             dom.innerHTML = '<div class="empty">暂无行业资金流数据，请点击「🔄 刷新」获取</div>';
             return;
         }
-        var html = '<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f5f5f5;text-align:left;">' +
+        var html = renderIndustryFlowSummary(summary);
+        // 020R-54：持续流入/流出榜单（连续≥3日）
+        var in3 = items.filter(function(it) { return (it.streak_days || 0) >= 3; }).slice(0, 5);
+        var out3 = items.filter(function(it) { return (it.streak_days || 0) <= -3; }).slice(0, 5);
+        if (in3.length || out3.length) {
+            html += '<div style="font-size:12px;color:#666;margin-bottom:10px;display:flex;flex-wrap:wrap;gap:6px;">';
+            if (in3.length) {
+                html += '<span>🔥 持续净流入（≥3日）：</span>' + in3.map(function(x) {
+                    return '<span style="background:#fdecea;color:#c62828;border-radius:4px;padding:1px 8px;">' + x.name + ' ' + x.streak_days + '日</span>';
+                }).join('');
+            }
+            if (out3.length) {
+                html += '<span style="margin-left:8px;">💧 持续净流出（≥3日）：</span>' + out3.map(function(x) {
+                    return '<span style="background:#e8f1fb;color:#1565c0;border-radius:4px;padding:1px 8px;">' + x.name + ' ' + Math.abs(x.streak_days) + '日</span>';
+                }).join('');
+            }
+            html += '</div>';
+        }
+        html += '<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f5f5f5;text-align:left;">' +
             '<th style="padding:8px;border-bottom:2px solid #ddd;width:36px;">#</th>' +
             '<th style="padding:8px;border-bottom:2px solid #ddd;">行业</th>' +
             '<th style="padding:8px;border-bottom:2px solid #ddd;">涨跌幅</th>' +
             '<th style="padding:8px;border-bottom:2px solid #ddd;">主力净流入</th>' +
             '<th style="padding:8px;border-bottom:2px solid #ddd;" title="截至该日（含）前 5 个交易日主力净流入累计">5日累计</th>' +
+            '<th style="padding:8px;border-bottom:2px solid #ddd;" title="截至该日（含）连续净流入/流出天数">连续</th>' +
             '<th style="padding:8px;border-bottom:2px solid #ddd;">主力净占比</th>' +
             '<th style="padding:8px;border-bottom:2px solid #ddd;">超大单</th>' +
             '<th style="padding:8px;border-bottom:2px solid #ddd;">大单</th>' +
@@ -4178,6 +4226,12 @@
             '<th style="padding:8px;border-bottom:2px solid #ddd;">领涨股</th>' +
             '</tr></thead><tbody>';
         items.forEach(function(it, i) {
+            var stk = it.streak_days || 0;
+            var streakTxt = stk > 0
+                ? '<span style="color:#c62828;font-weight:600;">流入' + stk + '日</span>'
+                : stk < 0
+                    ? '<span style="color:#1565c0;font-weight:600;">流出' + Math.abs(stk) + '日</span>'
+                    : '<span style="color:#999;">—</span>';
             html += '<tr style="border-bottom:1px solid #eee;">' +
                 '<td style="padding:6px 8px;color:#999;font-size:12px;">' + (i + 1) + '</td>' +
                 '<td style="padding:6px 8px;"><strong>' + (it.name || '—') + '</strong>' +
@@ -4185,6 +4239,7 @@
                 '<td style="padding:6px 8px;">' + fmtPct(it.pct_change) + '</td>' +
                 '<td style="padding:6px 8px;">' + fmtFlow(it.main_net) + '</td>' +
                 '<td style="padding:6px 8px;" title="截至 ' + (tradeDate || '') + '（含）前 5 个交易日累计">' + fmtFlow(it.main_net_5d) + '</td>' +
+                '<td style="padding:6px 8px;font-size:12px;">' + streakTxt + '</td>' +
                 '<td style="padding:6px 8px;">' + fmtPct(it.main_pct) + '</td>' +
                 '<td style="padding:6px 8px;font-size:12px;">' + fmtFlow(it.super_net) + '</td>' +
                 '<td style="padding:6px 8px;font-size:12px;">' + fmtFlow(it.big_net) + '</td>' +

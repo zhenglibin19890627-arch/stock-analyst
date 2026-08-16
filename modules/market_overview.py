@@ -278,8 +278,13 @@ def get_industry_fund_flow_for_date(trade_date):
             (trade_date,),
         )
         s5 = {r['code']: r['main_net_5d'] for r in cursor.fetchall()}
+
+        # 020R-54：连续净流入/流出天数（正=连续流入，负=连续流出）
+        streaks = compute_streaks(trade_date)
+
         for it in items:
             it['main_net_5d'] = s5.get(it['code'])
+            it['streak_days'] = streaks.get(it['code'], 0)
 
         cursor.execute(
             'SELECT MAX(created_at) AS t FROM industry_fund_flow WHERE trade_date = ?', (trade_date,)
@@ -288,3 +293,149 @@ def get_industry_fund_flow_for_date(trade_date):
         return items, (crow['t'] if crow else None)
     finally:
         conn.close()
+
+
+# ============================================================
+# 020R-54：时间维度利用——市场温度计 / 连续方向 / 个股行业资金背景
+# ============================================================
+
+# 自选股行业名（同花顺旧口径）→ 东财行业板块名（申万 2021 口径）别名映射
+INDUSTRY_ALIAS = {
+    '医药制造': '医药生物',
+    '保健食品': '食品饮料',
+    '家电行业': '家用电器',
+    '物流行业': '物流',
+    '电气设备': '电力设备',
+    '酿酒行业': '食品饮料',
+    '禽畜养殖': '农林牧渔',
+    '旅游酒店': '社会服务',
+    '食品加工': '食品饮料',
+    '安防设备': '计算机设备',
+}
+
+
+def match_board_name(industry, board_names):
+    """自选股行业名 → 东财行业板块名；精确 → 别名 → 双向子串，均无则 None。"""
+    if not industry:
+        return None
+    if industry in board_names:
+        return industry
+    alias = INDUSTRY_ALIAS.get(industry)
+    if alias and alias in board_names:
+        return alias
+    for b in board_names:
+        if industry in b or b in industry:
+            return b
+    return None
+
+
+def compute_streaks(trade_date):
+    """020R-54：每个行业截至 trade_date 的连续净流入/流出天数。
+
+    返回 {code: int}：正数=连续净流入天数，负数=连续净流出天数，0=首日或无方向。
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            'SELECT code, trade_date, main_net FROM industry_fund_flow '
+            'WHERE trade_date <= ? ORDER BY code, trade_date DESC',
+            (trade_date,),
+        ).fetchall()
+        by_code: dict = {}
+        for r in rows:
+            by_code.setdefault(r['code'], []).append(r['main_net'])
+        streaks = {}
+        for code, seq in by_code.items():
+            days = 0
+            for mn in seq:  # 最新在前
+                if mn is None or mn == 0:
+                    break
+                sgn = 1 if mn > 0 else -1
+                if days == 0:
+                    days = sgn
+                elif (days > 0) == (sgn > 0):
+                    days += sgn
+                else:
+                    break
+            streaks[code] = days
+        return streaks
+    finally:
+        conn.close()
+
+
+def get_industry_flow_summary(trade_date):
+    """020R-54：市场资金温度计——全行业主力净流入合计、流入/流出/持平家数。"""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            'SELECT COUNT(*) n, SUM(main_net) total_net, '
+            'SUM(CASE WHEN main_net > 0 THEN 1 ELSE 0 END) inflow_n, '
+            'SUM(CASE WHEN main_net < 0 THEN 1 ELSE 0 END) outflow_n '
+            'FROM industry_fund_flow WHERE trade_date = ?',
+            (trade_date,),
+        ).fetchone()
+        if not row or not row['n']:
+            return None
+        n = row['n']
+        inflow = row['inflow_n'] or 0
+        outflow = row['outflow_n'] or 0
+        return {
+            'trade_date': trade_date,
+            'total_net': row['total_net'],
+            'total': n,
+            'inflow_count': inflow,
+            'outflow_count': outflow,
+            'flat_count': n - inflow - outflow,
+        }
+    finally:
+        conn.close()
+
+
+def get_industry_flow_bg_map(trade_date=None):
+    """020R-54：最新（或指定）交易日全部板块的资金背景字典 {板块名: bg}。
+
+    bg: {board, trade_date, main_net, main_pct, pct_change, rank, total, streak_days}
+    供个股行业背景批量关联（自选股看板/建议/每日报告共用，一次计算全板块）。
+    """
+    conn = get_connection()
+    try:
+        if not trade_date:
+            row = conn.execute('SELECT MAX(trade_date) d FROM industry_fund_flow').fetchone()
+            trade_date = row['d'] if row else None
+        if not trade_date:
+            return {}
+        rows = conn.execute(
+            'SELECT code, name, main_net, main_pct, pct_change FROM industry_fund_flow '
+            'WHERE trade_date = ? ORDER BY main_net DESC',
+            (trade_date,),
+        ).fetchall()
+        if not rows:
+            return {}
+        total = len(rows)
+        streaks = compute_streaks(trade_date)
+        bg_map = {}
+        for i, r in enumerate(rows):
+            bg_map[r['name']] = {
+                'board': r['name'],
+                'trade_date': trade_date,
+                'main_net': r['main_net'],
+                'main_pct': r['main_pct'],
+                'pct_change': r['pct_change'],
+                'rank': i + 1,
+                'total': total,
+                'streak_days': streaks.get(r['code'], 0),
+            }
+        return bg_map
+    finally:
+        conn.close()
+
+
+def get_industry_flow_bg(industry, trade_date=None):
+    """020R-54：个股所属行业资金背景 → dict 或 None（无板块匹配时）。"""
+    if not industry:
+        return None
+    bg_map = get_industry_flow_bg_map(trade_date)
+    if not bg_map:
+        return None
+    board = match_board_name(industry, list(bg_map.keys()))
+    return bg_map.get(board) if board else None
