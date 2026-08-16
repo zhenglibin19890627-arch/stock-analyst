@@ -714,7 +714,7 @@ class TestValuationTencentFallback:
 
         monkeypatch.setattr(dc, '_fetch_valuation_akshare', lambda s, m: None)
         monkeypatch.setattr(dc, '_fetch_valuation_baostock', lambda s, m: None)
-        monkeypatch.setattr(dc, '_fetch_valuation_tencent', lambda s, m: (12.3, 1.5))
+        monkeypatch.setattr(dc, '_fetch_valuation_tencent', lambda s, m: (12.3, 1.5, 1.2e11))
 
         status, msg = dc.fetch_valuation('HK3690', 'hk_stock', force_full=True)
         assert status == 'success'
@@ -722,10 +722,13 @@ class TestValuationTencentFallback:
 
         conn = db_manager.get_connection()
         row = conn.execute(
-            'SELECT pe_ttm, pb_mrq, source, trade_date FROM stock_valuation WHERE stock_id=1'
+            'SELECT pe_ttm, pb_mrq, total_mv, source, trade_date FROM stock_valuation WHERE stock_id=1'
         ).fetchone()
         conn.close()
         assert row['pe_ttm'] == 12.3
         assert row['pb_mrq'] == 1.5
+        assert row['total_mv'] == pytest.approx(1.2e11)
+        assert row['source'] == 'tencent'
+        assert row['trade_date'] == '2026-08-14'
         assert row['source'] == 'tencent'
         assert row['trade_date'] == '2026-08-14'  # 交易日戳记 = 最新K线日期，不盖周末

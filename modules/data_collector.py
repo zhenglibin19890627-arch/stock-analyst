@@ -396,11 +396,12 @@ def _get_tencent_prefix(symbol, market):
 @retry
 def _fetch_valuation_tencent(symbol, market):
     """
-    从腾讯实时行情接口获取 PE/PB 估值数据。
+    从腾讯实时行情接口获取 PE/PB/总市值 估值数据。
     注意：A股和港股的字段索引不同！
       A股: [39]=PE(TTM), [46]=PB
       港股: [39]=PE(TTM), [43]=PB  (港股[46]是英文股票名而非PB)
-    返回: (pe, pb)
+      港股: [45]=总市值(亿港元, 优先), [44]=流通市值/港股市值(亿港元, 兜底)
+    返回: (pe, pb, total_mv_元)
     """
     prefix, normalized_code = _get_tencent_prefix(symbol, market)
     url = 'https://qt.gtimg.cn/q=' + prefix + normalized_code
@@ -421,6 +422,19 @@ def _fetch_valuation_tencent(symbol, market):
     else:
         pb_str = parts[46].strip().strip(';').strip('"')
 
+    # 020R-56：总市值（港股 [45] 总市值，兜底 [44]；单位=亿，换算为元）
+    total_mv = None
+    if market == 'hk_stock':
+        for idx in (45, 44):
+            if len(parts) > idx:
+                mv_str = parts[idx].strip().strip('"').strip(';')
+                if mv_str:
+                    try:
+                        total_mv = float(mv_str) * 1e8
+                        break
+                    except ValueError:
+                        continue
+
     pe = None
     pb = None
     try:
@@ -432,8 +446,8 @@ def _fetch_valuation_tencent(symbol, market):
     except ValueError:
         pass
 
-    logger.info(f'腾讯估值 {symbol}: PE={pe}, PB={pb} (market={market})')
-    return pe, pb
+    logger.info(f'腾讯估值 {symbol}: PE={pe}, PB={pb}, 总市值={total_mv} (market={market})')
+    return pe, pb, total_mv
 
 
 # ============================================================
@@ -444,7 +458,7 @@ def _fetch_valuation_tencent(symbol, market):
 # - mootdx 走通达信 TCP socket 协议，不经过 requests/httpx，
 #   因此不受本项目 requests.Session.request 全局 patch 影响（天然隔离）。
 # - mootdx 仅支持 A股（沪市 6 开头、深市 0/3 开头，不带 sh/sz 前缀）。
-#   港股 K线/盘口仍走现有源（腾讯/akshare），估值港股仍走 akshare。
+#   港股 K线/盘口仍走现有源（腾讯/akshare），估值港股走 akshare → 腾讯行情兜底（021C/020R-56）。
 # - 首次初始化会挑选最快的行情服务器（约 5 秒），之后全局复用（单例缓存）。
 # ============================================================
 import threading as _threading_019y
@@ -1516,7 +1530,7 @@ def fetch_a_fundamental(symbol, force_full=False):
             if result is None:
                 warnings.append('PE/PB获取失败（腾讯接口无响应）')
             else:
-                pe_val, pb_val = result
+                pe_val, pb_val, _mv = result
                 if (pe_val is None or pe_val == 0) and (pb_val is None or pb_val == 0):
                     warnings.append('PE/PB数据为空')
                 else:
@@ -2170,7 +2184,7 @@ def fetch_hk_fundamental(symbol, force_full=False):
         if result is None:
             warnings.append('PE/PB获取失败（腾讯接口无响应）')
         else:
-            pe, pb = result
+            pe, pb, _mv = result
             if pe is not None or pb is not None:
                 conn2 = get_connection()
                 cursor2 = conn2.cursor()
@@ -2419,25 +2433,33 @@ def fetch_valuation(symbol, market, force_full=False):
     if not stock_id:
         return 'failed', f'数据库中未找到股票 {symbol}'
 
-    # 日级低频：同日跳过
+    # 日级低频：同日跳过（020R-56：仅最新记录为「真实成功」时跳过——即
+    # status='success' 且 message 非「同日跳过」；跳过本身写 'skipped' 状态，
+    # 防止"跳过链"自延续（历史上小米/阿里因连续同日跳过从未真正采集）；
+    # failed 记录允许当日重试，避免失败后整天不再尝试）
     if not force_full:
         try:
             conn_chk = get_connection()
             cursor_chk = conn_chk.cursor()
             cursor_chk.execute(
-                """SELECT fetched_at FROM data_status
+                """SELECT fetched_at, status, message FROM data_status
                    WHERE stock_id = ? AND dimension = 'valuation'
                    ORDER BY fetched_at DESC LIMIT 1""",
                 (stock_id,),
             )
             row = cursor_chk.fetchone()
             conn_chk.close()
-            if row and row['fetched_at']:
+            if (
+                row
+                and row['fetched_at']
+                and (row['status'] or '') == 'success'
+                and '同日跳过' not in (row['message'] or '')
+            ):
                 last_date = str(row['fetched_at'])[:10]
                 today_str = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
                 if last_date >= today_str:
                     skip_msg = '同日跳过(估值当日已采集)'
-                    save_data_status(stock_id, 'valuation', 'success', skip_msg)
+                    save_data_status(stock_id, 'valuation', 'skipped', skip_msg)
                     logger.info(f'[{symbol}] {skip_msg}')
                     return 'success', skip_msg
         except Exception as e:
@@ -2463,13 +2485,13 @@ def fetch_valuation(symbol, market, force_full=False):
         except Exception as e:
             logger.warning(f'[{symbol}] baostock估值失败: {e}')
 
-    # 021C：港股第二备源——腾讯行情 PE(TTM)/PB 实时快照。
+    # 021C：港股第二备源——腾讯行情 PE(TTM)/PB/总市值 实时快照。
     # 背景：akshare 港股 baidu 估值接口已失效（JSON 解析错误，2026-08-16 实测）、
     # baostock 不支持港股，导致港股估值恒失败（HK3690 等）。
-    # 腾讯仅提供 PE/PB 两字段，其余字段保持缺失（诚实标注来源，不伪造）。
+    # 腾讯仅提供 PE/PB/总市值 三字段，其余字段保持缺失（诚实标注来源，不伪造）。
     if not val and market == 'hk_stock':
         try:
-            pe, pb = _fetch_valuation_tencent(symbol, market)
+            pe, pb, total_mv = _fetch_valuation_tencent(symbol, market)
             if pe is not None or pb is not None:
                 val = {
                     'trade_date': None,  # 下方以最新K线日期为准（腾讯快照无日期字段）
@@ -2480,10 +2502,10 @@ def fetch_valuation(symbol, market, force_full=False):
                     'ps': None,
                     'pcf_ncf_ttm': None,
                     'dv_ttm': None,
-                    'total_mv': None,
+                    'total_mv': total_mv,  # 020R-56：腾讯 [45]/[44] 总市值（元）
                 }
                 src = 'tencent'
-                logger.info(f'[{symbol}] 腾讯估值备用源命中: PE={pe}, PB={pb}')
+                logger.info(f'[{symbol}] 腾讯估值备用源命中: PE={pe}, PB={pb}, 总市值={total_mv}')
         except Exception as e:
             logger.warning(f'[{symbol}] 腾讯估值备用源失败: {e}')
 
