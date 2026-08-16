@@ -224,6 +224,25 @@ def _read_kline_data(stock_id: int, limit: int = 60) -> list[dict]:
     return rows
 
 
+def _read_period_kline_data(stock_id: int, table: str) -> list[dict]:
+    """020R-48：读取周线/月线聚合表（正序，最早→最新）。表名由调用方白名单传入。"""
+    if table not in ('raw_kline_weekly', 'raw_kline_monthly'):
+        return []
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f'SELECT trade_date, open, close, high, low, volume FROM {table} '
+            'WHERE stock_id = ? ORDER BY trade_date ASC',
+            (stock_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:  # noqa: BLE001 —— 表缺失时降级为空（多周期字段缺失→子项降级）
+        logger.warning(f'[020R-48] 读取{table}失败 stock_id={stock_id}: {e}')
+        return []
+    finally:
+        conn.close()
+
+
 def _read_fundamental_data(stock_id: int) -> dict | None:
     """读取最新一期基本面数据
 
@@ -386,6 +405,28 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
     kdj_k = _calc_kdj(kline_rows)
     volume_ratio = _calc_volume_ratio(volumes)
 
+    # 3.5 020R-48：周线/月线多周期指标
+    weekly_ma10 = weekly_ma20 = weekly_macd_dif = weekly_macd_dea = None
+    weekly_rsi14 = weekly_boll_position = None
+    weekly_rows = _read_period_kline_data(stock_id, 'raw_kline_weekly')
+    if len(weekly_rows) >= 20:
+        wcloses = [float(r['close'] or 0) for r in weekly_rows]
+        weekly_ma10 = _calc_ma(wcloses, 10)
+        weekly_ma20 = _calc_ma(wcloses, 20)
+        weekly_macd_dif, weekly_macd_dea = _calc_macd(wcloses)
+        weekly_rsi14 = _calc_rsi(wcloses, 14)
+        wup, _wmid, wlow = _calc_bollinger(wcloses, 20)
+        if wup is not None and wlow is not None and wup - wlow > 0:
+            weekly_boll_position = max(0.0, min(100.0, (wcloses[-1] - wlow) / (wup - wlow) * 100))
+
+    monthly_ma5 = monthly_ma10 = monthly_macd_dif = monthly_macd_dea = None
+    monthly_rows = _read_period_kline_data(stock_id, 'raw_kline_monthly')
+    if len(monthly_rows) >= 5:
+        mcloses = [float(r['close'] or 0) for r in monthly_rows]
+        monthly_ma5 = _calc_ma(mcloses, 5)
+        monthly_ma10 = _calc_ma(mcloses, 10)
+        monthly_macd_dif, monthly_macd_dea = _calc_macd(mcloses)
+
     # 4. 读取基本面
     fund = _read_fundamental_data(stock_id)
 
@@ -470,6 +511,17 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
         volume_ratio=volume_ratio,
         boll_upper=boll_upper,
         boll_lower=boll_lower,
+        # 020R-48：周线/月线多周期指标
+        weekly_ma10=weekly_ma10,
+        weekly_ma20=weekly_ma20,
+        weekly_macd_dif=weekly_macd_dif,
+        weekly_macd_dea=weekly_macd_dea,
+        weekly_rsi14=weekly_rsi14,
+        weekly_boll_position=weekly_boll_position,
+        monthly_ma5=monthly_ma5,
+        monthly_ma10=monthly_ma10,
+        monthly_macd_dif=monthly_macd_dif,
+        monthly_macd_dea=monthly_macd_dea,
         # 基本面
         pe_ttm=fund.get('pe_ratio') if fund else None,
         pb=fund.get('pb_ratio') if fund else None,

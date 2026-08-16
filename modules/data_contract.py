@@ -82,6 +82,20 @@ class StockData(BaseModel):
     boll_upper: float | None = Field(default=None, description='布林带上轨')
     boll_lower: float | None = Field(default=None, description='布林带下轨')
 
+    # 020R-48 多周期技术面（周线/月线，可选，缺失按子项降级）
+    weekly_ma10: float | None = Field(default=None, description='周线10周均线')
+    weekly_ma20: float | None = Field(default=None, description='周线20周均线')
+    weekly_macd_dif: float | None = Field(default=None, description='周线MACD DIF')
+    weekly_macd_dea: float | None = Field(default=None, description='周线MACD DEA')
+    weekly_rsi14: float | None = Field(default=None, description='周线14周RSI')
+    weekly_boll_position: float | None = Field(
+        default=None, ge=0, le=100, description='周线布林带位置(%)'
+    )
+    monthly_ma5: float | None = Field(default=None, description='月线5月均线')
+    monthly_ma10: float | None = Field(default=None, description='月线10月均线')
+    monthly_macd_dif: float | None = Field(default=None, description='月线MACD DIF')
+    monthly_macd_dea: float | None = Field(default=None, description='月线MACD DEA')
+
     # ================================================================
     # 二、基本面 (Fundamental) — 全部可选
     # ================================================================
@@ -161,6 +175,17 @@ class StockData(BaseModel):
         'volume_ratio': '技术面-量比子项：维度内子权重保持，使用默认值1.0填充（默认值填充型）',
         'boll_upper': '技术面-波动率子项：维度内子权重调整降权（权重降低型）',
         'boll_lower': '技术面-波动率子项：维度内子权重调整降权（权重降低型）',
+        # 020R-48 多周期技术面
+        'weekly_ma10': '技术面-周线趋势子项：维度内子权重调整降权（权重降低型）',
+        'weekly_ma20': '技术面-周线趋势子项：维度内子权重调整降权（权重降低型）',
+        'weekly_macd_dif': '技术面-周线趋势子项：维度内子权重调整降权（权重降低型）',
+        'weekly_macd_dea': '技术面-周线趋势子项：维度内子权重调整降权（权重降低型）',
+        'weekly_rsi14': '技术面-周线超买超卖子项：维度内子权重调整降权（权重降低型）',
+        'weekly_boll_position': '技术面-周线波动子项：维度内子权重调整降权（权重降低型）',
+        'monthly_ma5': '技术面-月线方向子项：维度内子权重调整为0（权重归零型）',
+        'monthly_ma10': '技术面-月线方向子项：维度内子权重调整为0（权重归零型）',
+        'monthly_macd_dif': '技术面-月线方向子项：维度内子权重调整为0（权重归零型）',
+        'monthly_macd_dea': '技术面-月线方向子项：维度内子权重调整为0（权重归零型）',
         # 基本面
         'pe_ttm': '基本面-估值子项：维度内子权重调整降权（权重降低型）',
         'pb': '基本面-估值子项：维度内子权重调整降权（权重降低型）',
@@ -213,6 +238,17 @@ class StockData(BaseModel):
             'volume_ratio',
             'boll_upper',
             'boll_lower',
+            # 020R-48 多周期
+            'weekly_ma10',
+            'weekly_ma20',
+            'weekly_macd_dif',
+            'weekly_macd_dea',
+            'weekly_rsi14',
+            'weekly_boll_position',
+            'monthly_ma5',
+            'monthly_ma10',
+            'monthly_macd_dif',
+            'monthly_macd_dea',
         }
         FUNDAMENTAL = {
             'pe_ttm',
@@ -260,14 +296,14 @@ class StockData(BaseModel):
         """根据各维度字段完整度自动计算 data_quality
 
         四维独立计算（Q02拆分后）：
-        - technical: 12个可选字段
+        - technical: 22个可选字段（020R-48 起含周线6 + 月线4 多周期字段）
         - fundamental: 9个可选字段
         - news: 5个字段 (news_sentiment, holder_increase, news_count, news_positive_ratio, news_negative_count)
         - capital: 4个字段 (main_net_inflow, margin_balance_chg,
           holder_count_change_pct, institution_hold_ratio)  # 020R-45 从3扩展至5；020R-47 移除 north 后为4
         """
-        tech_total = 12
-        tech_present = 12 - len(self.missing_fields('technical'))
+        tech_total = 22  # 020R-48: 12日线 + 6周线 + 4月线
+        tech_present = 22 - len(self.missing_fields('technical'))
 
         fund_total = 9
         fund_present = 9 - len(self.missing_fields('fundamental'))
@@ -321,6 +357,17 @@ class StockData(BaseModel):
             'volume_ratio': self.volume_ratio if self.volume_ratio is not None else 1.0,
             'boll_upper': self.boll_upper,
             'boll_lower': self.boll_lower,
+            # 020R-48 多周期
+            'weekly_ma10': self.weekly_ma10,
+            'weekly_ma20': self.weekly_ma20,
+            'weekly_macd_dif': self.weekly_macd_dif,
+            'weekly_macd_dea': self.weekly_macd_dea,
+            'weekly_rsi14': self.weekly_rsi14,
+            'weekly_boll_position': self.weekly_boll_position,
+            'monthly_ma5': self.monthly_ma5,
+            'monthly_ma10': self.monthly_ma10,
+            'monthly_macd_dif': self.monthly_macd_dif,
+            'monthly_macd_dea': self.monthly_macd_dea,
             # 基本面
             'pe_ttm': self.pe_ttm,
             'pb': self.pb,

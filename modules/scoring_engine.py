@@ -156,11 +156,25 @@ class SubItem:
     default_fills: dict[str, float] = field(default_factory=dict)
 
 
-# --- 技术面 6 子项 ---
+# --- 技术面 7 子项（020R-48 多周期：月线方向 0.25 + 周线波段 0.45 + 日线择时 0.30） ---
+# 豁免见 RED_LINES.md §6。月线空头时对技术面总分施加 ×0.85 惩罚（analyze() 内实现）。
 TECHNICAL_SUBITEMS: list[SubItem] = [
-    SubItem('均线', 'ma', ['ma5', 'ma10', 'ma20'], 0.25, 'zero'),
-    SubItem('趋势', 'trend', ['ma60', 'macd_dif', 'macd_dea'], 0.20, 'reduce'),
-    SubItem('超买超卖', 'obos', ['kdj_k', 'rsi_14'], 0.20, 'reduce'),
+    # 月线大方向层（0.25）
+    SubItem(
+        '月线方向', 'monthly_trend',
+        ['monthly_ma5', 'monthly_ma10', 'monthly_macd_dif', 'monthly_macd_dea'],
+        0.25, 'zero',
+    ),
+    # 周线波段层（0.45）
+    SubItem(
+        '周线趋势', 'weekly_trend',
+        ['weekly_ma10', 'weekly_ma20', 'weekly_macd_dif', 'weekly_macd_dea'],
+        0.25, 'reduce',
+    ),
+    SubItem('周线超买超卖', 'weekly_obos', ['weekly_rsi14'], 0.10, 'reduce'),
+    SubItem('周线波动', 'weekly_vol', ['weekly_boll_position'], 0.10, 'reduce'),
+    # 日线择时层（0.30）
+    SubItem('超买超卖', 'obos', ['kdj_k', 'rsi_14'], 0.10, 'reduce'),
     SubItem('量价分析', 'vol_price', ['volume'], 0.10, 'zero'),
     SubItem(
         '量比',
@@ -170,7 +184,6 @@ TECHNICAL_SUBITEMS: list[SubItem] = [
         'keep_default',
         default_fills={'volume_ratio': DEFAULT_VOLUME_RATIO},
     ),
-    SubItem('波动率', 'volatility', ['boll_upper', 'boll_lower'], 0.15, 'reduce'),
 ]
 
 # --- 基本面 5 子项 ---
@@ -503,6 +516,107 @@ def score_volatility(data: StockData) -> tuple[float, dict]:
 
 
 # --- 基本面子项评分 ---
+
+
+def score_monthly_trend(data: StockData) -> tuple[float, dict]:
+    """月线方向子项评分（020R-48）：月线 MA5/MA10 排列 + MACD 方向。
+
+    缺失返回中性 50；degradation=zero → 月线字段全缺失时子权重归零（次新股/港股降级）。
+    """
+    present = [
+        f for f in ('monthly_ma5', 'monthly_ma10', 'monthly_macd_dif', 'monthly_macd_dea')
+        if getattr(data, f, None) is not None
+    ]
+    if len(present) < 2:
+        return 50.0, {'note': '月线数据不足，返回中性分（不占权重）'}
+
+    scores = []
+    detail = {}
+    if data.monthly_ma5 is not None and data.monthly_ma10 is not None:
+        if data.monthly_ma5 > data.monthly_ma10:
+            scores.append(85.0)
+            detail['monthly_ma'] = f'MA5>MA10(月线多头 {data.monthly_ma5:.2f}/{data.monthly_ma10:.2f})'
+        else:
+            scores.append(25.0)
+            detail['monthly_ma'] = f'MA5<MA10(月线空头 {data.monthly_ma5:.2f}/{data.monthly_ma10:.2f})'
+    if data.monthly_macd_dif is not None and data.monthly_macd_dea is not None:
+        if data.monthly_macd_dif > data.monthly_macd_dea:
+            scores.append(80.0)
+            detail['monthly_macd'] = 'MACD多头'
+        else:
+            scores.append(30.0)
+            detail['monthly_macd'] = 'MACD空头'
+    if not scores:  # 字段成对不全（如只有 MA5 无 MA10），降级中性
+        return 50.0, {'note': '月线指标成对不全，返回中性分'}
+    return _clamp(sum(scores) / len(scores)), detail
+
+
+def score_weekly_trend(data: StockData) -> tuple[float, dict]:
+    """周线趋势子项评分（020R-48，买卖点核心）：周线 MA10/MA20 排列 + MACD 多空。"""
+    present = [
+        f for f in ('weekly_ma10', 'weekly_ma20', 'weekly_macd_dif', 'weekly_macd_dea')
+        if getattr(data, f, None) is not None
+    ]
+    if len(present) < 2:
+        return 50.0, {'note': '周线趋势数据不足，返回中性分'}
+
+    scores = []
+    detail = {}
+    if data.weekly_ma10 is not None and data.weekly_ma20 is not None:
+        if data.weekly_ma10 > data.weekly_ma20:
+            scores.append(88.0)
+            detail['weekly_ma'] = f'MA10>MA20(多头 {data.weekly_ma10:.2f}/{data.weekly_ma20:.2f})'
+        else:
+            scores.append(25.0)
+            detail['weekly_ma'] = f'MA10<MA20(空头 {data.weekly_ma10:.2f}/{data.weekly_ma20:.2f})'
+    if data.weekly_macd_dif is not None and data.weekly_macd_dea is not None:
+        hist = data.weekly_macd_dif - data.weekly_macd_dea
+        if hist > 0:
+            scores.append(85.0)
+            detail['weekly_macd'] = f'MACD多头(柱{hist:.4f})'
+        else:
+            scores.append(22.0)
+            detail['weekly_macd'] = f'MACD空头(柱{hist:.4f})'
+    if not scores:  # 字段成对不全，降级中性
+        return 50.0, {'note': '周线指标成对不全，返回中性分'}
+    return _clamp(sum(scores) / len(scores)), detail
+
+
+def score_weekly_obos(data: StockData) -> tuple[float, dict]:
+    """周线超买超卖子项评分（020R-48）：周线 RSI(14)。"""
+    r = data.weekly_rsi14
+    if r is None:
+        return 50.0, {'note': '周线RSI数据缺失，返回中性分'}
+    detail = {'weekly_rsi14': f'{r:.1f}'}
+    if r > 70:
+        return 30.0, {**detail, 'note': '周线超买(回调风险)'}
+    elif r < 30:
+        return 75.0, {**detail, 'note': '周线超卖(反弹机会)'}
+    elif 45 <= r <= 65:
+        return 80.0, {**detail, 'note': '周线健康'}
+    else:
+        return 55.0, {**detail, 'note': '周线中性'}
+
+
+def score_weekly_vol(data: StockData) -> tuple[float, dict]:
+    """周线波动子项评分（020R-48）：周线布林带位置。"""
+    pos = data.weekly_boll_position
+    if pos is None:
+        return 50.0, {'note': '周线布林数据缺失，返回中性分'}
+    detail = {'weekly_boll_position': f'{pos:.1f}%'}
+    if pos > 90:
+        return 25.0, {**detail, 'note': '周线触上轨(回调风险)'}
+    elif pos < 10:
+        return 70.0, {**detail, 'note': '周线触下轨(反弹机会)'}
+    elif 40 <= pos <= 70:
+        return 78.0, {**detail, 'note': '周线中轨上方(健康)'}
+    else:
+        return 55.0, {**detail, 'note': '周线中性位置'}
+
+
+# ================================================================
+# 二、基本面维度评分函数
+# ================================================================
 
 
 def score_valuation(data: StockData) -> tuple[float, dict]:
@@ -867,13 +981,14 @@ def score_holder_count(data: StockData) -> tuple[float, dict]:
 
 # 子项评分函数注册表
 SCORING_FUNCTIONS: dict[str, Callable[[StockData], tuple[float, dict]]] = {
-    # 技术面
-    'ma': score_ma,
-    'trend': score_trend,
+    # 技术面（020R-48 多周期：月线/周线/日线三层）
+    'monthly_trend': score_monthly_trend,
+    'weekly_trend': score_weekly_trend,
+    'weekly_obos': score_weekly_obos,
+    'weekly_vol': score_weekly_vol,
     'obos': score_obos,
     'vol_price': score_vol_price,
     'vol_ratio': score_vol_ratio,
-    'volatility': score_volatility,
     # 基本面
     'valuation': score_valuation,
     'profitability': score_profitability,
@@ -1116,6 +1231,15 @@ def analyze(data: StockData) -> AnalysisResult:
 
     # 2. 四维评分
     tech_score, tech_detail = score_dimension(data, TECHNICAL_SUBITEMS, 'technical')
+    # 020R-48：月线大方向惩罚——月线空头（MA5<MA10）时技术面得分 ×0.85
+    if (
+        tech_score is not None
+        and data.monthly_ma5 is not None
+        and data.monthly_ma10 is not None
+        and data.monthly_ma5 < data.monthly_ma10
+    ):
+        tech_score = round(tech_score * 0.85, 1)
+        tech_detail['monthly_penalty'] = '月线空头(MA5<MA10)，技术面得分×0.85'
     fund_score, fund_detail = score_dimension(data, FUNDAMENTAL_SUBITEMS, 'fundamental')
     news_score, news_detail = score_dimension(data, NEWS_SUBITEMS, 'news')
     cap_score, cap_detail = score_dimension(data, CAPITAL_SUBITEMS, 'capital')

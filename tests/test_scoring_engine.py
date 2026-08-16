@@ -579,16 +579,19 @@ class TestSubitemWeightAdjustment:
         assert adjust_subitem_weight(_sd(volume_ratio=1.5), vr_subitem) == 0.10
 
     def test_registered_subitems_degradation_consistency(self):
-        """注册表中子项的降级类型与预期一致（防止配置漂移）"""
-        # A 类至少包含 ma / vol_price
+        """注册表中子项的降级类型与预期一致（防止配置漂移）——020R-48 多周期结构"""
+        # A 类（归零型）包含 monthly_trend / vol_price
         zero_keys = {si.key for si in TECHNICAL_SUBITEMS if si.degradation == 'zero'}
-        assert {'ma', 'vol_price'}.issubset(zero_keys)
-        # B 类至少包含 trend / obos / volatility
+        assert {'monthly_trend', 'vol_price'}.issubset(zero_keys)
+        # B 类（降权型）包含 weekly_trend / weekly_obos / weekly_vol / obos
         reduce_keys = {si.key for si in TECHNICAL_SUBITEMS if si.degradation == 'reduce'}
-        assert {'trend', 'obos', 'volatility'}.issubset(reduce_keys)
-        # C 类包含 vol_ratio
+        assert {'weekly_trend', 'weekly_obos', 'weekly_vol', 'obos'}.issubset(reduce_keys)
+        # C 类（填充型）包含 vol_ratio
         keep_keys = {si.key for si in TECHNICAL_SUBITEMS if si.degradation == 'keep_default'}
         assert 'vol_ratio' in keep_keys
+        # 权重合计 1.0
+        total = sum(si.base_weight for si in TECHNICAL_SUBITEMS)
+        assert abs(total - 1.0) < 1e-9
 
 
 class TestWeightNormalization:

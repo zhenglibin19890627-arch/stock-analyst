@@ -571,6 +571,77 @@ def _fetch_kline_mootdx(symbol):
     return out
 
 
+def backfill_kline_history_mootdx(stock_id, symbol, market, min_bars=600):
+    """020R-48 二期：A股用 mootdx 前复权全量历史补齐日线历史（仅补缺口，不覆盖已有行）。
+
+    用途：月线 MACD（需 26 个月）等多周期指标需要 2 年以上日线；腾讯接口深度受限。
+    raw_kline 有 UNIQUE(stock_id, trade_date)，INSERT OR IGNORE 保证已有行（腾讯主源）不被覆盖。
+    返回 (status, message)。
+    """
+    if market != 'a_stock':
+        return 'skipped', '仅A股支持 mootdx 历史补采'
+    code = _mootdx_symbol(symbol, market)
+    if not code:
+        return 'skipped', 'mootdx 不支持该代码'
+
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT MIN(trade_date) AS m, COUNT(*) AS c FROM raw_kline WHERE stock_id = ?',
+        (stock_id,),
+    )
+    row = cur.fetchone()
+    if row and row['c'] and int(row['c']) >= min_bars:
+        conn.close()
+        return 'skipped', f'日线已有{row["c"]}根(≥{min_bars})，无需补采'
+
+    client = _mootdx_client()
+    if client is None:
+        conn.close()
+        return 'failed', 'mootdx 客户端不可用'
+
+    try:
+        try:
+            bars = client.bars(symbol=code, frequency=9, offset=800, adjust='qfq')
+        except Exception:  # noqa: BLE001 —— adjust 参数不兼容时回退
+            bars = client.bars(symbol=code, frequency=9, offset=800)
+        if bars is None or len(bars) == 0:
+            conn.close()
+            return 'failed', 'mootdx 全量历史返回空数据'
+
+        inserted = 0
+        for _, r in bars.iterrows():
+            dt = str(r.get('datetime', ''))
+            trade_date = dt.split(' ')[0] if ' ' in dt else dt[:10]
+            try:
+                cur.execute(
+                    'INSERT OR IGNORE INTO raw_kline '
+                    '(stock_id, trade_date, open, close, high, low, volume, amount, pct_change, data_source) '
+                    "VALUES (?,?,?,?,?,?,?,?,?,'mootdx')",
+                    (
+                        stock_id, trade_date,
+                        float(r.get('open', 0) or 0), float(r.get('close', 0) or 0),
+                        float(r.get('high', 0) or 0), float(r.get('low', 0) or 0),
+                        float(r.get('vol', 0) or 0), float(r.get('amount', 0) or 0),
+                        None,
+                    ),
+                )
+                if cur.rowcount > 0:
+                    inserted += 1
+            except (ValueError, TypeError):
+                continue
+        conn.commit()
+        cur.execute('SELECT COUNT(*) AS c FROM raw_kline WHERE stock_id = ?', (stock_id,))
+        total = cur.fetchone()['c']
+        conn.close()
+        logger.info(f'[020R-48 历史补采] {symbol}: 新增{inserted}根，共{total}根日线')
+        return 'success', f'新增{inserted}根，共{total}根日线'
+    except Exception as e:  # noqa: BLE001
+        conn.close()
+        logger.warning(f'[020R-48 历史补采] {symbol} 失败: {e}')
+        return 'failed', f'历史补采失败: {e}'
+
+
 def _fetch_realtime_quote_mootdx(symbol):
     """019Y T1：mootdx 实时行情（含五档买卖盘）。
     返回 dict：{'price','pct_change','bid1_price'..'bid5_price','bid1_vol'..'bid5_vol',
