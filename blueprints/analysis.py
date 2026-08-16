@@ -11,32 +11,65 @@ bp = Blueprint('analysis', __name__)
 
 
 def _technical_detail_for_stock(stock_id):
-    """020R-35：从 raw_kline 全量计算技术指标明细（均线/MACD/RSI/KDJ/布林/量能）。
+    """020R-35/48：计算技术指标明细（日线六类 + 周线/月线多周期参考，均不参评）。
 
     纯展示层增强：失败或数据不足时返回 None，不影响报告主流程。
     """
     try:
+        from modules.technical_detail import compute_technical_detail
+
         conn = get_connection()
         cursor = conn.cursor()
+        merged = {}
+        # 日线（全量）
         cursor.execute(
             'SELECT trade_date, close, high, low, volume FROM raw_kline '
             'WHERE stock_id = ? ORDER BY trade_date ASC',
             (stock_id,),
         )
         rows = cursor.fetchall()
+        if len(rows) >= 20:
+            merged.update(
+                compute_technical_detail(
+                    [float(r['close'] or 0) for r in rows],
+                    [float(r['high'] or 0) for r in rows],
+                    [float(r['low'] or 0) for r in rows],
+                    [float(r['volume'] or 0) for r in rows],
+                    latest_date=str(rows[-1]['trade_date'])[:10],
+                    key_prefix='',
+                    min_bars=20,
+                ) or {}
+            )
+        # 020R-48：周线/月线多周期参考
+        for table, prefix, min_bars in (
+            ('raw_kline_weekly', 'weekly_', 20),
+            ('raw_kline_monthly', 'monthly_', 5),
+        ):
+            try:
+                cursor.execute(
+                    f'SELECT trade_date, close, high, low, volume FROM {table} '
+                    'WHERE stock_id = ? ORDER BY trade_date ASC',
+                    (stock_id,),
+                )
+                prows = cursor.fetchall()
+                if len(prows) >= min_bars:
+                    merged.update(
+                        compute_technical_detail(
+                            [float(r['close'] or 0) for r in prows],
+                            [float(r['high'] or 0) for r in prows],
+                            [float(r['low'] or 0) for r in prows],
+                            [float(r['volume'] or 0) for r in prows],
+                            latest_date=str(prows[-1]['trade_date'])[:10],
+                            key_prefix=prefix,
+                            min_bars=min_bars,
+                        ) or {}
+                    )
+            except Exception as e:  # noqa: BLE001 —— 表缺失/字段漂移时跳过该周期
+                logging.getLogger(__name__).warning(
+                    f'多周期指标计算失败 stock_id={stock_id} table={table}: {e}'
+                )
         conn.close()
-
-        if len(rows) < 20:
-            return None
-
-        from modules.technical_detail import compute_technical_detail
-
-        closes = [float(r['close'] or 0) for r in rows]
-        highs = [float(r['high'] or 0) for r in rows]
-        lows = [float(r['low'] or 0) for r in rows]
-        volumes = [float(r['volume'] or 0) for r in rows]
-        latest_date = str(rows[-1]['trade_date'])[:10]
-        return compute_technical_detail(closes, highs, lows, volumes, latest_date)
+        return merged if merged else None
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).warning(f'技术指标明细计算失败 stock_id={stock_id}: {e}')
         return None

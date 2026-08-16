@@ -80,65 +80,83 @@ def _macd(closes):
     return dif[-1], dea[-1], hist, state
 
 
-def compute_technical_detail(closes, highs, lows, volumes, latest_date=''):
-    """计算六类技术指标快照 → dict（数据不足时返回 None）。"""
-    if not closes or len(closes) < 20:
+def compute_technical_detail(closes, highs, lows, volumes, latest_date='', key_prefix='', min_bars=20):
+    """计算六类技术指标快照 → dict（数据不足时返回 None）。
+
+    key_prefix: 键前缀（''=日线 / 'weekly_' / 'monthly_'，020R-48 多周期）。
+    min_bars: 最小K线根数（日线20；月线可放宽到5，MACD/MA10 等按各自窗口内部守卫）。
+    """
+    if not closes or len(closes) < min_bars:
         return None
 
-    detail = {'latest_date': latest_date, 'latest_close': round(closes[-1], 2)}
+    p = key_prefix
+    detail = {f'{p}latest_date': latest_date, f'{p}latest_close': round(closes[-1], 2)}
 
-    # 1) 均线系统 MA5/MA10/MA20
+    # 1) 均线系统 MA5/MA10/MA20（020R-48：按可用均线降级——月线历史短时仅 MA5/MA10）
     ma5 = _sma(closes, 5)
     ma10 = _sma(closes, 10)
     ma20 = _sma(closes, 20)
     if ma5 is not None and ma10 is not None and ma20 is not None:
-        detail['ma5'] = round(ma5, 2)
-        detail['ma10'] = round(ma10, 2)
-        detail['ma20'] = round(ma20, 2)
+        detail[f'{p}ma5'] = round(ma5, 2)
+        detail[f'{p}ma10'] = round(ma10, 2)
+        detail[f'{p}ma20'] = round(ma20, 2)
         if ma5 > ma10 > ma20:
-            detail['ma_state'] = '多头排列'
+            detail[f'{p}ma_state'] = '多头排列'
         elif ma5 < ma10 < ma20:
-            detail['ma_state'] = '空头排列'
+            detail[f'{p}ma_state'] = '空头排列'
         else:
-            detail['ma_state'] = '均线纠缠'
+            detail[f'{p}ma_state'] = '均线纠缠'
+    elif ma5 is not None and ma10 is not None:
+        detail[f'{p}ma5'] = round(ma5, 2)
+        detail[f'{p}ma10'] = round(ma10, 2)
+        if ma5 > ma10:
+            detail[f'{p}ma_state'] = '短期多头'
+        else:
+            detail[f'{p}ma_state'] = '短期空头'
+    elif ma5 is not None:
+        detail[f'{p}ma5'] = round(ma5, 2)
+        if closes[-1] > ma5:
+            detail[f'{p}ma_state'] = '价在MA5上方'
+        else:
+            detail[f'{p}ma_state'] = '价在MA5下方'
 
     # 2) MACD 趋势
     macd = _macd(closes)
     if macd:
-        detail['macd_dif'] = round(macd[0], 3)
-        detail['macd_dea'] = round(macd[1], 3)
-        detail['macd_hist'] = round(macd[2], 3)
-        detail['macd_state'] = macd[3]
+        detail[f'{p}macd_dif'] = round(macd[0], 3)
+        detail[f'{p}macd_dea'] = round(macd[1], 3)
+        detail[f'{p}macd_hist'] = round(macd[2], 3)
+        detail[f'{p}macd_state'] = macd[3]
 
     # 3) RSI(14) 超买超卖
     rsi = _rsi(closes, 14)
     if rsi is not None:
-        detail['rsi14'] = round(rsi, 1)
+        detail[f'{p}rsi14'] = round(rsi, 1)
         if rsi > 70:
-            detail['rsi_state'] = '超买'
+            detail[f'{p}rsi_state'] = '超买'
         elif rsi < 30:
-            detail['rsi_state'] = '超卖'
+            detail[f'{p}rsi_state'] = '超卖'
         elif 45 <= rsi <= 65:
-            detail['rsi_state'] = '健康'
+            detail[f'{p}rsi_state'] = '健康'
         else:
-            detail['rsi_state'] = '中性'
+            detail[f'{p}rsi_state'] = '中性'
 
     # 4) KDJ 超买超卖
     kdj = _kdj(highs, lows, closes)
     if kdj:
-        detail['kdj_k'] = round(kdj[0], 1)
-        detail['kdj_d'] = round(kdj[1], 1)
-        detail['kdj_j'] = round(kdj[2], 1)
+        detail[f'{p}kdj_k'] = round(kdj[0], 1)
+        detail[f'{p}kdj_d'] = round(kdj[1], 1)
+        detail[f'{p}kdj_j'] = round(kdj[2], 1)
         if kdj[0] > 80:
-            detail['kdj_state'] = '超买'
+            detail[f'{p}kdj_state'] = '超买'
         elif kdj[0] < 20:
-            detail['kdj_state'] = '超卖'
+            detail[f'{p}kdj_state'] = '超卖'
         elif 40 <= kdj[0] <= 60:
-            detail['kdj_state'] = '健康'
+            detail[f'{p}kdj_state'] = '健康'
         elif 20 <= kdj[0] < 40:
-            detail['kdj_state'] = '偏弱'
+            detail[f'{p}kdj_state'] = '偏弱'
         else:
-            detail['kdj_state'] = '中性偏强'
+            detail[f'{p}kdj_state'] = '中性偏强'
 
     # 5) 布林带 BOLL(20,2)
     if ma20 is not None:
@@ -148,24 +166,24 @@ def compute_technical_detail(closes, highs, lows, volumes, latest_date=''):
         std = variance ** 0.5
         upper = mean + 2 * std
         lower = mean - 2 * std
-        detail['boll_upper'] = round(upper, 2)
-        detail['boll_mid'] = round(mean, 2)
-        detail['boll_lower'] = round(lower, 2)
+        detail[f'{p}boll_upper'] = round(upper, 2)
+        detail[f'{p}boll_mid'] = round(mean, 2)
+        detail[f'{p}boll_lower'] = round(lower, 2)
         if upper - lower > 0:
             pos = max(0.0, min(100.0, (closes[-1] - lower) / (upper - lower) * 100))
-            detail['boll_position'] = round(pos, 1)
+            detail[f'{p}boll_position'] = round(pos, 1)
             if pos > 90:
-                detail['boll_state'] = '触及上轨'
+                detail[f'{p}boll_state'] = '触及上轨'
             elif pos >= 70:
-                detail['boll_state'] = '上轨区'
+                detail[f'{p}boll_state'] = '上轨区'
             elif pos >= 50:
-                detail['boll_state'] = '中轨上方'
+                detail[f'{p}boll_state'] = '中轨上方'
             elif pos >= 30:
-                detail['boll_state'] = '中轨下方'
+                detail[f'{p}boll_state'] = '中轨下方'
             elif pos >= 10:
-                detail['boll_state'] = '下轨区'
+                detail[f'{p}boll_state'] = '下轨区'
             else:
-                detail['boll_state'] = '触及下轨'
+                detail[f'{p}boll_state'] = '触及下轨'
 
     # 6) 量能配合：最新量 / 20日均量
     if volumes and len(volumes) >= 20:
@@ -173,16 +191,16 @@ def compute_technical_detail(closes, highs, lows, volumes, latest_date=''):
         latest_vol = volumes[-1]
         if avg20 > 0 and latest_vol > 0:
             vr = latest_vol / avg20
-            detail['vol_ratio'] = round(vr, 2)
+            detail[f'{p}vol_ratio'] = round(vr, 2)
             if vr >= 1.8:
-                detail['vol_state'] = '明显放量'
+                detail[f'{p}vol_state'] = '明显放量'
             elif vr >= 1.3:
-                detail['vol_state'] = '温和放量'
+                detail[f'{p}vol_state'] = '温和放量'
             elif vr <= 0.7:
-                detail['vol_state'] = '明显缩量'
+                detail[f'{p}vol_state'] = '明显缩量'
             elif vr <= 0.85:
-                detail['vol_state'] = '温和缩量'
+                detail[f'{p}vol_state'] = '温和缩量'
             else:
-                detail['vol_state'] = '平量'
+                detail[f'{p}vol_state'] = '平量'
 
     return detail

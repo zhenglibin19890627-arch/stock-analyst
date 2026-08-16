@@ -1601,6 +1601,74 @@ def _save_holder_increase(stock_id: int, holder_increase):
 
 
 # ============================================================
+# 020R-48：周线/月线聚合（由日线 resample，供多周期技术面展示，暂不参评）
+# ============================================================
+
+
+def aggregate_period_klines(stock_id):
+    """由 raw_kline 日线聚合周线（ISO 自然周，周一~周五）与月线（自然月），幂等覆盖。
+
+    周/月线 K 线口径：open=首日开盘、high=区间最高、low=区间最低、close=末日收盘、
+    volume=区间合计、trade_date=区间最后一个交易日。
+    返回 (status, message)。
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT trade_date, open, high, low, close, volume FROM raw_kline '
+        'WHERE stock_id = ? ORDER BY trade_date ASC',
+        (stock_id,),
+    )
+    rows = cur.fetchall()
+    if len(rows) < 5:
+        conn.close()
+        return 'skipped', '日线不足5条，跳过周期聚合'
+
+    df = pd.DataFrame([dict(r) for r in rows])
+    df['trade_date'] = pd.to_datetime(df['trade_date'])
+    df['iso_year'] = df['trade_date'].dt.isocalendar()['year']
+    df['iso_week'] = df['trade_date'].dt.isocalendar()['week']
+    df['ym'] = df['trade_date'].dt.to_period('M')
+
+    weekly = (
+        df.groupby(['iso_year', 'iso_week'])
+        .agg(
+            open=('open', 'first'), high=('high', 'max'), low=('low', 'min'),
+            close=('close', 'last'), volume=('volume', 'sum'),
+            trade_date=('trade_date', 'last'),
+        )
+        .reset_index(drop=True)
+    )
+    monthly = (
+        df.groupby('ym')
+        .agg(
+            open=('open', 'first'), high=('high', 'max'), low=('low', 'min'),
+            close=('close', 'last'), volume=('volume', 'sum'),
+            trade_date=('trade_date', 'last'),
+        )
+        .reset_index(drop=True)
+    )
+
+    for table, wdf in (('raw_kline_weekly', weekly), ('raw_kline_monthly', monthly)):
+        for _, r in wdf.iterrows():
+            cur.execute(
+                f'INSERT OR REPLACE INTO {table} '
+                '(stock_id, trade_date, open, close, high, low, volume) '
+                'VALUES (?,?,?,?,?,?,?)',
+                (
+                    stock_id, str(r['trade_date'])[:10],
+                    float(r['open'] or 0), float(r['close'] or 0),
+                    float(r['high'] or 0), float(r['low'] or 0),
+                    float(r['volume'] or 0),
+                ),
+            )
+    conn.commit()
+    conn.close()
+    logger.info(f'[020R-48 周期聚合] stock_id={stock_id}: 周线{len(weekly)}根/月线{len(monthly)}根')
+    return 'success', f'周线{len(weekly)}根/月线{len(monthly)}根'
+
+
+# ============================================================
 # 020R-45：股东人数与机构持仓采集（A股专属，资金面-筹码结构）
 # ============================================================
 
@@ -5038,6 +5106,14 @@ def collect_stock_data(symbol, market, force_full=False):
             dimension='kline',
             traceback_str=traceback.format_exc(),
         )
+
+    # 020R-48：日线更新后同步聚合周线/月线（失败不阻塞主流程）
+    if stock_id:
+        try:
+            agg_status, agg_msg = aggregate_period_klines(stock_id)
+            results['kline_periods'] = (agg_status, agg_msg)
+        except Exception as e:
+            logger.warning(f'[{symbol}] 周/月线聚合异常(不阻塞): {e}')
 
     # 基本面
     if market == 'a_stock':

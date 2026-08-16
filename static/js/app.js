@@ -4341,6 +4341,8 @@
         if (['空头排列', '下轨区', '中轨下方', '偏弱'].indexOf(state) >= 0) return '#27ae60';
         if (state.indexOf('多头') >= 0 || state.indexOf('金叉') >= 0) return '#e74c3c';
         if (state.indexOf('空头') >= 0 || state.indexOf('死叉') >= 0) return '#27ae60';
+        if (/上方/.test(state)) return '#e74c3c';   // 020R-48：价在MA5上方
+        if (/下方/.test(state)) return '#27ae60';   // 020R-48：价在MA5下方
         if (state.indexOf('放量') >= 0) return '#e67e22';
         return '#666';
     }
@@ -4375,6 +4377,42 @@
         html += _row('量能', (td.vol_ratio != null ? ('量比 ' + td.vol_ratio) : null), td.vol_state);
         if (factors && factors.recent_trend) {
             html += _row('近期走势', String(factors.recent_trend), null);
+        }
+
+        // 020R-48：多周期参考（周线买卖点 / 月线大方向，暂不参评）
+        var hasPeriod = td.monthly_ma_state != null || td.weekly_ma_state != null ||
+            td.weekly_macd_state != null || td.weekly_rsi14 != null || td.weekly_boll_position != null;
+        if (hasPeriod) {
+            html += '<div style="font-size:11px;color:#999;margin:6px 0 2px;border-top:1px dashed #eee;padding-top:6px;">多周期参考（暂不参评）</div>';
+            // 月线大方向
+            if (td.monthly_ma_state != null) {
+                var mState = td.monthly_ma_state + (td.monthly_macd_state ? '/' + td.monthly_macd_state : '');
+                var mBody = null;
+                if (td.monthly_ma5 != null) {
+                    mBody = 'MA5 ' + td.monthly_ma5;
+                    if (td.monthly_ma10 != null) mBody += ' · MA10 ' + td.monthly_ma10;
+                }
+                html += _row('月线方向', mBody, mState);
+            } else {
+                html += _row('月线方向', '<span style="color:#bbb;font-weight:400;">数据不足（需5个月以上K线）</span>', null);
+            }
+            // 周线买卖点
+            if (td.weekly_ma_state != null) {
+                html += _row('周线均线',
+                    (td.weekly_ma10 != null ? ('MA10 ' + td.weekly_ma10 + ' · MA20 ' + td.weekly_ma20) : null),
+                    td.weekly_ma_state);
+            }
+            if (td.weekly_macd_state != null) {
+                html += _row('周线MACD',
+                    (td.weekly_macd_dif != null ? ('DIF ' + td.weekly_macd_dif + ' · DEA ' + td.weekly_macd_dea) : null),
+                    td.weekly_macd_state);
+            }
+            if (td.weekly_rsi14 != null) {
+                html += _row('周线RSI', String(td.weekly_rsi14), td.weekly_rsi_state);
+            }
+            if (td.weekly_boll_position != null) {
+                html += _row('周线布林', ('位置 ' + td.weekly_boll_position + '%'), td.weekly_boll_state);
+            }
         }
         return html;
     }

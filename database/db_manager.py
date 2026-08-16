@@ -310,6 +310,30 @@ def init_database():
     """)
 
     # ============================================================
+    # 6.8 周线/月线K线表 —— 020R-48（多周期技术面：由日线聚合，暂仅展示）
+    # ============================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS raw_kline_weekly (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stock_id INTEGER NOT NULL,
+            trade_date DATE NOT NULL,             -- 该周最后一个交易日
+            open REAL, close REAL, high REAL, low REAL, volume REAL,
+            UNIQUE(stock_id, trade_date),
+            FOREIGN KEY (stock_id) REFERENCES stocks(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS raw_kline_monthly (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stock_id INTEGER NOT NULL,
+            trade_date DATE NOT NULL,             -- 该月最后一个交易日
+            open REAL, close REAL, high REAL, low REAL, volume REAL,
+            UNIQUE(stock_id, trade_date),
+            FOREIGN KEY (stock_id) REFERENCES stocks(id)
+        )
+    """)
+
+    # ============================================================
     # 7. 消息面数据表 —— 公告、研报等
     # ============================================================
     cursor.execute("""
