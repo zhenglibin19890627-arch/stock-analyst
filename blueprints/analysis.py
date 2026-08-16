@@ -11,9 +11,11 @@ bp = Blueprint('analysis', __name__)
 
 
 def _technical_detail_for_stock(stock_id):
-    """020R-35/48：计算技术指标明细（日线六类 + 周线/月线多周期参考，均不参评）。
+    """020R-35/48B：计算技术指标明细（日线六类 + 周线/月线多周期，与评分引擎同口径）。
 
-    纯展示层增强：失败或数据不足时返回 None，不影响报告主流程。
+    注：本函数为纯展示层；周线/月线数据在评分引擎中已参评
+    （技术面 7 子项：月线方向 25% + 周线波段 45% + 日线择时 30%）。
+    失败或数据不足时返回 None，不影响报告主流程。
     """
     try:
         from modules.technical_detail import compute_technical_detail
@@ -40,7 +42,7 @@ def _technical_detail_for_stock(stock_id):
                     min_bars=20,
                 ) or {}
             )
-        # 020R-48：周线/月线多周期参考
+        # 020R-48B：周线/月线多周期（评分同口径）
         for table, prefix, min_bars in (
             ('raw_kline_weekly', 'weekly_', 20),
             ('raw_kline_monthly', 'monthly_', 5),

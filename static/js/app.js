@@ -4468,11 +4468,11 @@
             html += _row('近期走势', String(factors.recent_trend), null);
         }
 
-        // 020R-48：多周期参考（周线买卖点 / 月线大方向，暂不参评）
+        // 020R-48B：多周期评分区（月线方向 25% / 周线波段 45% / 日线择时 30%，与评分引擎同口径）
         var hasPeriod = td.monthly_ma_state != null || td.weekly_ma_state != null ||
             td.weekly_macd_state != null || td.weekly_rsi14 != null || td.weekly_boll_position != null;
         if (hasPeriod) {
-            html += '<div style="font-size:11px;color:#999;margin:6px 0 2px;border-top:1px dashed #eee;padding-top:6px;">多周期参考（暂不参评）</div>';
+            html += '<div style="font-size:11px;color:#999;margin:6px 0 2px;border-top:1px dashed #eee;padding-top:6px;">多周期评分（月线方向 25% · 周线波段 45% · 日线择时 30%）</div>';
             // 月线大方向
             if (td.monthly_ma_state != null) {
                 var mState = td.monthly_ma_state + (td.monthly_macd_state ? '/' + td.monthly_macd_state : '');
