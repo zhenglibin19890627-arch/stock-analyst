@@ -1,5 +1,13 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-17] 看门狗任务电源条件修复（021H，运维）
+
+- 现象：22:37 重启服务后看门狗未在 1 分钟内自动拉起（此前 09:07 自愈演练正常）。
+- 根因：计划任务 `StockAnalyst Watchdog` 带「仅接通电源时启动」（`DisallowStartIfOnBatteries=true`）——笔记本 18:08 后处于电池供电，每分钟巡检被整体跳过（schtasks 查询实证：Last Run Time 停在 18:08:01，Next Run Time 正常推进）。
+- 修复：导出任务 XML，将 `DisallowStartIfOnBatteries` / `StopIfGoingOnBatteries` 置 false 后 `schtasks /create /xml /f` 重建。
+- 实测：电池供电下杀进程 → 80 秒内 health 恢复 200（22:44:42 kill → 22:46:03 复活）。
+- 文档：AGENTS.md §4 服务自愈补充电源条件说明。
+
 ## [2026-08-17] 定时收盘批次默认强制重算 + 复用提示醒目化（021G，方案A）
 
 - 用户裁定方案 A：16:10 定时收盘批次默认强制重算；手动按钮保持"默认复用 + 勾选强制"。

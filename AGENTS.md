@@ -80,6 +80,7 @@ python app.py
 ### 服务自愈（Watchdog）
 
 - Windows 计划任务 **`StockAnalyst Watchdog`**（schtasks，`/SC MINUTE /MO 1`）**每分钟**静默检查一次 `127.0.0.1:5000`，服务不在则用 pythonw 无窗口方式自动拉起（`scripts/watchdog.py`，带端口守卫，幂等）。
+- 2026-08-17（021H）：修复任务电源条件——原任务带「仅接通电源时启动」，笔记本用电池供电时巡检被整体跳过（实测 18:08 后任务停摆、杀进程不复活）；已导出 XML 将 `DisallowStartIfOnBatteries=false` / `StopIfGoingOnBatteries=false` 后 `schtasks /create /xml /f` 重建，电池供电下自愈实测通过。
 - 效果：注销/关机后重新登录、服务被误杀、窗口被误关，均会在 **1 分钟内**自动恢复，无需人工干预；托盘图标仅作状态显示，服务存续不依赖它。
 - 2026-08-14 实测：注销再登录后由下一巡检刻度自动复活（实测演练：杀进程 → 1 分钟内 health 恢复 200）。
 - 注册命令（无空格路径问题，经 cmd 中转）：`schtasks /Create /TN "StockAnalyst Watchdog" /SC MINUTE /MO 1 /TR "\"<pythonw绝对路径>\" \"<项目绝对路径>\\scripts\\watchdog.py\"" /F`；查询/删除：`schtasks /query /tn "StockAnalyst Watchdog"` / `schtasks /delete /tn "StockAnalyst Watchdog" /f`。
