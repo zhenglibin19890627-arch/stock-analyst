@@ -152,8 +152,7 @@
     <div class="form-row" style="margin-bottom: 16px;">
         <input type="checkbox" id="selectAllStocks" onclick="toggleSelectAll()" style="margin-right:4px;">
         <label for="selectAllStocks" style="min-width:auto;font-size:13px;cursor:pointer;">全选</label>
-        <button class="btn btn-success btn-sm" onclick="loadStocks()">刷新列表</button>
-        <button class="btn btn-primary btn-sm" onclick="loadGroups()">刷新分组</button>
+        <button class="btn btn-success btn-sm" onclick="refreshStockList()" id="stockListRefreshBtn" title="刷新最新价并重载列表">🔄 刷新列表</button>
         <button class="btn btn-primary btn-sm" style="background:#8e44ad;" onclick="batchAnalyze()">⚡ 批量分析+评级</button>
     </div>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">

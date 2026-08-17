@@ -403,6 +403,28 @@
     }
 
     // ========== 加载股票列表 ==========
+    // 020R-61：刷新列表 = 刷新最新价（网络） + 重读列表（与持仓页「刷新价格」同源）
+    function refreshStockList() {
+        var btn = document.getElementById('stockListRefreshBtn');
+        if (btn) { btn.disabled = true; btn.textContent = '🔄 刷新中...'; }
+        fetch('/api/portfolio/refresh-prices', { method: 'POST' })
+            .then(function(r) { return safeJson(r); })
+            .then(function(data) {
+                if (data.success) {
+                    _showToast(data.message || '价格已刷新');
+                } else {
+                    _showToast('刷新失败：' + (data.message || '未知错误') + '，旧价格已保留');
+                }
+            })
+            .catch(function() {
+                _showToast('刷新失败：网络错误，旧价格已保留');
+            })
+            .finally(function() {
+                if (btn) { btn.disabled = false; btn.textContent = '🔄 刷新列表'; }
+                loadStocks();
+            });
+    }
+
     function loadStocks() {
         var url = '/api/stocks';
         if (currentWatchlistGroup) url += '?group_id=' + currentWatchlistGroup;
@@ -1305,119 +1327,54 @@
 
     function batchAnalyze() {
         var ids = [];
-        var symbols = [];
         document.querySelectorAll('.stock-cb:checked').forEach(function(cb) {
             ids.push(parseInt(cb.value));
-            var tr = cb.closest('tr');
-            var tds = tr ? tr.querySelectorAll('td') : [];
-            symbols.push(tds.length > 2 ? tds[2].textContent.trim() : ('ID:' + cb.value));
         });
         if (ids.length === 0) {
             alert('请先勾选要分析的股票');
             return;
         }
+        if (ids.length > 20) {
+            alert('单次最多批量处理20只股票（后端限制），请分批勾选');
+            return;
+        }
 
         var area = document.getElementById('collectArea');
         var total = ids.length;
-        var done = 0;
-        var results = [];
         var startTime = Date.now();
 
-        // B13-T2：渲染进度条 UI
+        // 020R-61：改走后端 /api/batch-analyze（采集+分析+评级+资金面批量预取+行业补取），
+        // 删除原前端手写"仅分析"串行循环；逐只执行中无实时进度，用静态进度 UI 说明
         area.innerHTML = '<div class="card"><div class="card-title">⚡ 批量分析与评级</div>' +
-            '<div style="margin:16px 0 8px;font-size:14px;color:#333;" id="batchProgressText">正在分析第 1/' + total + ' 只股票（代码：' + symbols[0] + '）...</div>' +
+            '<div style="margin:16px 0 8px;font-size:14px;color:#333;">正在处理 ' + total + ' 只股票（含数据采集，逐只执行，可能需要数分钟）...</div>' +
             '<div style="width:100%;height:22px;background:#e0e0e0;border-radius:11px;overflow:hidden;position:relative;">' +
-            '<div id="batchProgressBar" style="width:0%;height:100%;background:linear-gradient(90deg,#43a047,#66bb6a);border-radius:11px;transition:width 0.4s ease;"></div>' +
+            '<div id="batchProgressBar" style="width:30%;height:100%;background:repeating-linear-gradient(90deg,#43a047,#66bb6a 20px,#43a047 40px);border-radius:11px;"></div>' +
             '</div>' +
-            '<div style="margin-top:6px;font-size:12px;color:#888;" id="batchProgressPct">0%</div>' +
+            '<div style="margin-top:6px;font-size:12px;color:#888;" id="batchProgressPct">⏳ 逐只执行中，完成后自动显示结果</div>' +
             '</div>';
         area.scrollIntoView({ behavior: 'smooth' });
 
-        function updateProgress(idx) {
-            var pct = Math.round((done / total) * 100);
-            var bar = document.getElementById('batchProgressBar');
-            var txt = document.getElementById('batchProgressText');
-            var pctEl = document.getElementById('batchProgressPct');
-            if (bar) bar.style.width = pct + '%';
-            if (pctEl) pctEl.textContent = pct + '%';
-            if (txt && idx < total) {
-                txt.textContent = '正在分析第 ' + (idx + 1) + '/' + total + ' 只股票（代码：' + symbols[idx] + '）...';
-            }
-        }
-
-        function processNext(idx) {
-            if (idx >= total) { finishBatch(); return; }
-            updateProgress(idx);
-
-            fetch('/api/stocks/' + ids[idx] + '/analyze', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' }
-            })
+        fetch('/api/batch-analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ stock_ids: ids })
+        })
             .then(function(r) { return r.json(); })
             .then(function(data) {
+                var elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
                 if (data.success) {
-                    results.push({
-                        symbol: data.stock_code || symbols[idx],
-                        name: data.stock_name || '—',
-                        status: 'completed',
-                        rating: data.rating || '—',
-                        total_score: data.total_score,
-                        operation_suggestion: data.action_advice || '',
-                        rating_time: data.rating_date || ''
-                    });
+                    renderBatchResults(data, elapsed);
                 } else {
-                    results.push({
-                        symbol: symbols[idx],
-                        name: '—',
-                        status: 'failed',
-                        rating: null,
-                        total_score: null,
-                        error: data.message || '分析失败',
-                        rating_time: ''
-                    });
+                    area.innerHTML = '<div class="card"><div class="alert alert-error">批量分析失败：' +
+                        (data.message || '未知错误') + '</div></div>';
                 }
             })
             .catch(function(err) {
-                results.push({
-                    symbol: symbols[idx],
-                    name: '—',
-                    status: 'failed',
-                    rating: null,
-                    total_score: null,
-                    error: '请求失败: ' + err,
-                    rating_time: ''
-                });
+                area.innerHTML = '<div class="card"><div class="alert alert-error">请求失败：' + err + '</div></div>';
             })
             .finally(function() {
-                done++;
-                updateProgress(idx + 1);
-                processNext(idx + 1);
+                loadStocks();  // 完成后同步列表评分/价格
             });
-        }
-
-        function finishBatch() {
-            var elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-            var successCount = results.filter(function(r) { return r.status === 'completed'; }).length;
-            var bar = document.getElementById('batchProgressBar');
-            var txt = document.getElementById('batchProgressText');
-            var pctEl = document.getElementById('batchProgressPct');
-            if (bar) bar.style.width = '100%';
-            if (pctEl) pctEl.textContent = '100%';
-            if (txt) txt.textContent = '✅ 全部完成！';
-
-            // 复用 renderBatchResults 渲染结果表格
-            var batchData = {
-                success: true,
-                success_count: successCount,
-                total: total,
-                results: results
-            };
-            setTimeout(function() {
-                renderBatchResults(batchData, elapsed);
-            }, 600);
-        }
-
-        processNext(0);
     }
 
     function renderBatchResults(data, elapsed) {
