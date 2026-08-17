@@ -2048,6 +2048,7 @@ def fetch_holder_structure(symbol: str):
             'inst_shares': None,
             'inst_ratio': None,
             'inst_report_date': None,
+            'source': 'em',
         }
         # 机构持仓：六类机构持股汇总 / 总股本
         inst_shares = 0.0
@@ -2079,7 +2080,9 @@ def fetch_holder_structure(symbol: str):
 
 
 def _save_holder_structure(stock_id: int, data):
-    """020R-45：股东人数/机构持仓快照落库（按 stat_date 幂等，保留最近 12 期）。"""
+    """020R-45：股东人数/机构持仓快照落库（按 stat_date 幂等，保留最近 12 期）。
+    021I：新增 source 列（'em'=A股东财口径 / 'westock'=港股腾讯 shareholder 口径）。
+    """
     if not data or data.get('stat_date') is None:
         return
     conn = get_connection()
@@ -2087,11 +2090,12 @@ def _save_holder_structure(stock_id: int, data):
     cursor.execute(
         'INSERT OR REPLACE INTO holder_structure '
         '(stock_id, stat_date, holder_count, holder_count_change_pct, total_shares, '
-        'inst_shares, inst_ratio, inst_report_date) VALUES (?,?,?,?,?,?,?,?)',
+        'inst_shares, inst_ratio, inst_report_date, source) VALUES (?,?,?,?,?,?,?,?,?)',
         (
             stock_id, data['stat_date'], data.get('holder_count'),
             data.get('holder_count_change_pct'), data.get('total_shares'),
             data.get('inst_shares'), data.get('inst_ratio'), data.get('inst_report_date'),
+            data.get('source'),
         ),
     )
     cursor.execute(
@@ -2105,6 +2109,154 @@ def _save_holder_structure(stock_id: int, data):
         f'[020R-45 股东人数/机构持仓] stock_id={stock_id}, '
         f'holder_change={data.get("holder_count_change_pct")}, inst_ratio={data.get("inst_ratio")}'
     )
+
+
+# ============================================================
+# 021I：港股股东数据——腾讯 westock shareholder 命令
+# 覆盖：机构持仓（机构持仓统计块）+ 股东分布 + 机构增减持方向。
+# 股东人数（股东户数）：港交所不强制披露、腾讯亦无——港股该字段恒 None（缺失归零）。
+# ============================================================
+
+_HK_SHAREHOLDER_CACHE = {}  # {symbol: (ts, data)}，按股票代码分键（10 分钟 TTL）
+_HK_SHAREHOLDER_CACHE_TTL = 600  # 10 分钟
+
+
+def _quarter_to_date(period_str):
+    """'2026 Q2' → '2026-06-30'；无法识别时原样返回。"""
+    import re as _re
+
+    m = _re.match(r'^\s*(\d{4})\s*Q([1-4])\s*$', str(period_str or ''))
+    if not m:
+        return (str(period_str or '') or None)
+    year, q = int(m.group(1)), int(m.group(2))
+    day = 31 if q in (1, 4) else 30
+    return f'{year}-{q * 3:02d}-{day}'
+
+
+def _parse_westock_shareholder(text):
+    """021I：解析 shareholder 命令输出（含多张 Markdown 表）。
+
+    Returns: {'inst': {机构持仓统计行}, 'distribution': [...]} 或 None。
+    与 _parse_westock_markdown（只取第一张表）区分：按表头关键词定位。
+    """
+    lines = text.splitlines()
+    tables = []
+    cur = []
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith('|'):
+            cur.append(s)
+        elif cur:
+            tables.append(cur)
+            cur = []
+    if cur:
+        tables.append(cur)
+
+    result = {}
+    for tbl in tables:
+        if len(tbl) < 2:
+            continue
+        headers = [h.strip() for h in tbl[0].strip('|').split('|')]
+        data_lines = [ln_ for ln_ in tbl[1:] if not set(ln_) <= set('|-: ')]
+        if not data_lines:
+            continue
+        rows = [
+            dict(zip(headers, [c.strip() for c in ln_.strip('|').split('|')]))
+            for ln_ in data_lines
+            if len(ln_.strip('|').split('|')) == len(headers)
+        ]
+        if not rows:
+            continue
+        if 'holdingPct' in headers and 'holdingShares' in headers:
+            result['inst'] = rows[0]
+        elif 'institution' in headers:
+            result['distribution'] = rows
+    return result if (result.get('inst') or result.get('distribution')) else None
+
+
+def _fetch_shareholder_westock(symbol):
+    """021I：调用 westock shareholder 命令获取港股股东数据（按股票代码 10 分钟缓存）。
+
+    Returns: {'inst': dict, 'distribution': list} 或 None（接口失败/无数据静默降级）。
+    """
+    global _HK_SHAREHOLDER_CACHE
+    try:
+        code_key = str(symbol)
+        cached = _HK_SHAREHOLDER_CACHE.get(code_key)
+        if cached and (time.time() - cached[0]) < _HK_SHAREHOLDER_CACHE_TTL:
+            return cached[1]
+        # 021I：westock CLI 要求 5 位港股代码（hk03690），库内 4 位（HK3690）须左补零，
+        # 否则接口静默返回空（rc=0，无输出）。
+        code = str(symbol).replace('HK', '').replace('hk', '').zfill(5)
+        text = _westock_cli_query('shareholder', f'hk{code}')
+        if not text:
+            return None
+        parsed = _parse_westock_shareholder(text)
+        _HK_SHAREHOLDER_CACHE[code_key] = (time.time(), parsed)
+        if parsed is None:
+            logger.warning(f'[{symbol}] westock shareholder 输出无法解析: {text[:200]}')
+        return parsed
+    except Exception as e:
+        logger.warning(f'[{symbol}] westock shareholder 获取失败(静默降级): {e}')
+        return None
+
+
+def _num_float(v):
+    """安全数值转换（含 NaN 防护），失败返回 None。"""
+    try:
+        f = float(str(v).replace(',', ''))
+        return f if f == f else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_holder_structure_hk(symbol):
+    """021I：港股机构持仓（腾讯 shareholder 机构持仓统计块）。
+
+    股东人数港股无披露源 → holder_count / holder_count_change_pct 恒 None。
+    stat_date = 机构持仓报告期（季度末），与 A股户数截止日同列共存。
+    Returns: dict（source='westock'）或 None。
+    """
+    parsed = _fetch_shareholder_westock(symbol)
+    if not parsed or not parsed.get('inst'):
+        return None
+    inst = parsed['inst']
+    inst_shares = _num_float(inst.get('holdingShares'))
+    inst_ratio = _num_float(inst.get('holdingPct'))
+    if inst_shares is None and inst_ratio is None:
+        return None
+    report_date = _quarter_to_date(inst.get('reportingPeriod'))
+    return {
+        'stat_date': report_date,
+        'holder_count': None,
+        'holder_count_change_pct': None,
+        'total_shares': None,
+        'inst_shares': round(inst_shares, 2) if inst_shares is not None else None,
+        'inst_ratio': round(inst_ratio, 2) if inst_ratio is not None else None,
+        'inst_report_date': report_date,
+        'source': 'westock',
+    }
+
+
+def _fetch_holder_increase_hk(symbol):
+    """021I：港股股东行为——季度级机构增减持方向（腾讯 shareholder）。
+
+    三态语义（与 A股 020R-44 对齐；粒度=季度而非30天）：
+        True  = 近季机构净增持（changeShares>0 或 instIncreaseCount>0）
+        False = 有数据且近季无机构净增持（净减持或不变）
+        None  = 接口不可用/无机构持仓统计（数据缺失，权重归零）
+    """
+    parsed = _fetch_shareholder_westock(symbol)
+    if not parsed or not parsed.get('inst'):
+        return None
+    inst = parsed['inst']
+    change = _num_float(inst.get('changeShares'))
+    inc_count = _num_float(inst.get('instIncreaseCount'))
+    if change is None and inc_count is None:
+        return None
+    if (change is not None and change > 0) or (inc_count is not None and inc_count > 0):
+        return True
+    return False
 
 
 # ============================================================
@@ -5517,6 +5669,20 @@ def collect_stock_data(symbol, market, force_full=False):
                 dimension='fundamental',
                 traceback_str=traceback.format_exc(),
             )
+
+        # 021I：港股股东数据——机构持仓/机构增减持（腾讯 westock shareholder，失败静默降级）
+        try:
+            holder_val = _fetch_holder_increase_hk(symbol)
+            _save_holder_increase(stock_id, holder_val)
+            results['holder_increase'] = ('success', f'holder_increase={holder_val}')
+            hs_data = _fetch_holder_structure_hk(symbol)
+            _save_holder_structure(stock_id, hs_data)
+            results['holder_structure'] = (
+                'success',
+                f'inst_ratio={hs_data.get("inst_ratio") if hs_data else None}',
+            )
+        except Exception as e:
+            logger.warning(f'[{symbol}] 港股股东数据采集异常(不阻塞): {e}')
 
     # 资金面（A股和港股统一用东方财富push2接口）
     # 红线：fetch_capital_flow 不加 force_full 参数（同日跳过基于已有真实数据，不重复采集）

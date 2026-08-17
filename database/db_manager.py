@@ -1186,6 +1186,8 @@ def _migrate_columns(cursor):
         # 020O: 资金面表新增全资金净流入列（腾讯 hkfund TotalNetFlow，主力+散户主动净额；
         # 仅港股有值——A股 asfund 散户为被动镜像、全口径恒等0，无此数据）
         ('raw_capital_flow', 'total_net_inflow', 'REAL'),
+        # 021I: 股东人数/机构持仓表新增数据来源标记列（'em'=A股东财口径；'westock'=港股腾讯 shareholder；NULL=存量）
+        ('holder_structure', 'source', 'TEXT DEFAULT NULL'),
         # 020R-51: 评级历史表新增引擎版本列（回测报告按引擎分层统计；历史行保持 NULL）
         ('ratings_history', 'engine_version', 'TEXT'),
     ]

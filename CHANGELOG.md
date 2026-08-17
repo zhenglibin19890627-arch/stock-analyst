@@ -1,5 +1,18 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-17] 港股股东数据接入：机构持仓/机构增减持（腾讯 westock shareholder，021I）
+
+- 用户要求：研究港股「机构持仓/股东人数/股东行为」三数据的获取方法并实施（方案已批）。
+- 调研结论：腾讯 westock CLI `shareholder` 命令（"股东研究 A股/港股"）对港股返回三大块——大股东名单、股东分布（机构类别分解）、**机构持仓统计**（holdingPct/holdingShares/instCount/instIncreaseCount/changeShares/reportingPeriod）；`buyback`（回购）命令存在但实测区间查询均返回空（接口未生效，弃用）；股东人数（股东户数）港交所不强制披露、腾讯/akshare 均无——保持数据缺失归零。
+- 实施：
+  - `data_collector.py` 新增 `_fetch_shareholder_westock`（10 分钟缓存）/`_parse_westock_shareholder`（多表解析）/`_quarter_to_date`（"2026 Q2"→2026-06-30）/`_fetch_holder_structure_hk`（机构持仓→inst_ratio/inst_shares，stat_date=季度末）/`_fetch_holder_increase_hk`（股东行为三态：True=近季机构净增持/False=无净增持/None=接口失败）；港股采集分支挂接两项采集。
+  - `holder_structure` 表新增 `source` 列（'em'=A股东财口径 / 'westock'=港股腾讯口径，幂等 ALTER 带默认值）。
+  - 语义说明：港股股东行为=**季度级**机构增减持（非 A股 30 天董监高口径）；展示层口径差异已注明。
+  - `scoring_engine.py`/`data_contract.py` 仅更新注释/描述文案（"A股专属"→港股经腾讯支持），**评分逻辑、子项权重、校准档位零改动**（豁免已登记 RED_LINES §6）。
+- 影响：6 只港股机构持仓子项（资金面权重 0.20）从"缺失归零"变为参与评分，下次报告重算后港股资金面分数将变化。
+- 测试：`tests/test_data_collector.py` 新增 TestHkShareholder 5 项（解析/季度映射/机构持仓/三态/落库 source）。
+- 验证：pytest 全绿；ruff 通过。
+
 ## [2026-08-17] 看门狗任务电源条件修复（021H，运维）
 
 - 现象：22:37 重启服务后看门狗未在 1 分钟内自动拉起（此前 09:07 自愈演练正常）。

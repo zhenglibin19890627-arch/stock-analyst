@@ -219,9 +219,9 @@ CAPITAL_SUBITEMS: list[SubItem] = [
         'zero',  # 019T T2: C类(keep_default 填充) → A类(归零)；缺失=无信息，不占权重
     ),
     SubItem('杠杆资金', 'margin_capital', ['margin_balance_chg'], 0.20, 'reduce'),
-    # 020R-45 新增：机构持仓（六类机构持股汇总/总股本，A股专属，缺失归零）
+    # 020R-45/021I：机构持仓（A股东财六类机构汇总；港股腾讯 shareholder 机构合计；缺失归零）
     SubItem('机构持仓', 'inst_hold', ['institution_hold_ratio'], 0.20, 'zero'),
-    # 020R-45 新增：股东人数（户数环比，筹码集中度，A股专属，缺失归零）
+    # 020R-45：股东人数（户数环比，筹码集中度，A股专属——港交所无统一披露源，港股缺失归零）
     SubItem('股东人数', 'holder_count', ['holder_count_change_pct'], 0.10, 'zero'),
 ]
 
@@ -947,9 +947,9 @@ def score_margin_capital(data: StockData) -> tuple[float, dict]:
 
 
 def score_inst_hold(data: StockData) -> tuple[float, dict]:
-    """机构持仓子项评分：机构持仓比例（六类机构持股汇总/总股本，020R-45）
+    """机构持仓子项评分：机构持仓比例（020R-45 A股六类机构 / 021I 港股腾讯机构合计）
 
-    缺失返回中性 50，degradation=zero → 缺失时子权重归零（A股专属字段）。
+    缺失返回中性 50，degradation=zero → 缺失时子权重归零。
     """
     ratio = data.institution_hold_ratio
     if ratio is None:
@@ -971,7 +971,7 @@ def score_inst_hold(data: StockData) -> tuple[float, dict]:
 def score_holder_count(data: StockData) -> tuple[float, dict]:
     """股东人数子项评分：户数环比变化（正=户数增加/筹码分散，020R-45）
 
-    缺失返回中性 50，degradation=zero → 缺失时子权重归零（A股专属字段）。
+    缺失返回中性 50，degradation=zero → 缺失时子权重归零（港股无股东户数披露源，恒缺失归零）。
     """
     chg = data.holder_count_change_pct
     if chg is None:

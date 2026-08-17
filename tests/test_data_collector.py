@@ -732,3 +732,117 @@ class TestValuationTencentFallback:
         assert row['trade_date'] == '2026-08-14'
         assert row['source'] == 'tencent'
         assert row['trade_date'] == '2026-08-14'  # 交易日戳记 = 最新K线日期，不盖周末
+
+
+# ============================================================
+# 021I：港股股东数据（腾讯 westock shareholder）
+# ============================================================
+
+_SHAREHOLDER_MD = """#### hk03690 美团-W (2026-08-17)
+
+**持股股东信息**
+
+| name | shares | pct |
+| --- | --- | --- |
+| Xing Wang | 563170264 | 9.12 |
+
+**股东分布**
+
+| institution | shares | pct |
+| --- | --- | --- |
+| 传统投资管理 | 1846897134 | 29.92 |
+
+**机构持仓统计**
+
+| reportingPeriod | holdingPct | instCount | instIncreaseCount | holdingShares | changeShares |
+| --- | --- | --- | --- | --- | --- |
+| 2026 Q2 | 31.61 | 404 | -19 | 1950818132 | -23088791 |
+"""
+
+_SHAREHOLDER_MD_INCREASE = """#### hk03690 美团-W (2026-08-17)
+
+**机构持仓统计**
+
+| reportingPeriod | holdingPct | instCount | instIncreaseCount | holdingShares | changeShares |
+| --- | --- | --- | --- | --- | --- |
+| 2026 Q2 | 31.61 | 404 | 3 | 1950818132 | 5000000 |
+"""
+
+
+class TestHkShareholder:
+    """021I：westock shareholder 解析 + 港股机构持仓/股东行为三态"""
+
+    def _reset_cache(self, monkeypatch):
+        monkeypatch.setattr(dc, '_HK_SHAREHOLDER_CACHE', {})
+
+    def test_parse_shareholder(self):
+        parsed = dc._parse_westock_shareholder(_SHAREHOLDER_MD)
+        assert parsed is not None and parsed.get('inst')
+        assert parsed['inst']['holdingPct'] == '31.61'
+        assert parsed['inst']['reportingPeriod'] == '2026 Q2'
+        assert parsed['distribution'] and parsed['distribution'][0]['institution'] == '传统投资管理'
+
+    def test_quarter_to_date(self):
+        assert dc._quarter_to_date('2026 Q2') == '2026-06-30'
+        assert dc._quarter_to_date('2025 Q4') == '2025-12-31'
+        assert dc._quarter_to_date(' 2026 Q1 ') == '2026-03-31'
+        assert dc._quarter_to_date('2026 Q3') == '2026-09-30'
+        assert dc._quarter_to_date('未知') == '未知'
+
+    def test_holder_structure_hk(self, monkeypatch):
+        self._reset_cache(monkeypatch)
+        captured = {}
+
+        def fake_cli(cmd, code, date_str=''):
+            captured['code'] = code
+            return _SHAREHOLDER_MD
+
+        monkeypatch.setattr(dc, '_westock_cli_query', fake_cli)
+        data = dc._fetch_holder_structure_hk('HK3690')
+        assert captured['code'] == 'hk03690', '4位库内代码须左补零为5位'
+        assert data['inst_ratio'] == 31.61
+        assert data['inst_shares'] == 1950818132.0
+        assert data['stat_date'] == '2026-06-30'
+        assert data['holder_count'] is None
+        assert data['holder_count_change_pct'] is None
+        assert data['source'] == 'westock'
+
+    def test_holder_increase_hk_three_states(self, monkeypatch):
+        # True：机构净增持（changeShares>0 且增持机构数>0）
+        self._reset_cache(monkeypatch)
+        monkeypatch.setattr(dc, '_westock_cli_query', lambda cmd, code, date_str='': _SHAREHOLDER_MD_INCREASE)
+        assert dc._fetch_holder_increase_hk('HK3690') is True
+        # False：机构净减持（changeShares<0）
+        self._reset_cache(monkeypatch)
+        monkeypatch.setattr(dc, '_westock_cli_query', lambda cmd, code, date_str='': _SHAREHOLDER_MD)
+        assert dc._fetch_holder_increase_hk('HK3690') is False
+        # None：接口失败
+        self._reset_cache(monkeypatch)
+        monkeypatch.setattr(dc, '_westock_cli_query', lambda cmd, code, date_str='': None)
+        assert dc._fetch_holder_increase_hk('HK3690') is None
+
+    def test_save_holder_structure_hk(self, tmp_path, monkeypatch):
+        db_file = tmp_path / 'hs_hk.db'
+        monkeypatch.setattr(db_manager, 'DB_PATH', str(db_file))
+        monkeypatch.setattr(db_manager, 'BACKUP_DIR', str(tmp_path / 'backups'))
+        db_manager.init_database()
+        conn = db_manager.get_connection()
+        conn.execute("INSERT INTO stocks (symbol, market, name) VALUES ('HK3690', 'hk_stock', '美团-W')")
+        conn.commit()
+        conn.close()
+
+        dc._save_holder_structure(
+            1,
+            {
+                'stat_date': '2026-06-30',
+                'inst_ratio': 31.61,
+                'inst_shares': 1950818132.0,
+                'inst_report_date': '2026-06-30',
+                'source': 'westock',
+            },
+        )
+        conn = db_manager.get_connection()
+        row = conn.execute('SELECT inst_ratio, source FROM holder_structure WHERE stock_id=1').fetchone()
+        conn.close()
+        assert row['inst_ratio'] == 31.61
+        assert row['source'] == 'westock'
