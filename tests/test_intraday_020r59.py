@@ -69,20 +69,28 @@ class TestIntradaySession:
 
 class TestIntradayKlineRefresh:
     def test_refresh_today_bar_in_session(self, idb, monkeypatch):
-        """盘中时段：刷新今日 bar，历史不动，保留既有 amount"""
+        """盘中时段：腾讯行情一个请求刷新今日 bar，历史不动，保留既有 amount"""
         _patch_now(monkeypatch)  # 周四 10:30
-        df = pd.DataFrame(
-            {
-                '日期': ['2026-08-12', '2026-08-13'],
-                '开盘': [9.0, 9.6],
-                '收盘': [9.5, 11.2],
-                '最高': [9.8, 11.5],
-                '最低': [8.9, 9.5],
-                '成交量': [1000, 900],
-            }
-        )
-        df['涨跌幅'] = df['收盘'].pct_change() * 100
-        monkeypatch.setattr(dc, '_fetch_kline_tencent', lambda s, m: df)
+
+        parts = [''] * 88
+        parts[0] = 'v_sz002352="1'
+        parts[1] = '顺丰控股'
+        parts[2] = '002352'
+        parts[3] = '32.46'  # 现价
+        parts[4] = '32.74'  # 昨收
+        parts[5] = '32.72'  # 今开
+        parts[6] = '77746'  # 成交量
+        parts[33] = '32.79'  # 最高
+        parts[34] = '32.44'  # 最低
+        quote_text = '~'.join(parts)
+
+        class _FakeResp:
+            encoding = None
+
+            def __init__(self, text):
+                self.text = text
+
+        monkeypatch.setattr(dc, '_http_get', lambda url: _FakeResp(quote_text))
 
         status, msg = dc.fetch_kline('600276', 'a_stock')
         assert status == 'success'
@@ -90,23 +98,101 @@ class TestIntradayKlineRefresh:
 
         conn = idb.get_connection()
         row = conn.execute(
-            "SELECT close, amount FROM raw_kline WHERE stock_id=1 AND trade_date='2026-08-13'"
+            "SELECT close, pct_change, amount FROM raw_kline WHERE stock_id=1 AND trade_date='2026-08-13'"
         ).fetchone()
         n = conn.execute('SELECT COUNT(*) FROM raw_kline WHERE stock_id=1').fetchone()[0]
         conn.close()
-        assert row['close'] == 11.2  # 今日 bar 已更新
-        assert row['amount'] == 4000000  # amount 保留（腾讯接口不提供）
+        assert row['close'] == 32.46  # 今日 bar 已更新（腾讯行情现价）
+        assert row['pct_change'] == pytest.approx(-0.86, abs=0.01)  # (32.46-32.74)/32.74
+        assert row['amount'] == 4000000  # amount 保留
         assert n == 2  # 历史数据未动
 
     def test_skip_out_of_session(self, idb, monkeypatch):
-        """非盘中时段（如 20:00）：保持同日跳过，不重拉腾讯K线"""
+        """非盘中时段（如 20:00）：保持同日跳过，不重拉腾讯行情"""
         _patch_now(monkeypatch, hour=20, minute=0)
 
         def _boom(*a, **k):
-            raise AssertionError('非盘中不应重拉腾讯K线')
+            raise AssertionError('非盘中不应重拉腾讯行情')
 
-        monkeypatch.setattr(dc, '_fetch_kline_tencent', _boom)
+        monkeypatch.setattr(dc, '_http_get', _boom)
 
         status, msg = dc.fetch_kline('600276', 'a_stock')
         assert status == 'success'
         assert '同日跳过' in msg
+
+
+class TestSentimentIntraday020R60:
+    def _seed_today_news(self, idb):
+        conn = idb.get_connection()
+        conn.execute(
+            "INSERT INTO news_sentiment (stock_id, news_date, avg_sentiment, total_count) "
+            "VALUES (1, '2026-08-13', 0.3, 10)"
+        )
+        conn.commit()
+        conn.close()
+
+    def test_intraday_bypasses_skip(self, idb, monkeypatch):
+        """盘中时段：当日已有消息面记录也重采（午间公告进盘中快报）"""
+        _patch_now(monkeypatch)  # 周四 10:30
+        self._seed_today_news(idb)
+
+        import modules.news_collector as nc
+
+        monkeypatch.setattr(nc, 'collect_news', lambda *a, **k: ('success', '盘中重采成功'))
+        status, msg = dc.fetch_sentiment('600276', 'a_stock')
+        assert status == 'success'
+        assert '盘中重采成功' in msg
+
+    def test_out_of_session_skips(self, idb, monkeypatch):
+        """非盘中：当日已有记录 → 同日跳过，不重采"""
+        _patch_now(monkeypatch, hour=20, minute=0)
+        self._seed_today_news(idb)
+
+        import modules.news_collector as nc
+
+        def _boom(*a, **k):
+            raise AssertionError('非盘中不应重采消息面')
+
+        monkeypatch.setattr(nc, 'collect_news', _boom)
+        status, msg = dc.fetch_sentiment('600276', 'a_stock')
+        assert status == 'success'
+        assert '当日跳过' in msg
+
+
+class TestForecastExpressDayGate020R60:
+    def _seed_status(self, idb, dimension):
+        conn = idb.get_connection()
+        conn.execute(
+            "INSERT INTO data_status (stock_id, dimension, status, message, fetched_at) "
+            "VALUES (1, ?, 'success', 'x', datetime('now', 'localtime'))",
+            (dimension,),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_forecast_day_gate(self, idb, monkeypatch):
+        self._seed_status(idb, 'forecast')
+
+        def _boom(*a, **k):
+            raise AssertionError('当日已采集不应再查全市场预告表')
+
+        monkeypatch.setattr(dc, '_get_forecast_df_for_period', _boom)
+        status, msg = dc.collect_forecast(1, '600276', 'a_stock')
+        assert status == 'success'
+        assert '同日跳过' in msg
+
+    def test_express_day_gate(self, idb, monkeypatch):
+        self._seed_status(idb, 'express')
+        monkeypatch.setattr(
+            dc, '_get_express_df_for_period',
+            lambda p: (_ for _ in ()).throw(AssertionError('当日已采集不应再查全市场快报表')),
+        )
+        status, msg = dc.collect_express(1, '600276', 'a_stock')
+        assert status == 'success'
+        assert '同日跳过' in msg
+
+    def test_forecast_no_record_proceeds(self, idb, monkeypatch):
+        monkeypatch.setattr(dc, '_get_forecast_df_for_period', lambda p: pd.DataFrame())
+        status, msg = dc.collect_forecast(1, '600276', 'a_stock')
+        assert status == 'success'
+        assert '暂无' in msg

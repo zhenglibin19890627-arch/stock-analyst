@@ -862,20 +862,46 @@ def _is_intraday_session(market='a_stock'):
 
 
 def _refresh_kline_today_bar(symbol, market, stock_id, today_str):
-    """020R-59：仅刷新今日这根（未收盘）K线——INSERT OR REPLACE 当日行，不动历史。
+    """020R-60：用腾讯实时行情一个请求刷新今日bar（不再下载历史K线）。
 
-    返回 True=已刷新今日bar；False=今日无新bar（未开盘/休市/接口无今日数据）。
+    字段（A股/港股同构，2026-08-17 实测）：[3]现价 [4]昨收 [5]今开
+    [6]成交量（A股=手/港股=股，与 fqkline 同单位）[33]最高 [34]最低。
+    返回 True=已刷新今日bar；False=无有效行情（未开盘/休市/接口异常）。
     """
-    df = _fetch_kline_tencent(symbol, market)
-    if df is None or df.empty:
+    prefix, code = _get_tencent_prefix(symbol, market)
+    try:
+        resp = _http_get(f'https://qt.gtimg.cn/q={prefix}{code}')
+        resp.encoding = 'gbk'
+        parts = resp.text.split('~')
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f'[{symbol}] 腾讯行情获取失败(保持旧bar): {e}')
         return False
-    today_rows = df[df['日期'].astype(str).str[:10] == today_str]
-    if today_rows.empty:
+
+    def _f(i):
+        try:
+            s = parts[i].strip().strip('"').strip(';')
+            return float(s) if s else None
+        except (ValueError, IndexError):
+            return None
+
+    if len(parts) < 35:
         return False
-    r = today_rows.iloc[-1]
+    now_price = _f(3)
+    prev_close = _f(4)
+    open_p = _f(5)
+    volume = _f(6)
+    high_p = _f(33)
+    low_p = _f(34)
+    if not now_price or not open_p or not high_p or not low_p:
+        return False
+
+    pct = None
+    if prev_close and prev_close > 0:
+        pct = round((now_price - prev_close) / prev_close * 100, 2)
+
     conn = get_connection()
     try:
-        # 保留既有行的 amount/turnover（腾讯接口不提供，避免 REPLACE 清空）
+        # 保留既有行的 amount/turnover（行情接口的成交额单位与库内口径未统一，不覆盖）
         existing = conn.execute(
             'SELECT amount, turnover FROM raw_kline WHERE stock_id=? AND trade_date=?',
             (stock_id, today_str),
@@ -887,20 +913,20 @@ def _refresh_kline_today_bar(symbol, market, stock_id, today_str):
             (
                 stock_id,
                 today_str,
-                _safe_num(r.get('开盘')),
-                _safe_num(r.get('收盘')),
-                _safe_num(r.get('最高')),
-                _safe_num(r.get('最低')),
-                _safe_num(r.get('成交量')),
+                open_p,
+                now_price,
+                high_p,
+                low_p,
+                volume,
                 existing['amount'] if existing else None,
                 existing['turnover'] if existing else None,
-                _safe_num(r.get('涨跌幅')),
+                pct,
             ),
         )
         conn.commit()
     finally:
         conn.close()
-    logger.info(f'[{symbol}] 盘中刷新今日K线 {today_str} close={r.get("收盘")}')
+    logger.info(f'[{symbol}] 盘中刷新今日K线(腾讯行情) {today_str} close={now_price}')
     return True
 
 
@@ -1225,16 +1251,42 @@ def _get_forecast_df_for_period(period):
         return None
 
 
+def _dimension_done_today(stock_id, dimension):
+    """020R-60：该维度今日是否已有采集记录（success/skipped 均视为已完成）。
+
+    用于盘中不变的数据维度（业绩预告/快报）加"当日门控"，
+    避免盘中重复点击/盘中快报每次都重复查询全市场表。
+    """
+    try:
+        conn = get_connection()
+        today = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
+        row = conn.execute(
+            'SELECT 1 FROM data_status WHERE stock_id=? AND dimension=? AND fetched_at LIKE ? LIMIT 1',
+            (stock_id, dimension, today + '%'),
+        ).fetchone()
+        conn.close()
+        return bool(row)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def collect_forecast(stock_id, symbol, market='a_stock'):
     """采集单只股票业绩预告（东财），写入 raw_forecast。
 
     港股无东财业绩预告数据，跳过。
     按报告期（今年中报→一季报→去年年报）逐期尝试，写入全部命中的预告行。
+    020R-60：当日门控——预告结果日内不变（新公告通常盘后发布）。
     返回 (status, message)。
     """
     if market != 'a_stock':
         save_data_status(stock_id, 'forecast', 'skipped', '港股无东财业绩预告数据')
         return 'skipped', '港股无东财业绩预告数据'
+
+    # 020R-60：当日已采集过（含 skipped）→ 直接跳过
+    if _dimension_done_today(stock_id, 'forecast'):
+        msg = '同日跳过(业绩预告当日已采集)'
+        save_data_status(stock_id, 'forecast', 'success', msg)
+        return 'success', msg
 
     try:
         written = 0
@@ -1325,11 +1377,18 @@ def collect_express(stock_id, symbol, market='a_stock'):
 
     港股无东财业绩快报数据，跳过。
     按报告期（今年中报→一季报→去年年报）逐期尝试，写入全部命中的快报行。
+    020R-60：当日门控——快报结果日内不变。
     返回 (status, message)。
     """
     if market != 'a_stock':
         save_data_status(stock_id, 'express', 'skipped', '港股无东财业绩快报数据')
         return 'skipped', '港股无东财业绩快报数据'
+
+    # 020R-60：当日已采集过（含 skipped）→ 直接跳过
+    if _dimension_done_today(stock_id, 'express'):
+        msg = '同日跳过(业绩快报当日已采集)'
+        save_data_status(stock_id, 'express', 'success', msg)
+        return 'success', msg
 
     try:
         written = 0
@@ -5226,7 +5285,7 @@ def fetch_sentiment(symbol, market, force_full=False):
     if not stock_id:
         return 'failed', f'数据库中未找到股票 {symbol}'
 
-    # 011增量：当日跳过
+    # 011增量：当日跳过（020R-60：盘中时段旁路——午间公告/新闻可进盘中快报）
     if not force_full:
         try:
             today_str = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
@@ -5239,7 +5298,7 @@ def fetch_sentiment(symbol, market, force_full=False):
             )
             row = cursor_chk.fetchone()
             conn_chk.close()
-            if row and row['cnt'] > 0:
+            if row and row['cnt'] > 0 and not _is_intraday_session(market):
                 skip_msg = f'当日跳过(消息面已有{row["cnt"]}条记录)'
                 save_data_status(stock_id, 'sentiment', 'success', skip_msg)
                 logger.info(f'[{symbol}] {skip_msg}')
