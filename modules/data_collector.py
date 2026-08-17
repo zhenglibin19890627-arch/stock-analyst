@@ -846,6 +846,64 @@ def _fetch_kline_tencent(symbol, market):
     return df
 
 
+def _is_intraday_session(market='a_stock'):
+    """020R-59：是否处于盘中交易时段（周一~周五，不含节假日感知）。
+
+    A股：9:30-11:30 / 13:00-15:00；港股：9:30-12:00 / 13:00-16:00。
+    节假日无法感知：节假日命中时段时刷新会拿到上一交易日数据（无今日行→安全跳过）。
+    """
+    now = datetime.now(_CN_TZ)
+    if now.weekday() >= 5:
+        return False
+    hm = now.hour * 60 + now.minute
+    if market == 'hk_stock':
+        return (9 * 60 + 30 <= hm <= 12 * 60) or (13 * 60 <= hm <= 16 * 60)
+    return (9 * 60 + 30 <= hm <= 11 * 60 + 30) or (13 * 60 <= hm <= 15 * 60)
+
+
+def _refresh_kline_today_bar(symbol, market, stock_id, today_str):
+    """020R-59：仅刷新今日这根（未收盘）K线——INSERT OR REPLACE 当日行，不动历史。
+
+    返回 True=已刷新今日bar；False=今日无新bar（未开盘/休市/接口无今日数据）。
+    """
+    df = _fetch_kline_tencent(symbol, market)
+    if df is None or df.empty:
+        return False
+    today_rows = df[df['日期'].astype(str).str[:10] == today_str]
+    if today_rows.empty:
+        return False
+    r = today_rows.iloc[-1]
+    conn = get_connection()
+    try:
+        # 保留既有行的 amount/turnover（腾讯接口不提供，避免 REPLACE 清空）
+        existing = conn.execute(
+            'SELECT amount, turnover FROM raw_kline WHERE stock_id=? AND trade_date=?',
+            (stock_id, today_str),
+        ).fetchone()
+        conn.execute(
+            'INSERT OR REPLACE INTO raw_kline '
+            '(stock_id, trade_date, open, close, high, low, volume, amount, turnover, pct_change, data_source) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)',
+            (
+                stock_id,
+                today_str,
+                _safe_num(r.get('开盘')),
+                _safe_num(r.get('收盘')),
+                _safe_num(r.get('最高')),
+                _safe_num(r.get('最低')),
+                _safe_num(r.get('成交量')),
+                existing['amount'] if existing else None,
+                existing['turnover'] if existing else None,
+                _safe_num(r.get('涨跌幅')),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info(f'[{symbol}] 盘中刷新今日K线 {today_str} close={r.get("收盘")}')
+    return True
+
+
 def fetch_kline(symbol, market, force_full=False):
     """
     采集K线数据并存入数据库。A股和港股统一使用此函数。
@@ -870,6 +928,17 @@ def fetch_kline(symbol, market, force_full=False):
                 last_date = str(row['last_date'])[:10]
                 today_str = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
                 if last_date >= today_str:
+                    # 020R-59：盘中时段刷新当日未收盘 bar（不重拉历史），
+                    # 使一键分析/盘中快报在交易时段内每次都能拿到最新盘中价
+                    if _is_intraday_session(market):
+                        try:
+                            if _refresh_kline_today_bar(symbol, market, stock_id, today_str):
+                                save_data_status(
+                                    stock_id, 'kline', 'success', f'盘中刷新今日K线({today_str})'
+                                )
+                                return 'success', f'盘中刷新今日K线({today_str})'
+                        except Exception as e:  # noqa: BLE001 —— 刷新失败保持旧bar，走原跳过
+                            logger.warning(f'[{symbol}] 盘中刷新今日K线失败(保持旧bar): {e}')
                     skip_msg = f'同日跳过(K线已有{last_date}数据)'
                     save_data_status(stock_id, 'kline', 'success', skip_msg)
                     logger.info(f'[{symbol}] {skip_msg}')
@@ -4192,7 +4261,9 @@ def fetch_capital_flow(symbol, market):
     )
     pre_cnt = cursor_pre.fetchone()['cnt']
     conn_pre.close()
-    if pre_cnt > 0:
+    # 020R-59：盘中时段不跳过——主源路径会 UPSERT 当日行（盘中累计值随点击时刻刷新）
+    intraday_refresh = _is_intraday_session(market)
+    if pre_cnt > 0 and not intraday_refresh:
         skip_msg = f'同日跳过(已有真实资金流数据,记录数={pre_cnt})'
         logger.info(f'[{symbol}] {skip_msg}（东方财富已写入）')
         save_data_status(stock_id, 'capital', 'success', skip_msg)
@@ -4215,7 +4286,7 @@ def fetch_capital_flow(symbol, market):
     conn_skip.close()
     if skip_row and skip_row['message']:
         _src_msg = skip_row['message']
-        if _src_msg.startswith('东方财富'):
+        if _src_msg.startswith('东方财富') and not intraday_refresh:
             logger.info(f'[{symbol}] 今日已有东方财富真实资金流数据，跳过采集（防覆盖）')
             save_data_status(
                 stock_id, 'capital', 'success', f'同日跳过(已有真实数据): {_src_msg[:60]}'
