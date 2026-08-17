@@ -3451,11 +3451,24 @@
         var typeLabel = isintraday ? '盘中快报' : '收盘报告';
         var reuseCount = genResult.reuse_count || 0;
         var newCount = genResult.success_count - reuseCount;
-        container.innerHTML =
-            '<div style="margin-bottom:12px;padding:10px 14px;background:#f0f9ff;border:1px solid #cfe7ff;border-radius:8px;font-size:13px;color:#1a5276;">' +
-            '✅ <strong>' + typeLabel + '</strong>（' + (genResult.report_date || '') + '）生成完成：复用 ' + reuseCount +
-            ' 只 / 新分析 ' + newCount + ' 只 / 失败 ' + genResult.fail_count + ' 只，下方表格已刷新' +
-            '</div>';
+        var failCount = genResult.fail_count || 0;
+        var banner;
+        if (newCount === 0 && reuseCount > 0) {
+            // 021G：全部复用=未重算，醒目标注"沿用早前数据"并引导强制重算（避免静默沿用早盘分数）
+            banner =
+                '<div style="margin-bottom:12px;padding:12px 14px;background:#fff8e1;border:1px solid #f2d98b;border-radius:8px;font-size:13px;color:#8a6d1a;">' +
+                '⚠️ <strong>' + typeLabel + '</strong>（' + (genResult.report_date || '') + '）已生成，但 <strong>' + reuseCount +
+                ' 只全部沿用早前数据、未重新评分</strong>（分数仍是早前时点的）。' +
+                '如需按最新数据重算：勾选「强制全量刷新」后重新生成，或在个股「分析报告」中点「🔄 刷新报告」。' +
+                '</div>';
+        } else {
+            banner =
+                '<div style="margin-bottom:12px;padding:10px 14px;background:#f0f9ff;border:1px solid #cfe7ff;border-radius:8px;font-size:13px;color:#1a5276;">' +
+                '✅ <strong>' + typeLabel + '</strong>（' + (genResult.report_date || '') + '）生成完成：新分析 ' + newCount +
+                ' 只 / 复用 ' + reuseCount + ' 只 / 失败 ' + failCount + ' 只，下方表格已刷新' +
+                '</div>';
+        }
+        container.innerHTML = banner;
         refreshDashboardData();
     }
 

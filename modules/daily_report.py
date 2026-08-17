@@ -159,8 +159,16 @@ def _run_full_report_flow():
 
     日报生成 → P3-B 预警扫描 → 延迟补采注册 → 指数刷新，各环节异常隔离仅记日志。
     """
-    logger.info('定时调度器触发每日报告生成')
-    generate_daily_report()
+    # 021F（方案A）：收盘批次在交易日默认强制重算（force=True）——
+    # 当日早盘/盘中已生成报告时，B11 复用会把早盘分数一路沿用至收盘后
+    # （2026-08-17 实测：29 只全天停留在 09:56 早盘分数）。
+    # 收盘数据更新后必须重算；非交易日保持默认复用，避免周末脏写与无效重算。
+    _trading_day = datetime.now(_CN_TZ).weekday() < 5
+    logger.info(
+        '定时调度器触发每日报告生成%s',
+        '（交易日：force=True 强制重算）' if _trading_day else '（非交易日：默认复用）',
+    )
+    generate_daily_report(force=_trading_day)
 
     # P3-B: 日报生成后挂载预警扫描（异常隔离，不阻塞日报）
     # 架构师 D1 评审：双层异常隔离，预警扫描失败仅记日志
