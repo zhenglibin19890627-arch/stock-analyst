@@ -119,6 +119,22 @@ def test_portfolio_endpoints(client):
         _assert_ok(client.get(path))
 
 
+def test_watchlist_scores_etag_semantics(client):
+    """021E：watchlist-scores 的 ETag 语义锁定。
+
+    匹配 If-None-Match → 304 空体；无匹配 → 200 + ETag。
+    前端修复依赖该语义：no-store 请求恒 200；默认条件请求命中 304 空体时
+    safeJson 判定非 JSON → 静默放弃刷新（021E 已在前端加 no-store）。
+    """
+    r1 = client.get('/api/portfolio/watchlist-scores')
+    assert r1.status_code == 200
+    etag = r1.headers.get('ETag')
+    assert etag, '首次响应应携带 ETag'
+    r2 = client.get('/api/portfolio/watchlist-scores', headers={'If-None-Match': etag})
+    assert r2.status_code == 304
+    assert r2.data == b'', '304 响应体应为空（前端安全解析会静默失败的原因）'
+
+
 # ---- report 蓝图 ----
 
 def test_report_endpoints(client):

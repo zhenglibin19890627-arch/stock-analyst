@@ -1,5 +1,13 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-08-17] 看板批量评分表生成后不自动刷新修复（021E）
+
+- 用户反馈：报告已生成，但总览看板「批量评分表」没有自动刷新。
+- 根因：`/api/portfolio/watchlist-scores`（及 summary）带 ETag 条件缓存；生成完成后的轻量刷新 fetch 走默认缓存模式，命中 304 空响应（日志实证：18:05:56 生成完成，18:05:56/18:06:11 的刷新请求均 304）——`safeJson` 对空体判定"非 JSON"返回 success:false，刷新逻辑静默放弃，表格保持旧数据。
+- 修复（前端）：`loadDashboard` / `refreshDashboardData` 的 summary + watchlist-scores + index-ratings 请求显式 `cache:'no-store'`（直连网络恒 200 全量）；刷新失败时在生成状态区显示可见提示（不再静默）。
+- 语义锁定（后端测试）：`tests/test_routes.py` 新增 `test_watchlist_scores_etag_semantics`——匹配 If-None-Match → 304 空体；无匹配 → 200+ETag，防止未来误改。
+- 验证：node --check 通过；pytest 全绿；ruff 通过。无需重启服务（Flask 静态文件按请求读盘，页面刷新即生效新 JS）。
+
 ## [2026-08-17] 自选股列表按钮优化：合并刷新/删冗余/批量改造（020R-61）
 
 - 用户确认实施按钮优化方案。

@@ -3459,15 +3459,25 @@
         refreshDashboardData();
     }
 
-    /** 生成报告后轻量刷新看板表格与图表（保留表头提示信息，不整页重渲染） */
+    /** 生成报告后轻量刷新看板表格与图表（保留表头提示信息，不整页重渲染）
+     *  021E：fetch 显式 cache:'no-store' —— 服务端 watchlist-scores/summary 带 ETag，
+     *  默认条件请求会命中 304 空响应（safeJson 非 JSON 判定 → success:false → 静默放弃刷新），
+     *  导致"报告已生成但批量评分表不刷新"。no-store 直连网络恒取 200 全量。 */
     function refreshDashboardData() {
-        var summaryPromise = fetch('/api/portfolio/summary').then(function(r) { return safeJson(r); });
-        var scoresPromise  = fetch('/api/portfolio/watchlist-scores').then(function(r) { return safeJson(r); });
+        var summaryPromise = fetch('/api/portfolio/summary', {cache: 'no-store'}).then(function(r) { return safeJson(r); });
+        var scoresPromise  = fetch('/api/portfolio/watchlist-scores', {cache: 'no-store'}).then(function(r) { return safeJson(r); });
         Promise.all([summaryPromise, scoresPromise])
             .then(function(results) {
                 var summary = results[0];
                 var scores = results[1];
-                if (!scores.success || !_dashData) return;
+                if (!scores.success) {
+                    var statusEl = document.getElementById('dailyGenStatus');
+                    if (statusEl) {
+                        statusEl.innerHTML = '<div style="margin-bottom:12px;padding:10px 14px;background:#fdf2f2;border:1px solid #f3c7c7;border-radius:8px;font-size:13px;color:#7b241c;">⚠️ 评分表刷新失败（' + (scores.message || '接口异常') + '），可点击「📊 详情」或刷新页面重试</div>';
+                    }
+                    return;
+                }
+                if (!_dashData) return;
                 _dashData.summary = summary;
                 _dashData.stocks = scores.stocks || [];
                 _dashData.reportDate = scores.report_date;
@@ -3564,9 +3574,10 @@
         container.innerHTML = '<div class="report-loading">正在加载总览看板...</div>';
 
         // 并行请求 summary + watchlist-scores + index-ratings
-        var summaryPromise = fetch('/api/portfolio/summary').then(function(r) { return safeJson(r); });
-        var scoresPromise  = fetch('/api/portfolio/watchlist-scores').then(function(r) { return safeJson(r); });
-        var indexPromise   = fetch('/api/index-ratings').then(function(r) { return safeJson(r); }).catch(function() { return {success: false}; });
+        // 021E：no-store 规避服务端 ETag 304 空响应导致的静默失败（同 refreshDashboardData）
+        var summaryPromise = fetch('/api/portfolio/summary', {cache: 'no-store'}).then(function(r) { return safeJson(r); });
+        var scoresPromise  = fetch('/api/portfolio/watchlist-scores', {cache: 'no-store'}).then(function(r) { return safeJson(r); });
+        var indexPromise   = fetch('/api/index-ratings', {cache: 'no-store'}).then(function(r) { return safeJson(r); }).catch(function() { return {success: false}; });
 
         Promise.all([summaryPromise, scoresPromise, indexPromise])
             .then(function(results) {
