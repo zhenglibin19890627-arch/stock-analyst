@@ -18,9 +18,9 @@ def api_market_industry_fund_flow():
     """
     try:
         from modules.market_overview import (
+            get_industry_flow_summary,
             get_industry_fund_flow_dates,
             get_industry_fund_flow_for_date,
-            get_industry_flow_summary,
         )
 
         dates = get_industry_fund_flow_dates()

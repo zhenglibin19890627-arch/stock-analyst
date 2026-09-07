@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """020R-51：引擎版本标记（A）+ 技术面专项历史回测（B）测试"""
 
 from datetime import date, timedelta

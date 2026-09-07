@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """020R-59：盘中刷新测试（交易时段判断 + 当日K线bar刷新 + 非盘中保持同日跳过）"""
 
 import datetime as _dt

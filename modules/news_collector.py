@@ -363,8 +363,7 @@ def collect_news(stock_id, symbol, market):
 
         # 情况B: 有新增新闻 → 正常有数据
         if saved_count > 0:
-            # 只对新增的新闻做聚合统计
-            new_items = news_items[:saved_count]  # 注意：这里简化处理，实际新增的可能不是前N条
+            # 聚合统计基于全部返回条目（原 new_items 切片从未被使用，属死代码，已清理）
             summary = _save_news_sentiment(stock_id, news_items)
 
             msg = (

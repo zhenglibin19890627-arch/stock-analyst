@@ -9,10 +9,9 @@
 
 import pytest
 
-from modules.trade_fees import estimate_trade_fee, resolve_broker_profile
-
 import app as app_module
 from database import db_manager
+from modules.trade_fees import estimate_trade_fee, resolve_broker_profile
 
 
 @pytest.fixture()

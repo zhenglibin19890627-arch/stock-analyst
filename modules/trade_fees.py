@@ -11,8 +11,8 @@
 
 from config import (
     TRADE_FEE_A_STOCK,
-    TRADE_FEE_BROKERS,
     TRADE_FEE_BROKER_DEFAULT,
+    TRADE_FEE_BROKERS,
     TRADE_FEE_HK,
 )
 

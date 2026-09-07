@@ -51,8 +51,8 @@ class TestParsePaZone:
         )
         z = _parse_pa_zone(pa)
         assert z['label'] == '加仓区间'
-        assert [l['label'] for l in z['levels']] == ['补仓一档', '补仓二档']
-        assert all(l['price'] for l in z['levels'])
+        assert [lv['label'] for lv in z['levels']] == ['补仓一档', '补仓二档']
+        assert all(lv['price'] for lv in z['levels'])
 
     def test_reduce_levels_filtered_out(self):
         """网格里无买入档（如 S4 防御分支只有离场档）→ levels 为空但不报错。"""

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """020R-51-B：技术面专项历史回测
 
 用当前 v5 技术面评分规则（月线方向/周线波段/日线择时 7 子项 + 月线空头×0.85 惩罚）
@@ -332,7 +331,7 @@ def render_markdown(result: dict) -> str:
     L.append('# 技术面专项历史回测报告（020R-51-B）')
     L.append('')
     L.append(f"- 生成时间：{result['generated_at']}")
-    L.append(f"- 评分口径：当前 v5 技术面 7 子项（月线方向 0.25 / 周线波段 0.45 / 日线择时 0.30）+ 月线空头 ×0.85 惩罚")
+    L.append("- 评分口径：当前 v5 技术面 7 子项（月线方向 0.25 / 周线波段 0.45 / 日线择时 0.30）+ 月线空头 ×0.85 惩罚")
     L.append(f"- 分档：得分 ≥ {result['thresholds']['bull']:.0f} = 偏多；≤ {result['thresholds']['bear']:.0f} = 偏空；其余 = 中性")
     L.append(f"- 样本：{result['samples']} 个 (股票×交易日) 观测；跳过 {len(result['skipped'])} 只（日线不足 60 根）：{', '.join(result['skipped']) or '无'}")
     L.append('')
