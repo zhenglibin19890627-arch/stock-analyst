@@ -25,6 +25,34 @@ BACKUP_DIR = os.path.join(os.path.dirname(DB_PATH), 'backups')
 MAX_BACKUPS = 10
 
 
+def auto_backup_db() -> str | None:
+    """每日自动备份数据库（幂等：当日已有 auto 备份则跳过）。
+
+    2026-09-07 新增（批判性审查：此前全库仅有人工备份，服务常驻期间磁盘损坏/
+    误删/写坏将丢失全部数据）。使用 sqlite3 backup API（WAL 模式安全，含未
+    checkpoint 数据），命名 db_backup_YYYYMMDD_auto.db —— 沿用 db_backup_*
+    前缀，纳入 scripts/cleanup_backups.py 既有保留策略。
+    调用点：app 启动 + 补采调度 tick（每 30 分钟，幂等代价为零）。
+    返回备份路径；当日已存在返回 None。
+    """
+    today = datetime.now().strftime('%Y%m%d')
+    target = os.path.join(BACKUP_DIR, f'db_backup_{today}_auto.db')
+    if os.path.exists(target):
+        return None
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    src = sqlite3.connect(DB_PATH)
+    try:
+        dst = sqlite3.connect(target)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    _logger.info(f'[自动备份] 已创建当日备份: {target}')
+    return target
+
+
 def get_connection():
     """
     连接数据库，如果数据库文件不存在会自动创建。

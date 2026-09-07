@@ -25,22 +25,33 @@ def _ema_list(vals, n):
 
 
 def _rsi(closes, n=14):
-    """RSI（Wilder 简化版，初始窗口平均）。"""
+    """RSI(n)——Wilder 指数平滑全历史递推。
+
+    2026-09-07 修复：旧"简化版"只用前 n 个数据点初始化后不再递推，序列尾部
+    完全失真（实测中免周线 RSI 展示 32.6 vs 评分口径 39.1，日线同样分叉）——
+    改为与 data_adapter._calc_rsi 同算法（Wilder 全递推，同花顺/通达信口径），
+    展示读数与评分输入三方一致。两处实现为镜像，修改须同步。
+    """
     if len(closes) < n + 1:
         return None
-    gains = 0.0
-    losses = 0.0
-    for i in range(1, n + 1):
+    gains = []
+    losses = []
+    for i in range(1, len(closes)):
         diff = closes[i] - closes[i - 1]
-        if diff > 0:
-            gains += diff
-        else:
-            losses -= diff
-    avg_gain = gains / n
-    avg_loss = losses / n
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+
+    # 初始窗口 SMA，再对全部历史 Wilder 递推
+    avg_gain = sum(gains[:n]) / n
+    avg_loss = sum(losses[:n]) / n
+    for i in range(n, len(gains)):
+        avg_gain = (avg_gain * (n - 1) + gains[i]) / n
+        avg_loss = (avg_loss * (n - 1) + losses[i]) / n
+
     if avg_loss == 0:
         return 100.0
-    return 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    rs = avg_gain / avg_loss
+    return 100.0 - 100.0 / (1.0 + rs)
 
 
 def _kdj(highs, lows, closes, n=9):

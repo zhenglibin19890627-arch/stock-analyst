@@ -92,7 +92,12 @@ def _calc_macd(closes: list[float]) -> tuple[float | None, float | None]:
 
 
 def _calc_kdj(kline_rows: list[dict], period: int = 9) -> float | None:
-    """计算 KDJ 的 K 值（9,3,3 参数）
+    """计算 KDJ 的 K 值（9,3,3 参数，Wilder 式全序列递推）
+
+    2026-09-07 修复：旧实现只取最近 period 根的 RSV、K 前值硬编码 50 算一步
+    （非标准"一步 KDJ"，无动量记忆，与 technical_detail._kdj 全递推实现及
+    行情软件口径分叉）。改为全序列递推：RSV 逐根滚动窗口，K 初值 50 平滑递推，
+    与展示读数/行情软件三方一致。两处实现为镜像，修改须同步。
 
     Returns:
         K 值，或 None
@@ -104,19 +109,15 @@ def _calc_kdj(kline_rows: list[dict], period: int = 9) -> float | None:
     lows = [float(r['low'] or 0) for r in kline_rows]
     closes = [float(r['close'] or 0) for r in kline_rows]
 
-    # 计算最近 period 的 RSV
-    recent_high = max(highs[-period:])
-    recent_low = min(lows[-period:])
-    close = closes[-1]
-
-    if recent_high == recent_low:
-        rsv = 50.0
-    else:
-        rsv = (close - recent_low) / (recent_high - recent_low) * 100
-
-    # K = 2/3 * 前K + 1/3 * RSV（假设前K=50初始化）
-    k_prev = 50.0
-    k = 2.0 / 3.0 * k_prev + 1.0 / 3.0 * rsv
+    k = 50.0
+    for i in range(len(closes)):
+        window_high = max(highs[max(0, i - period + 1): i + 1])
+        window_low = min(lows[max(0, i - period + 1): i + 1])
+        if window_high == window_low:
+            rsv = 50.0
+        else:
+            rsv = (closes[i] - window_low) / (window_high - window_low) * 100
+        k = 2.0 / 3.0 * k + 1.0 / 3.0 * rsv
     return round(k, 2)
 
 

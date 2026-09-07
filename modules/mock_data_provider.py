@@ -231,6 +231,7 @@ class MockDataProvider:
             'pe_ttm': round(random.uniform(8, 50), 2),
             'pb': round(random.uniform(1.0, 6.0), 2),
             'roe': round(random.uniform(5, 25), 2),
+            'roe_annualized': round(random.uniform(8, 30), 2),
             'gross_margin': round(random.uniform(15, 60), 2),
             'revenue_yoy': round(random.uniform(-10, 40), 2),
             'net_profit_yoy': round(random.uniform(-20, 50), 2),
@@ -239,6 +240,8 @@ class MockDataProvider:
             'current_ratio': round(random.uniform(1.0, 3.5), 2),
             'news_sentiment': round(random.uniform(-0.3, 0.5), 2),
             'main_net_inflow': round(random.uniform(-5000, 10000), 2),
+            # 2026-09-07：随生产口径补齐派生字段（评分融合/年化路径与线上一致）
+            'main_net_inflow_5day': round(random.uniform(-5000, 10000), 2),
             'north_net_buy': round(random.uniform(-3000, 8000), 2),
             'margin_balance_chg': round(random.uniform(-2000, 5000), 2),
             'holder_increase': random.choice([True, False]),
@@ -283,6 +286,7 @@ class MockDataProvider:
                 'pb': random.choice([0.0, -1.5, 100.0]),
                 # ROE 边界值：负数、极大值
                 'roe': random.choice([-15.5, 0.0, 80.0]),
+                'roe_annualized': random.choice([-20.0, 0.0, 95.0]),
                 'gross_margin': random.choice([-10.0, 0.0, 95.0]),
                 'revenue_yoy': random.choice([-50.0, 0.0, 200.0]),
                 'net_profit_yoy': random.choice([-80.0, 0.0, 500.0]),
@@ -292,6 +296,7 @@ class MockDataProvider:
                 # 情绪极端值
                 'news_sentiment': random.choice([-1.0, 1.0, 0.0]),
                 'main_net_inflow': random.choice([-99999.0, 0.0, 99999.0]),
+                'main_net_inflow_5day': random.choice([-99999.0, 0.0, 99999.0]),
                 'north_net_buy': random.choice([-50000.0, 0.0, 50000.0]),
                 'margin_balance_chg': random.choice([-30000.0, 0.0, 30000.0]),
                 'holder_increase': random.choice([True, False]),

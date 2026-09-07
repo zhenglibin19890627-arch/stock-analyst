@@ -903,8 +903,9 @@ class TestAnalyzeEndToEnd:
             assert result.rating in RATING_THRESHOLDS
 
     def test_analyze_score_consistent_with_rating(self, provider):
-        """总分与评级档位区间一致"""
+        """总分与评级档位区间一致（_map_rating 按 >=min 判档；max 为整数上界，
+        浮点分数如 64.9 属持有观望档但 >64，故上界用 max+1 半开区间）"""
         data = provider.generate('normal', code='600519.SH', market='A', close=50.0, seed=42)
         result = analyze(data)
         info = RATING_THRESHOLDS[result.rating]
-        assert info['min'] <= result.total_score <= info['max']
+        assert info['min'] <= result.total_score < info['max'] + 1

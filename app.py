@@ -144,6 +144,14 @@ def main():
 
     init_database()
 
+    # 2026-09-07：每日自动数据库备份（幂等；服务常驻期间由补采 tick 每日续备）
+    try:
+        from database.db_manager import auto_backup_db
+
+        auto_backup_db()
+    except Exception as e:  # noqa: BLE001 —— 备份失败不阻断启动
+        logging.getLogger(__name__).warning(f'[自动备份] 启动备份失败: {e}')
+
     # P0-1: 评级配置自检（三处评级定义一致性，不一致时告警但不阻断启动）
     from modules.rating_config import validate_rating_config
 

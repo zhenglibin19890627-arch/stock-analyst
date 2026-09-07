@@ -384,6 +384,15 @@ def _tick():
     """补采调度器 tick：检测缺口 → 补采 → 按结果调整间隔并注册下轮"""
     global _backoff_min
     try:
+        # 2026-09-07：每日自动数据库备份（幂等，当日已有则零代价跳过；
+        # app 启动时也调用一次——服务常驻期间靠本 tick 保证每日必有备份）
+        try:
+            from database.db_manager import auto_backup_db
+
+            auto_backup_db()
+        except Exception as e:
+            logger.warning(f'[自动备份] 失败（不影响补采）: {e}')
+
         # 021AW：指数滞后自愈（独立于个股缺口，空转巡检时也持续兜底）
         try:
             _maybe_refresh_stale_indexes()

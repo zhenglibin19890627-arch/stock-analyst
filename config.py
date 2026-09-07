@@ -43,7 +43,7 @@ REQUEST_TIMEOUT = 15
 # A股和港股可以不同，因为两个市场特性不一样
 # 注意：实际运行时优先读取 config_weights.json（支持热加载），
 # 此处为代码级默认值，JSON文件不存在时回退使用。
-# 当前 config_weights.json 实际生效权重：A股 news=0.1504 / 港股 news=0.0965，
+# 当前 config_weights.json 实际生效权重（021BC 后）：A股 news=0.08 / 港股 news=0.0919，
 # 且含 7 个行业的 industry_overrides；以下 0.00 仅为"JSON 缺失"时的保守兜底。
 # ============================================================
 WEIGHTS_A_STOCK = {
