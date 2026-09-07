@@ -777,7 +777,7 @@ def _update_progress_file(data: dict):
         pass  # 进度文件写入失败不阻塞业务
 
 
-def _update_progress_stage(symbol: str, stage: str, current: int = None):
+def _update_progress_stage(symbol: str, stage: str, current: int | None = None):
     """增量更新进度文件的 stage（当前正在做什么）与 last_update。
 
     由工作线程（_process_single_stock）调用：读现有进度 → 更新 stage → 写回。

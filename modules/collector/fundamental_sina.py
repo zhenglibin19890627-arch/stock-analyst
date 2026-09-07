@@ -455,7 +455,7 @@ def fetch_fundamental_detail(symbol: str) -> dict:
                ocf_to_profit, debt_to_asset, current_ratio}
         失败时返回空 dict
     """
-    result = {}
+    result: dict[str, float] = {}
     try:
         df = ak.stock_financial_analysis_indicator(symbol=symbol, start_year='2023')
         if df is None or df.empty:

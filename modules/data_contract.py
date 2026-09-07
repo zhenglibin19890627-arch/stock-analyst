@@ -155,6 +155,10 @@ class StockData(BaseModel):
         '注意方向语义与 holder_count_change_pct（A股户数）相反',
     )
 
+    # B17-T2：行业信息（行业维度权重覆盖）。原为适配器动态附加属性（extra='allow'），
+    # mypy 清零（2026-09-07）转正为契约字段——可选、默认 None，向后兼容。
+    industry: str | None = Field(default=None, description='所属行业（用于行业权重覆盖）')
+
     # ================================================================
     # 四、扩展与元数据
     # ================================================================
@@ -238,7 +242,7 @@ class StockData(BaseModel):
         'inst_count_change_pct': '资金面-机构股东数量（展示）：暂不参与评分，缺失不影响维度完整度',
     }
 
-    def get_degradation(self, field_name: str) -> str:
+    def get_degradation(self, field_name: str) -> str | None:
         """查询某字段的缺失降级策略。返回 None 表示该字段无降级规则（或字段存在）。"""
         return self.DEGRADATION_RULES.get(field_name)
 

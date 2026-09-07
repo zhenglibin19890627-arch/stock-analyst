@@ -76,7 +76,7 @@ def _http_get(url, params=None, headers=None, channel='sina', timeout=10, retrie
         except Exception as e:  # noqa: BLE001
             last_exc = e
         time.sleep(0.8 * (attempt + 1))
-    raise last_exc  # type: ignore[misc]
+    raise last_exc
 
 
 # ================================================================

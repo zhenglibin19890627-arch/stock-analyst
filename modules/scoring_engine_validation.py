@@ -34,7 +34,7 @@ from modules.scoring_engine import (
 
 def _check_value(val, label) -> list[str]:
     """检查单个数值是否有 NaN/Inf 问题，返回异常描述列表"""
-    issues = []
+    issues: list[str] = []
     if val is None:
         return issues
     if isinstance(val, float):

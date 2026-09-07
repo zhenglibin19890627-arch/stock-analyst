@@ -1,5 +1,15 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-09-07] 遗留三事清零：级联缺口修复 + mypy 归零 + 备份治理
+
+用户指示将 OPT 批次登记的三项遗留当日清零：
+
+- **OPT-6-G1 级联缺口修复**：`api_delete_stock` 的 `child_tables` 补齐至全部 29 张含 `stock_id` 子表，并新增安全守卫——任一账户**在仓**（quantity>0）时删除自选股返回 409（需先经持仓页删仓）；**已清算**则连流水/成本修正一并出清。测试：`test_cascade_integrity.py` 白名单收缩为空集 + 新增守卫 2 例（40/1 skipped）。**存量孤儿 1,137 行一次性清零**（15 表 + VACUUM；改动前备份 `db_backup_20260907_142849_opt6g1_cascade_fix_before.db`）。
+- **mypy 51→0**（52 文件 Success，零 ignore 豁免）：scoring_engine `available` 字典收窄局部变量（纯类型收窄语义不变）；`_market_to_contract` 返回 `Literal['A','HK']`；**`industry` 转正为 StockData 契约字段**（可选默认 None，原为 `extra='allow'` 动态属性）；implicit-Optional 2 处、mock 边界分支 isinstance 断言、模块缓存注解 4 处、移除失效 `type: ignore` 1 处。
+- **backups/ 治理**：`parent_git_backup_20260813.bak/`（490 散文件/12.8MB，拆库前唯一历史副本）转为标准 **git bundle** 单文件 `git_history_parent_20260813.bundle`（11.2MB，22 提交完整历史，克隆演练通过），散件目录删除；backups/ 本就在 gitignore 内，仓库零影响。
+
+终验：fast **803 passed**/1 skipped + ruff 全仓绿 + 红线 28/28 + **mypy 0**；服务重启生效（看门狗自愈）。
+
 ## [2026-09-07] 技术债与风险治理批次：OPT-1~OPT-8 全部落地
 
 一次性执行任务书《优化任务_技术债与风险治理_20260907》全部 8 项，每项独立 commit、验收基线（fast pytest + ruff + mypy + check_redlines）全程保持绿：

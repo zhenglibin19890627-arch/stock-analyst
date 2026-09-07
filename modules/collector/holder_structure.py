@@ -4,6 +4,7 @@ OPT-3（2026-09-07）自 modules/data_collector.py 纯搬移；语义锚点以�
 """
 import time
 from datetime import datetime, timedelta
+from typing import Any
 
 import akshare as ak
 import pandas as pd
@@ -253,7 +254,7 @@ def _save_holder_structure(stock_id: int, data):
 # 股东人数（股东户数）：港交所不强制披露、腾讯亦无——港股该字段恒 None（缺失归零）。
 # ============================================================
 
-_HK_SHAREHOLDER_CACHE = {}  # {symbol: (ts, data)}，按股票代码分键（10 分钟 TTL）
+_HK_SHAREHOLDER_CACHE: dict[str, tuple[float, Any]] = {}  # {symbol: (ts, data)}，按股票代码分键（10 分钟 TTL）
 _HK_SHAREHOLDER_CACHE_TTL = 600  # 10 分钟
 
 
@@ -405,5 +406,5 @@ def _fetch_holder_increase_hk(symbol):
     return False
 
 # B11-API-DEDUP：股东增减持接口缓存（10分钟TTL，避免批量时重复调用全市场接口）
-_holder_cache = None
-_holder_cache_time = None
+_holder_cache: Any | None = None
+_holder_cache_time: float | None = None

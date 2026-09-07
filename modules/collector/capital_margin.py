@@ -3,6 +3,7 @@
 OPT-3（2026-09-07）自 modules/data_collector.py 纯搬移；语义锚点以函数 docstring 为准。
 """
 from datetime import datetime, timedelta
+from typing import Any
 
 import akshare as ak
 import pandas as pd
@@ -20,7 +21,7 @@ from modules.collector.symbols_status import get_stock_id
 # ============================================================
 
 # 融资融券数据缓存（按日期缓存全市场数据，避免逐只重复请求）
-_MARGIN_CACHE = {'sse': {}, 'szse': {}}  # {date_str: DataFrame}
+_MARGIN_CACHE: dict[str, dict[str, Any]] = {'sse': {}, 'szse': {}}  # {date_str: DataFrame}
 
 
 def _fetch_margin_data_sse(date_str):

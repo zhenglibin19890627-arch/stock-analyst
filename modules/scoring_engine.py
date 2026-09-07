@@ -317,14 +317,17 @@ def score_ma(data: StockData) -> tuple[float, dict]:
     detail = {}
 
     if 'ma5' in available and 'ma20' in available:
-        if ma5 > ma20:
-            deviation = (ma5 - ma20) / ma20 * 100 if ma20 > 0 else 0
+        # 类型收窄：available 中已过滤 None，取字典值供算术使用（语义不变）
+        ma5_v: float = available['ma5']
+        ma20_v: float = available['ma20']
+        if ma5_v > ma20_v:
+            deviation = (ma5_v - ma20_v) / ma20_v * 100 if ma20_v > 0 else 0
             score = _clamp(85.0 + deviation * 1.5)
-            detail['cross'] = f'金叉(MA5={ma5:.2f} > MA20={ma20:.2f})'
+            detail['cross'] = f'金叉(MA5={ma5_v:.2f} > MA20={ma20_v:.2f})'
         else:
-            deviation = (ma20 - ma5) / ma20 * 100 if ma20 > 0 else 0
+            deviation = (ma20_v - ma5_v) / ma20_v * 100 if ma20_v > 0 else 0
             score = _clamp(15.0 - deviation * 1.0)
-            detail['cross'] = f'死叉(MA5={ma5:.2f} < MA20={ma20:.2f})'
+            detail['cross'] = f'死叉(MA5={ma5_v:.2f} < MA20={ma20_v:.2f})'
 
     # 价格在均线之上加分
     for name, ma_val in available.items():
@@ -356,30 +359,34 @@ def score_trend(data: StockData) -> tuple[float, dict]:
 
     # MACD 判断
     if 'macd_dif' in available and 'macd_dea' in available:
-        if macd_dif > macd_dea:
-            hist = macd_dif - macd_dea
+        dif_v: float = available['macd_dif']
+        dea_v: float = available['macd_dea']
+        if dif_v > dea_v:
+            hist = dif_v - dea_v
             score = _clamp(82.0 + min(20.0, hist * 40))
             detail['macd'] = f'DIF>DEA 多头({hist:.4f})'
         else:
-            hist = macd_dea - macd_dif
+            hist = dea_v - dif_v
             score = _clamp(10.0 - min(15.0, hist * 30))
             detail['macd'] = f'DIF<DEA 空头({-hist:.4f})'
     elif 'macd_dif' in available:
-        if macd_dif > 0:
+        dif_only: float = available['macd_dif']
+        if dif_only > 0:
             score += 8.0
-            detail['macd_dif'] = f'DIF>0({macd_dif:.4f})'
+            detail['macd_dif'] = f'DIF>0({dif_only:.4f})'
         else:
             score -= 8.0
-            detail['macd_dif'] = f'DIF<0({macd_dif:.4f})'
+            detail['macd_dif'] = f'DIF<0({dif_only:.4f})'
 
     # MA60 长期趋势
-    if 'ma60' in available and ma60 > 0:
-        if close > ma60:
-            above_pct = (close - ma60) / ma60 * 100
+    if 'ma60' in available and available['ma60'] > 0:
+        ma60_v: float = available['ma60']
+        if close > ma60_v:
+            above_pct = (close - ma60_v) / ma60_v * 100
             score += min(18.0, above_pct * 0.8)
             detail['ma60'] = f'价格在60日均线上方(+{above_pct:.1f}%)'
         else:
-            below_pct = (ma60 - close) / ma60 * 100
+            below_pct = (ma60_v - close) / ma60_v * 100
             score -= min(18.0, below_pct * 0.8)
             detail['ma60'] = f'价格在60日均线下方(-{below_pct:.1f}%)'
 
@@ -1104,7 +1111,7 @@ def score_dimension(
 # ================================================================
 
 
-def _load_dim_weights(market: str, industry: str = None) -> dict[str, float]:
+def _load_dim_weights(market: str, industry: str | None = None) -> dict[str, float]:
     """从 config_weights.json 热加载维度权重，支持行业覆盖，回退到默认值。
 
     加载优先级（B17-T2）：
@@ -1359,7 +1366,9 @@ def analyze(data: StockData) -> AnalysisResult:
             dim_scores_map[cfg_key] = score_val
 
     # 4. 维度权重归一化（B17-T2：传入行业以支持行业权重覆盖）
-    raw_weights = _load_dim_weights(data.market, getattr(data, 'industry', None))
+    industry_raw = getattr(data, 'industry', None)
+    industry_name = industry_raw if isinstance(industry_raw, str) and industry_raw else None
+    raw_weights = _load_dim_weights(data.market, industry_name)
     norm_dim_weights, was_rescaled = _normalize_dim_weights(raw_weights, available_dims)
 
     # 5. 总分
@@ -1525,11 +1534,13 @@ if __name__ == '__main__':
 
     # --- 场景1: normal（完整数据）---
     data_normal = provider.generate('normal', code='600519.SH', market='A', close=1680.0, seed=42)
+    assert isinstance(data_normal, StockData)
     result_normal = analyze(data_normal)
     _print_result(result_normal, 'normal（完整数据）')
 
     # --- 场景2: boundary random（边界值）---
     data_boundary = provider.generate('boundary', code='000001.SZ', market='A', close=15.0, seed=42)
+    assert isinstance(data_boundary, StockData)
     result_boundary = analyze(data_boundary)
     _print_result(result_boundary, 'boundary（边界值）')
 
@@ -1537,6 +1548,7 @@ if __name__ == '__main__':
     data_partial = provider.generate(
         'partial', code='00700.HK', market='HK', close=350.0, missing_rate=0.3, seed=42
     )
+    assert isinstance(data_partial, StockData)
     result_partial = analyze(data_partial)
     _print_result(result_partial, 'partial 30%（字段缺失）')
 
@@ -1544,6 +1556,7 @@ if __name__ == '__main__':
     data_severe = provider.generate(
         'partial', code='300750.SZ', market='A', close=200.0, missing_rate=0.7, seed=99
     )
+    assert isinstance(data_severe, StockData)
     result_severe = analyze(data_severe)
     _print_result(result_severe, 'partial 70%（严重缺失）')
 

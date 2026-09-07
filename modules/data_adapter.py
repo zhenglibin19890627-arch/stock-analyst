@@ -17,6 +17,7 @@ import logging
 import os
 import sys
 from datetime import timedelta, timezone
+from typing import Literal
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db_manager import get_connection
@@ -196,7 +197,7 @@ def _format_stock_code(symbol: str, market: str) -> str:
             return f'{symbol}.SZ'
 
 
-def _market_to_contract(market: str) -> str:
+def _market_to_contract(market: str) -> Literal['A', 'HK']:
     """数据库 market → StockData.market"""
     return 'HK' if market == 'hk_stock' else 'A'
 

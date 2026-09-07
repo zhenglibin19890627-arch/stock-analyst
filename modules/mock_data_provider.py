@@ -142,6 +142,9 @@ class MockDataProvider:
         if not market:
             market = 'HK' if code.endswith('.HK') else 'A'
 
+        # 类型收窄：market 推断完成后固化为契约 Literal（语义不变）
+        market_lit: Literal['A', 'HK'] = 'HK' if market == 'HK' else 'A'
+
         if not trade_date:
             trade_date = datetime.now().strftime('%Y%m%d')
 
@@ -154,14 +157,18 @@ class MockDataProvider:
         elif scenario == 'boundary':
             if boundary_mode == 'exhaustive':
                 # exhaustive 模式：返回 List[StockData]，每条仅一个字段取极端值
-                return self._gen_boundary(
+                result = self._gen_boundary(
                     close,
                     mode='exhaustive',
                     code=code,
-                    market=market,
+                    market=market_lit,
                     trade_date=trade_date,
                 )
-            kwargs = self._gen_boundary(close, mode='random')
+                assert isinstance(result, list)
+                return result
+            boundary_result = self._gen_boundary(close, mode='random')
+            assert isinstance(boundary_result, dict)
+            kwargs = boundary_result
         elif scenario == 'partial':
             kwargs = self._gen_partial(close, missing_rate=missing_rate)
         else:
@@ -169,7 +176,7 @@ class MockDataProvider:
 
         return StockData(
             code=code,
-            market=market,
+            market=market_lit,
             trade_date=trade_date,
             close=close,
             **kwargs,
@@ -184,7 +191,12 @@ class MockDataProvider:
         """批量生成模拟数据"""
         if seed is not None:
             random.seed(seed)
-        return [self.generate(scenario) for _ in range(count)]
+        results: list[StockData] = []
+        for _ in range(count):
+            item = self.generate(scenario)
+            if isinstance(item, StockData):
+                results.append(item)
+        return results
 
     # ================================================================
     # 场景1：正常完整数据
@@ -242,7 +254,7 @@ class MockDataProvider:
         mode: Literal['random', 'exhaustive'] = 'random',
         *,
         code: str = '',
-        market: str = 'A',
+        market: Literal['A', 'HK'] = 'A',
         trade_date: str = '',
     ) -> dict | list[StockData]:
         """边界值数据
