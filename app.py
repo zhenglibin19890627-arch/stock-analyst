@@ -97,6 +97,9 @@ def index():
         'index.html',
         css_version=_ver('static/css/app.css'),
         js_version=_ver('static/js/app.js'),
+        # OPT-7：本地化第三方库按各自 mtime 独立编版本（OPT-4 拆分前端时同样扩展此表）
+        echarts_version=_ver('static/vendor/echarts.min.js'),
+        marked_version=_ver('static/vendor/marked.min.js'),
     )
 
 

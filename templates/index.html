@@ -14,8 +14,10 @@
         })();
     </script>
     <link rel="stylesheet" href="/static/css/app.css?v={{ css_version }}">
-    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+    <!-- OPT-7 (2026-09-07)：第三方库本地化，断网/CDN 故障时图表与报告渲染仍可用。
+         SHA256 校验记录见 docs/tasks/优化任务_技术债与风险治理_20260907.md -->
+    <script src="/static/vendor/echarts.min.js?v={{ echarts_version }}"></script>
+    <script src="/static/vendor/marked.min.js?v={{ marked_version }}"></script>
 </head>
 <body>
 
