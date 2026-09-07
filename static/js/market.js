@@ -924,13 +924,16 @@
         }
         if (td.monthly_vol_ratio != null) {
             monthlyInner += _row('月线量能',
-                ('当月量/20月均量 ' + td.monthly_vol_ratio), td.monthly_vol_state);
+                ('当月累计量/前20月均量 ' + td.monthly_vol_ratio), td.monthly_vol_state);
         }
         if (td.monthly_latest_close != null) {
             monthlyInner += _row('月线收盘', String(td.monthly_latest_close), null);
         }
         if (td.monthly_penalty) {
-            monthlyInner += '<div style="font-size:11px;color:#e67e22;margin:2px 0;">⚠ ' + td.monthly_penalty + '</div>';
+            // 2026-09-07：后端文本若含 "<" 会被 innerHTML 当标签吞掉（实测"⚠ 月线空头(MA5"
+            // 半截显示）——此处做转义防守
+            monthlyInner += '<div style="font-size:11px;color:#e67e22;margin:2px 0;">⚠ ' +
+                String(td.monthly_penalty).replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>';
         }
         html += _group('📈 月线方向层', '25%', _layerScore(['monthly_trend']), monthlyInner);
 
@@ -962,7 +965,7 @@
                 td.weekly_kdj_state);
         }
         if (td.weekly_vol_ratio != null) {
-            weeklyInner += _row('周线量能', ('本周量/20周均量 ' + td.weekly_vol_ratio), td.weekly_vol_state);
+            weeklyInner += _row('周线量能', ('本周累计量/前20周均量 ' + td.weekly_vol_ratio), td.weekly_vol_state);
         }
         html += _group('📊 周线波段层', '45%', _layerScore(['weekly_trend', 'weekly_obos', 'weekly_vol']), weeklyInner);
 

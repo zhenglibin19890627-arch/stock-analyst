@@ -102,7 +102,12 @@ class StockData(BaseModel):
 
     pe_ttm: float | None = Field(default=None, description='滚动市盈率')
     pb: float | None = Field(default=None, description='市净率')
-    roe: float | None = Field(default=None, description='净资产收益率(%)')
+    roe: float | None = Field(default=None, description='净资产收益率(%)，报告期累计值')
+    # 2026-09-07：报告期累计 ROE 直接对比年度阈值会系统性低估非年报公司
+    # （中报只含半年利润），补年化口径供盈利能力评分使用
+    roe_annualized: float | None = Field(
+        default=None, description='年化净资产收益率(%)：一季报×4 / 中报×2 / 三季报×4÷3 / 年报不折'
+    )
     gross_margin: float | None = Field(default=None, description='销售毛利率(%)')
     revenue_yoy: float | None = Field(default=None, description='营收同比增长率(%)')
     net_profit_yoy: float | None = Field(default=None, description='净利润同比增长率(%)')
@@ -402,6 +407,7 @@ class StockData(BaseModel):
             'pe_ttm': self.pe_ttm,
             'pb': self.pb,
             'roe': self.roe,
+            'roe_annualized': self.roe_annualized,
             'gross_margin': self.gross_margin,
             'revenue_yoy': self.revenue_yoy,
             'net_profit_yoy': self.net_profit_yoy,

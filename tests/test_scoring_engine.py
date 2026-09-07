@@ -309,6 +309,18 @@ class TestFundamentalScoring:
         score, _ = score_profitability(_sd(roe=roe))
         assert score == expected
 
+    def test_profitability_prefers_annualized_roe(self):
+        # 2026-09-07：中免场景——中报累计 ROE 5.46% 落"偏低"62，年化 10.92% 应评"一般"80
+        score, detail = score_profitability(_sd(roe=5.46, roe_annualized=10.92))
+        assert score == 80.0
+        assert '(年化)' in detail['roe']
+
+    def test_profitability_falls_back_to_cumulative_roe(self):
+        # 无年化值（旧数据路径）时回退报告期累计值，档位与标注不变
+        score, detail = score_profitability(_sd(roe=5.46))
+        assert score == 62.0
+        assert '(年化)' not in detail['roe']
+
     @pytest.mark.parametrize(
         'gm,expected',
         [

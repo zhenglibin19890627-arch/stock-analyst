@@ -72,6 +72,12 @@ def _macd(closes):
     dea = _ema_list(dif, 9)
     hist = (dif[-1] - dea[-1]) * 2
     state = '多头' if dif[-1] > dea[-1] else '空头'
+    # 2026-09-07：零轴语境注记——零轴下的"多头"是反弹修复、零轴上的"空头"是强势回落，
+    # 与趋势罗盘同一白话口径，避免"金叉但深绿水下"误读为强多头
+    if dif[-1] > dea[-1] and dif[-1] < 0:
+        state = '零轴下多头(反弹)'
+    elif dif[-1] < dea[-1] and dif[-1] > 0:
+        state = '零轴上空头(回落)'
     if len(dif) >= 2 and len(dea) >= 2:
         if dif[-1] > dea[-1] and dif[-2] <= dea[-2]:
             state = '金叉(转多头)'
@@ -104,8 +110,15 @@ def compute_technical_detail(closes, highs, lows, volumes, latest_date='', key_p
             detail[f'{p}ma_state'] = '多头排列'
         elif ma5 < ma10 < ma20:
             detail[f'{p}ma_state'] = '空头排列'
-        else:
+        elif abs(ma5 - ma10) / ma10 <= 0.02 and abs(ma10 - ma20) / ma20 <= 0.02:
+            # 2026-09-07 修复：只有三线黏合（各线差距 ≤2%）才算"纠缠"——
+            # 原逻辑只要非严格单调一律标纠缠，深空头反弹初期（如中免月线
+            # MA5=55.42 vs MA10=67.54，差 18%）会被误标"均线纠缠"
             detail[f'{p}ma_state'] = '均线纠缠'
+        elif ma5 < ma10:
+            detail[f'{p}ma_state'] = '空头排列'
+        else:
+            detail[f'{p}ma_state'] = '多头排列'
     elif ma5 is not None and ma10 is not None:
         detail[f'{p}ma5'] = round(ma5, 2)
         detail[f'{p}ma10'] = round(ma10, 2)
@@ -185,9 +198,16 @@ def compute_technical_detail(closes, highs, lows, volumes, latest_date='', key_p
             else:
                 detail[f'{p}boll_state'] = '触及下轨'
 
-    # 6) 量能配合：最新量 / 20日均量
+    # 6) 量能配合：最新量 / 20周期均量
+    # 2026-09-07 口径修正：周/月的最新一根是"进行中的周期"（周一只有 1 天量、
+    # 月初只有几天量），与含当根的完整周期均量直接相比会结构性"明显缩量"
+    # （实测中免周线 0.03、月线 0.19）——分母改为剔除当根的前 20 个完整周期
     if volumes and len(volumes) >= 20:
-        avg20 = sum(volumes[-20:]) / 20.0
+        if p:
+            base = volumes[-21:-1] if len(volumes) >= 21 else volumes[-20:-1]
+        else:
+            base = volumes[-20:]
+        avg20 = sum(base) / len(base) if base else 0.0
         latest_vol = volumes[-1]
         if avg20 > 0 and latest_vol > 0:
             vr = latest_vol / avg20

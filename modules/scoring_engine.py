@@ -546,7 +546,7 @@ def score_monthly_trend(data: StockData) -> tuple[float, dict]:
             detail['monthly_ma'] = f'MA5>MA10(月线多头 {data.monthly_ma5:.2f}/{data.monthly_ma10:.2f})'
         else:
             scores.append(25.0)
-            detail['monthly_ma'] = f'MA5<MA10(月线空头 {data.monthly_ma5:.2f}/{data.monthly_ma10:.2f})'
+            detail['monthly_ma'] = f'MA5 低于 MA10（月线空头 {data.monthly_ma5:.2f}/{data.monthly_ma10:.2f}）'
     if data.monthly_macd_dif is not None and data.monthly_macd_dea is not None:
         if data.monthly_macd_dif > data.monthly_macd_dea:
             scores.append(80.0)
@@ -576,7 +576,7 @@ def score_weekly_trend(data: StockData) -> tuple[float, dict]:
             detail['weekly_ma'] = f'MA10>MA20(多头 {data.weekly_ma10:.2f}/{data.weekly_ma20:.2f})'
         else:
             scores.append(25.0)
-            detail['weekly_ma'] = f'MA10<MA20(空头 {data.weekly_ma10:.2f}/{data.weekly_ma20:.2f})'
+            detail['weekly_ma'] = f'MA10 低于 MA20（空头 {data.weekly_ma10:.2f}/{data.weekly_ma20:.2f}）'
     if data.weekly_macd_dif is not None and data.weekly_macd_dea is not None:
         hist = data.weekly_macd_dif - data.weekly_macd_dea
         if hist > 0:
@@ -682,30 +682,36 @@ def score_valuation(data: StockData) -> tuple[float, dict]:
 
 
 def score_profitability(data: StockData) -> tuple[float, dict]:
-    """盈利能力子项评分：ROE + 毛利率"""
-    roe, gross_margin = data.roe, data.gross_margin
+    """盈利能力子项评分：ROE + 毛利率
+
+    2026-09-07：ROE 优先用年化口径（roe_annualized，data_adapter 按报告期折算）——
+    报告期累计值直接对比年度阈值会系统性低估中报/一季报公司；无年化值时回退累计 roe。
+    """
+    roe = data.roe_annualized if data.roe_annualized is not None else data.roe
+    gross_margin = data.gross_margin
     scores = []
     detail = {}
 
     if roe is not None:
+        roe_tag = '(年化)' if data.roe_annualized is not None else ''
         if roe >= 20:
             roe_s = 98.0
-            detail['roe'] = f'{roe:.2f}%(优秀)'
+            detail['roe'] = f'{roe:.2f}%{roe_tag}(优秀)'
         elif roe >= 15:
             roe_s = 95.0
-            detail['roe'] = f'{roe:.2f}%(良好)'
+            detail['roe'] = f'{roe:.2f}%{roe_tag}(良好)'
         elif roe >= 10:
             roe_s = 80.0
-            detail['roe'] = f'{roe:.2f}%(一般)'
+            detail['roe'] = f'{roe:.2f}%{roe_tag}(一般)'
         elif roe >= 5:
             roe_s = 62.0
-            detail['roe'] = f'{roe:.2f}%(偏低)'
+            detail['roe'] = f'{roe:.2f}%{roe_tag}(偏低)'
         elif roe >= 0:
             roe_s = 25.0
-            detail['roe'] = f'{roe:.2f}%(较差)'
+            detail['roe'] = f'{roe:.2f}%{roe_tag}(较差)'
         else:
             roe_s = 10.0
-            detail['roe'] = f'{roe:.2f}%(亏损)'
+            detail['roe'] = f'{roe:.2f}%{roe_tag}(亏损)'
         scores.append(roe_s)
 
     if gross_margin is not None:
@@ -882,7 +888,9 @@ def score_sentiment(data: StockData) -> tuple[float, dict]:
     else:
         score = _clamp((sentiment + 1.0) * 48.0, 0, 95)
     if sentiment > 0.3:
-        detail['note'] = '显著正面'
+        # 2026-09-07：021BC 非对称映射下 +0.34 只得 56 分，"显著正面"标签与分数观感
+        # 矛盾——补折价语义（正面情绪多为已定价噪音，正向斜率减半封顶 72）
+        detail['note'] = '显著正面(正面多为已定价噪音，计分折价)'
     elif sentiment > 0.1:
         detail['note'] = '偏正面'
     elif sentiment < -0.3:
@@ -1330,7 +1338,9 @@ def analyze(data: StockData) -> AnalysisResult:
         and data.monthly_ma5 < data.monthly_ma10
     ):
         tech_score = round(tech_score * 0.85, 1)
-        tech_detail['monthly_penalty'] = '月线空头(MA5<MA10)，技术面得分×0.85'
+        # 2026-09-07：文案含 "<MA10>" 会被前端 innerHTML 当 HTML 标签吞掉（实测只显示
+        # "⚠ 月线空头(MA5" 半截），改用全角括号+文字描述，不再含 "<" 字符
+        tech_detail['monthly_penalty'] = '月线空头（MA5 低于 MA10），技术面得分 ×0.85'
     fund_score, fund_detail = score_dimension(data, FUNDAMENTAL_SUBITEMS, 'fundamental')
     news_score, news_detail = score_dimension(data, NEWS_SUBITEMS, 'news')
     cap_score, cap_detail = score_dimension(data, CAPITAL_SUBITEMS, 'capital')

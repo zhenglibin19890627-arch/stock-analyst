@@ -92,7 +92,7 @@ def _technical_detail_for_stock(stock_id):
                         and sd.monthly_ma10 is not None
                         and sd.monthly_ma5 < sd.monthly_ma10
                     ):
-                        sub_detail['monthly_penalty'] = '月线空头(MA5<MA10)，技术面得分×0.85'
+                        sub_detail['monthly_penalty'] = '月线空头（MA5 低于 MA10），技术面得分 ×0.85'
                     merged['scoring_score'] = sub_score
                     merged['scoring_subitems'] = sub_detail['subitems']
                     if sub_detail.get('monthly_penalty'):

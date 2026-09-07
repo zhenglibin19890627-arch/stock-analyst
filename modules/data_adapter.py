@@ -244,6 +244,25 @@ def _read_period_kline_data(stock_id: int, table: str) -> list[dict]:
         conn.close()
 
 
+def _roe_annualize(roe: float | None, report_date: object) -> float | None:
+    """报告期累计 ROE → 年化 ROE（2026-09-07）。
+
+    系数按报告期末日：一季报(03-31)×4 / 中报(06-30)×2 / 三季报(09-30)×4÷3 /
+    年报(12-31)×1；无报告期或已是一季报口径统一按月份区间判断（对公告错期鲁棒）。
+    非年报的年化为线性折算近似，与研报惯例一致。
+    """
+    if roe is None or report_date is None:
+        return None
+    try:
+        rd = str(report_date).replace('-', '')
+        month = int(rd[4:6])
+    except (ValueError, IndexError):
+        return None
+    factor = {1: 4.0, 2: 4.0, 3: 4.0, 4: 2.0, 5: 2.0, 6: 2.0,
+              7: 4.0 / 3.0, 8: 4.0 / 3.0, 9: 4.0 / 3.0}.get(month, 1.0)
+    return round(float(roe) * factor, 2)
+
+
 def _read_fundamental_data(stock_id: int) -> dict | None:
     """读取最新一期基本面数据
 
@@ -536,6 +555,13 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
     except Exception as e:  # noqa: BLE001 —— 预告/快报表缺失时静默降级为不采信
         logger.warning(f'[020R-49] 业绩预期读取失败 stock_id={stock_id}: {e}')
 
+    # 2026-09-07：ROE 年化——报告期累计值直接对比年度阈值会系统性低估非年报公司
+    # （中免中报累计 ROE 5.46% 被"偏低"档评分，年化 10.92% 才是可比口径）
+    roe_annualized = _roe_annualize(
+        fund.get('roe') if fund else None,
+        fund.get('report_date') if fund else None,
+    )
+
     # 5. 读取资金面
     cap_rows = _read_capital_data(stock_id, limit=10)
 
@@ -643,6 +669,7 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
         pe_ttm=fund.get('pe_ratio') if fund else None,
         pb=fund.get('pb_ratio') if fund else None,
         roe=fund.get('roe') if fund else None,
+        roe_annualized=roe_annualized,
         gross_margin=fund.get('gross_margin') if fund else None,
         revenue_yoy=fund.get('revenue_growth') if fund else None,
         net_profit_yoy=fund.get('profit_growth') if fund else None,

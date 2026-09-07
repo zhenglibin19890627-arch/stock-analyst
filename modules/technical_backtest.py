@@ -146,7 +146,7 @@ def _score_technical_at(closes, volumes, highs, lows, date_str, wcloses, mcloses
         and monthly_ma5 < monthly_ma10
     ):
         score = round(score * 0.85, 1)
-        detail['monthly_penalty'] = '月线空头(MA5<MA10)，技术面得分×0.85'
+        detail['monthly_penalty'] = '月线空头（MA5 低于 MA10），技术面得分 ×0.85'
     return score, detail
 
 
