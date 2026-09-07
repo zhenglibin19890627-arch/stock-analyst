@@ -586,7 +586,10 @@
     </div>
 </div>
 
-<script src="/static/js/app.js?v={{ js_version }}"></script>
+<!-- OPT-4（2026-09-07）：app.js 按业务域拆分，按依赖顺序加载；core 必须最先（工具/路由），boot 最后（初始化） -->
+{% for js_name, js_ver in js_versions.items() %}
+<script src="/static/js/{{ js_name }}.js?v={{ js_ver }}"></script>
+{% endfor %}
 
 </body>
 </html>

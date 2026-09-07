@@ -93,11 +93,18 @@ def index():
         except OSError:
             return '0'
 
+    # OPT-4（2026-09-07）：app.js 按业务域拆分为 8 文件，按依赖顺序加载（dict 保序）
+    js_versions = {
+        name: _ver(f'static/js/{name}.js')
+        for name in ('core', 'watchlist', 'analysis', 'portfolio',
+                     'backtest', 'alerts', 'market', 'boot')
+    }
+
     return render_template(
         'index.html',
         css_version=_ver('static/css/app.css'),
-        js_version=_ver('static/js/app.js'),
-        # OPT-7：本地化第三方库按各自 mtime 独立编版本（OPT-4 拆分前端时同样扩展此表）
+        js_versions=js_versions,
+        # OPT-7：本地化第三方库按各自 mtime 独立编版本
         echarts_version=_ver('static/vendor/echarts.min.js'),
         marked_version=_ver('static/vendor/marked.min.js'),
     )
