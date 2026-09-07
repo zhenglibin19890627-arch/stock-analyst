@@ -230,6 +230,8 @@ def test_delete_holding_multi_account_409_without_account_id(client_with_stocks)
 
 def test_trade_recalc_isolated_by_account(client_with_stocks):
     """两账户各自买入同一股票，重算互不影响"""
+    # commission=0 为显式填写（021BK"填写即尊重"），屏蔽佣金自动估算——
+    # 本测试验证账户隔离，不验证费用模型（后者由 test_trade_fees_021bk.py 覆盖）
     client, stock_a, _ = client_with_stocks
     acc1 = _get_default_account_id()
     acc2 = client.post('/api/accounts', json={'name': '重算账户'}).get_json()['account_id']
@@ -237,12 +239,12 @@ def test_trade_recalc_isolated_by_account(client_with_stocks):
     r1 = client.post(
         f'/api/portfolio/holdings/{stock_a}/trades',
         json={'trade_type': 'buy', 'price': 100.0, 'quantity': 100,
-              'trade_date': '2026-08-01', 'account_id': acc1},
+              'trade_date': '2026-08-01', 'account_id': acc1, 'commission': 0},
     )
     r2 = client.post(
         f'/api/portfolio/holdings/{stock_a}/trades',
         json={'trade_type': 'buy', 'price': 200.0, 'quantity': 50,
-              'trade_date': '2026-08-02', 'account_id': acc2},
+              'trade_date': '2026-08-02', 'account_id': acc2, 'commission': 0},
     )
     assert r1.status_code == 200 and r2.status_code == 200
     p1 = r1.get_json()['recalculated_position']
@@ -254,7 +256,7 @@ def test_trade_recalc_isolated_by_account(client_with_stocks):
     r3 = client.post(
         f'/api/portfolio/holdings/{stock_a}/trades',
         json={'trade_type': 'sell', 'price': 110.0, 'quantity': 40,
-              'trade_date': '2026-08-03', 'account_id': acc1},
+              'trade_date': '2026-08-03', 'account_id': acc1, 'commission': 0},
     )
     p3 = r3.get_json()['recalculated_position']
     assert p3['quantity'] == 60
@@ -321,15 +323,16 @@ def test_summary_breakdown_across_accounts(client_with_stocks):
     conn.commit()
     conn.close()
 
+    # commission=0 显式填写，屏蔽 021BK 佣金估算——本测试验证分账户汇总口径
     client.post(
         f'/api/portfolio/holdings/{stock_a}/trades',
         json={'trade_type': 'buy', 'price': 100.0, 'quantity': 100,
-              'trade_date': '2026-08-01', 'account_id': acc1},
+              'trade_date': '2026-08-01', 'account_id': acc1, 'commission': 0},
     )
     client.post(
         f'/api/portfolio/holdings/{stock_a}/trades',
         json={'trade_type': 'buy', 'price': 110.0, 'quantity': 50,
-              'trade_date': '2026-08-02', 'account_id': acc2},
+              'trade_date': '2026-08-02', 'account_id': acc2, 'commission': 0},
     )
 
     data = client.get('/api/portfolio/summary').get_json()
@@ -370,10 +373,12 @@ def test_buy_commission_folded_into_cost(client_with_stocks):
 def test_sell_commission_reduces_realized_pnl(client_with_stocks):
     """卖出手续费扣减已实现盈亏"""
     client, stock_a, _ = client_with_stocks
+    # 买腿显式 commission=0（021BK 填写即尊重），保证成本恰为 100.0；
+    # 卖腿显式 7.0 即为本测试的验证对象
     client.post(
         f'/api/portfolio/holdings/{stock_a}/trades',
         json={'trade_type': 'buy', 'price': 100.0, 'quantity': 100,
-              'trade_date': '2026-08-01'},
+              'trade_date': '2026-08-01', 'commission': 0},
     )
     resp = client.post(
         f'/api/portfolio/holdings/{stock_a}/trades',
