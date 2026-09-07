@@ -1253,6 +1253,47 @@
     var _dashData = null;       // 看板原始数据缓存
     var _dashSortState = {};    // 排序状态
 
+    // OPT-8（2026-09-07）：数据源健康度卡片（红/黄/绿，近 7 天，只读）
+    function _srcHealthDot(level) {
+        var c = level === 'red' ? '#e74c3c' : (level === 'yellow' ? '#f39c12' : '#27ae60');
+        return '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + c + ';margin-right:6px;"></span>';
+    }
+    function loadSourceHealth() {
+        var body = document.getElementById('sourceHealthBody');
+        if (!body) return;
+        fetch('/api/health/sources', {cache: 'no-store'}).then(function(r) { return safeJson(r); }).then(function(d) {
+            if (!d || !d.success) { body.innerHTML = '<span style="color:#e74c3c;">加载失败</span>'; return; }
+            var html = '';
+            html += '<div style="margin-bottom:6px;">整体：' + _srcHealthDot(d.overall_level) +
+                    '<b>' + (d.overall_level === 'red' ? '异常' : (d.overall_level === 'yellow' ? '注意' : '正常')) + '</b>' +
+                    '<span style="color:var(--text-3,#888);font-size:12px;margin-left:8px;">近 ' + d.window_days + ' 天 · ' + d.generated_at + '</span></div>';
+            if (d.dimensions.length) {
+                html += '<table style="width:100%;border-collapse:collapse;font-size:12.5px;">';
+                html += '<tr style="color:var(--text-3,#888);text-align:left;"><th style="padding:3px 8px 3px 0;">维度</th><th>7天成功率</th><th>最后成功</th><th>连续失败</th></tr>';
+                d.dimensions.forEach(function(x) {
+                    var rate = x.success_rate != null ? (x.success_rate * 100).toFixed(0) + '%' : '—';
+                    html += '<tr><td style="padding:2px 8px 2px 0;">' + _srcHealthDot(x.level) + x.dimension + '</td>' +
+                            '<td>' + rate + '</td><td>' + (x.last_ok || '—') + '</td><td>' +
+                            (x.consecutive_failures > 0 ? '<span style="color:#e74c3c;">' + x.consecutive_failures + '</span>' : '0') + '</td></tr>';
+                });
+                html += '</table>';
+            } else {
+                html += '<div style="margin:4px 0;">近 7 天无采集记录</div>';
+            }
+            if (d.sources.length) {
+                html += '<div style="margin-top:6px;font-size:12.5px;">' + _srcHealthDot('red') + '近 7 天有报错的数据源模块：</div>';
+                d.sources.slice(0, 5).forEach(function(x) {
+                    html += '<div style="font-size:12.5px;padding-left:16px;">' + x.module +
+                            ' <span style="color:#e74c3c;">' + x.errors_7d + ' 次</span>' +
+                            ' <span style="color:var(--text-3,#888);">最近 ' + x.last_error_at + '</span></div>';
+                });
+            }
+            body.innerHTML = html;
+        }).catch(function(e) {
+            body.innerHTML = '<span style="color:#e74c3c;">加载失败：' + e + '</span>';
+        });
+    }
+
     function loadDashboard() {
         var container = document.getElementById('dashboardContent');
         container.innerHTML = '<div class="report-loading">正在加载总览看板...</div>';
@@ -1305,8 +1346,7 @@
         // ---- 0.（021O 起大盘指数区域移除，改在市场行情页查看）----
 
         // ---- 1. 概览卡片 ----
-        html += '<div class="dash-grid">';
-        // 总资产
+        html += '<div class="dash-grid">';        // 总资产
         var mv = s.total_market_value;
         html += '<div class="dash-card"><div class="dash-label">总资产</div>';
         html += '<div class="dash-value" style="color:var(--text,#333);">' + (mv != null ? formatCNY(mv) : '—') + '</div>';
@@ -1388,7 +1428,11 @@
         html += '<div class="card"><div class="card-title">📊 评级分布</div><div id="dashChartRating" style="width:100%;height:300px;"></div></div>';
         html += '</div>';
 
+        // ---- 5. OPT-8：数据源健康度卡片（异步填充，只读端点） ----
+        html += '<div id="sourceHealthCard" style="margin-top:16px;"><div class="card"><div class="card-title">🩺 数据源健康度</div><div id="sourceHealthBody" style="color:var(--text-3,#999);font-size:13px;">加载中...</div></div></div>';
+
         container.innerHTML = html;
+        loadSourceHealth();
 
         // 渲染表格和图表
         dashRenderTable(stocks);

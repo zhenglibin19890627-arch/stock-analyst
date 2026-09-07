@@ -133,7 +133,7 @@ curl http://127.0.0.1:5000/api/health
 
 | 模块 | 职责 |
 |------|------|
-| `data_collector.py` | **核心采集**：获取 A股/港股基本面、技术面、消息面、资金面数据（akshare）。 |
+| `modules/collector/` | **核心采集包（OPT-3，2026-09-07 拆分）**：原 `data_collector.py`（6,055 行）按数据源拆为 18 子模块（`_env` 环境基座 → `http_client` 请求层 → 各数据源采集器 → `collect` 编排），`data_collector.py` 保留为 **facade 全量再导出**（192 符号表面兼容，调用方零改动）。⚠️ 约定：①测试 monkeypatch 必须指向**实现/消费方子模块**（补丁打在 facade 对包内调用不可见）；②跨模块共享可变状态与其唯一 global 写入者同模块；③包 `__init__` 强制 requests 补丁先于 akshare 加载，勿调整子模块导入顺序。 |
 | `backfill_scheduler.py` | 数据完整性驱动的持续补采调度器（缺口检测 + 周期重试 + 自动退避，app.py 启动时注册；021BA 起含行业分类自愈——每轮限量补取"未分类"A股行业）。 |
 | `data_contract.py` | v5.0 标准数据契约（StockData），业务逻辑仅依赖此契约，禁耦合具体数据源。 |
 | `data_adapter.py` | SQLite 真实数据 ↔ StockData 契约的适配层。 |
@@ -208,9 +208,9 @@ stock_analyst/
 ├── modules/                # 业务模块（见模块地图）
 ├── blueprints/             # API 路由蓝图（按业务域拆分）
 ├── templates/              # Flask 页面模板（仅 index.html 骨架）
-├── static/                 # 前端静态资源（css/ js/，自 2026-08-13 从 index.html 内联拆出）
-├── scripts/                # 运维脚本（托盘 tray.py / 服务安装 / 看门狗 watchdog.py）
-├── tests/                  # pytest 单元/冒烟测试（隔离临时库，不触网）
+├── static/                 # 前端静态资源（css/ + js/ 八文件按业务域加载：core→watchlist→analysis→portfolio→backtest→alerts→market→boot，OPT-4；vendor/ 本地化三方库，OPT-7）
+├── scripts/                # 运维脚本（托盘 tray.py / 服务安装 / 看门狗 watchdog.py / check_redlines.py / cleanup_backups.py）
+├── tests/                  # pytest 单元/冒烟测试（隔离临时库，不触网；含级联完整性清单 test_cascade_integrity.py、健康度 test_health_sources.py）
 ├── docs/                   # 项目文档（需求/任务书/验收/评审/PM上下文/知识库，见 docs/PROJECT_INDEX.md）
 ├── reports/                # 每日分析报告（运行产物，不入库；验收报告见 docs/reports/）
 ├── backups/                # 数据库备份（db_backup_*.db）

@@ -1,5 +1,20 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-09-07] 技术债与风险治理批次：OPT-1~OPT-8 全部落地
+
+一次性执行任务书《优化任务_技术债与风险治理_20260907》全部 8 项，每项独立 commit、验收基线（fast pytest + ruff + mypy + check_redlines）全程保持绿：
+
+- **OPT-1（P0）临时产物清理**：根目录与 scripts/ 的临时脚本归档/删除；lint 债务清零（ruff 19 处违规机械修复）。
+- **OPT-2（P0）备份保留策略**：`cleanup_backups.py` 增加保留窗口与数量上限，`_prune_old_backups` 防无限增长；排除 2026-08-13 一次性父项目 .git 备份（处置权留用户）。
+- **OPT-5（P1）测试分层**：pyproject 默认 `-m "not slow" --timeout=60`，默认层 **14.8s**（基线 431s，提速 29 倍，759 passed）；全量 `-m "slow or not slow"` 保留 slow 层（TickBackoff 真实时钟退避 4 例为主因）；pytest-timeout 走 R17 白名单 + RED_LINES §6 豁免。
+- **OPT-7（P2）前端 CDN 本地化**：echarts/marked 落地 `static/vendor/`（SHA256 锁版本），`app.py` 按各自 mtime 独立版本号；断网可用。
+- **OPT-3（P1）data_collector 拆分**：6,055 行巨石按数据源拆为 **modules/collector/ 18 子模块**（AST 纯搬移），`data_collector.py` 保留为 facade（192 符号表面逐符号一致，调用方零改动）；`_rotate_em_host`/`_call_ak_with_timeout`/`_num_float` 随调用方迁移断 3 处循环导入；共享可变状态与唯一 global 写入者同模块单宿；check_redlines 10 处源码锚点改扫 facade+全包（28/28 绿）；4 个测试文件约 70 处 monkeypatch 由 facade 重指向实现子模块；mypy 51→50（唯一减少来自死定义删除）。已登记偏差：capital_flow.py 1,154 行（`fetch_capital_flow` 单函数约 700 行不可拆）。
+- **OPT-4（P1）前端拆分**：app.js（7,094 行/415KB）按业务域拆为 **8 文件** core/watchlist/analysis/portfolio/backtest/alerts/market/boot（区间平铺校验无缝全覆盖）；顶层执行语句依赖分析确认仅 3 处立即求值引用，加载顺序 core→…→boot 即满足；index.html 按序渲染 8 个 `<script>`，`_ver()` 扩展为 `js_versions` 有序 dict（每文件独立 mtime 版本号，零构建不变）；node --check 8/8 + 离线冒烟 + **真实浏览器回归**（无头 Chrome 实测 UI 完整渲染、window.onload 初始化链路正常）。前端文件结构变更后需服务重启生效（看门狗自愈）。
+- **OPT-6（P2）级联完整性测试**：新增 `tests/test_cascade_integrity.py` 37 例——29 张 stock_id 子表清单驱动，`child_tables` 与清单双向一致性断言（**新表不同步级联即红**）；删自选股残留参数化、删分组迁移、删账户 force_confirm 流、删持仓/流水安全锁（T+1/已清算/大额）与重算一致性，含 AGENTS §3 同股多仓断言。**测出真实缺口 OPT-6-G1**：`api_delete_stock` 仅覆盖 10/29 子表，19 表残留孤儿行——已登记任务书"发现的问题"另行立项（本批次零实现改动）。
+- **OPT-8（P3）数据源健康度**：新增 `GET /api/health/sources`（只读）——近 7 天按维度聚合 data_status（成功率/最后成功/领先连续失败段）、按模块聚合 error_logs；红/黄/绿分级（红=成功率<50% 或 连败≥3 或模块 24h 内有错）。看板新增 🩺 健康度卡片（异步填充不阻塞主渲染）。真实库实测即时暴露 express/forecast/orderbook/restricted_release 四维 6 连败；真实浏览器 DOM 验证卡片完整渲染。新增 `tests/test_health_sources.py` 5 例。
+
+**终态**：fast 796 passed / 6 deselected（~23s）；全量 765+（6m18s，含 slow）；ruff 全仓绿；check_redlines 28/28；mypy 51→50（既有债务登记待专项）。服务经看门狗两度自愈加载新代码，线上 UI 实测正常。
+
 ## [2026-09-03] 看板建议卡补齐买入区间/补仓档位（021BM）
 
 - 用户诉求：持仓股操作建议显示"买入"却看不到买入区间。
