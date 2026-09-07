@@ -133,6 +133,11 @@ class StockData(BaseModel):
         default=None, ge=-1.0, le=1.0, description='情绪指数(-1.0~1.0)'
     )
     main_net_inflow: float | None = Field(default=None, description='主力净流入(万元)')
+    # 2026-09-07：最近5个交易日主力净流入均值（派生展示+评分降噪字段，
+    # 与 advisor.main_avg_5d 同口径；不入 capital 完整度集合、不触发降级）
+    main_net_inflow_5day: float | None = Field(
+        default=None, description='主力净流入5日均值(万元)'
+    )
     north_net_buy: float | None = Field(default=None, description='北向/港股通净买入(万元)')
     margin_balance_chg: float | None = Field(default=None, description='融资余额变化(万元)')
     holder_increase: bool | None = Field(default=None, description='大股东/高管是否增持')
@@ -421,6 +426,7 @@ class StockData(BaseModel):
             # 消息面与资金面
             'news_sentiment': self.news_sentiment,
             'main_net_inflow': self.main_net_inflow,
+            'main_net_inflow_5day': self.main_net_inflow_5day,
             'north_net_buy': self.north_net_buy,
             'margin_balance_chg': self.margin_balance_chg,
             'holder_increase': self.holder_increase,

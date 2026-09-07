@@ -919,33 +919,43 @@ def score_holder(data: StockData) -> tuple[float, dict]:
 
 
 def score_main_capital(data: StockData) -> tuple[float, dict]:
-    """主力资金子项评分：主力净流入（缺失时返回中性 50，不填充 0.0 进档位）
+    """主力资金子项评分：当日与 5 日均净流入融合 + 对称档位（2026-09-07 修订）
 
-    019T T2（遗留项⑨修复）：缺失 → 不再 D02 填充 0.0（会落入 inflow>=0 档得 85 分，
-    形成"数据越缺、分越高"的偏多偏差）；缺失分支改为返回 50.0 中性分 + note，
-    展示诚实化。实测值路径与修复前逐位一致。
+    2026-09-07 权重批判性审查修订（用户批准"均按建议执行"）：
+    ① 数据侧降噪——信号 = 0.5×当日 + 0.5×5日均（仅一方缺失时用另一方）。
+       旧口径取当日单点值，实测当日 ±1000万 噪声导致全库中位 6.4 分摆动、
+       14/44 只评级翻档（迟滞 ±3 无法覆盖），中免单日 ±3212万 摆动 12.1 分翻档。
+    ② 档位零点对称化——旧档位 ±0 两侧 85/60（隐含中性点 72，B18-Hotfix
+       "激进校准"遗留的系统性偏多偏差），改为对称档位，±1000万 噪声区回归中性 50。
+    维度/子项权重与其余 002 校准档位零改动（等 dynamic_optimizer 300 纯净
+    样本日后由优化器裁决权重数字）。
+    回退：本函数还原旧档位 + data_adapter 仅传当日值即回退旧行为。
     """
-    inflow = data.main_net_inflow
-    if inflow is None:
+    inflow_today = data.main_net_inflow
+    inflow_5d = data.main_net_inflow_5day
+    if inflow_today is None and inflow_5d is None:
         return 50.0, {'note': '主力资金数据缺失，返回中性分（不填充、不占权重）'}
 
-    detail = {'main_net_inflow': f'{inflow:.2f}万元'}
-    # 正流入得分高，负流入得分低
-    # B18-T1: 中性基准上调至65，各档位适度上调
-    # B18-Hotfix-T1: 激进校准，各档位再上调+5~8分
-    # 阈值参考：±5000万元为显著分界
-    if inflow >= 5000:
-        return 95.0, {**detail, 'note': '大幅净流入'}
-    elif inflow >= 1000:
-        return 87.0, {**detail, 'note': '温和净流入'}
-    elif inflow >= 0:
-        return 85.0, {**detail, 'note': '小幅净流入'}  # O2-A+: 82→85
-    elif inflow >= -1000:
-        return 60.0, {**detail, 'note': '小幅净流出'}
-    elif inflow >= -5000:
-        return 42.0, {**detail, 'note': '温和净流出'}
+    if inflow_today is not None and inflow_5d is not None:
+        inflow = inflow_today * 0.5 + inflow_5d * 0.5
+        src = f'当日{inflow_today:+.0f}万/5日均{inflow_5d:+.0f}万融合'
     else:
-        return 20.0, {**detail, 'note': '大幅净流出'}
+        fallback = inflow_today if inflow_today is not None else inflow_5d
+        assert fallback is not None  # 前置分支已保证至少一方非 None
+        inflow = fallback
+        src = '仅当日' if inflow_today is not None else '仅5日均'
+
+    detail = {'main_net_inflow': f'{inflow:.2f}万元（{src}）'}
+    if inflow >= 5000:
+        return 92.0, {**detail, 'note': '显著净流入'}
+    elif inflow >= 1000:
+        return 70.0, {**detail, 'note': '温和净流入'}
+    elif inflow >= -1000:
+        return 50.0, {**detail, 'note': '中性均衡（±1000万内视为噪声区）'}
+    elif inflow >= -5000:
+        return 30.0, {**detail, 'note': '温和净流出'}
+    else:
+        return 12.0, {**detail, 'note': '显著净流出'}
 
 
 def score_margin_capital(data: StockData) -> tuple[float, dict]:

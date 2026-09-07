@@ -522,7 +522,8 @@ class TestCapitalScoring:
     """资金面 3 子项评分"""
 
     # --- score_main_capital 主力资金 ---
-    # 019T T2：缺失分支不再 D02 填充 0.0 进档位（原 85 分偏多偏差），返回中性 50
+    # 2026-09-07 修订：当日+5日均融合（降噪）+ 档位零点对称化（去 B18 正偏），
+    # 缺失分支保持 019T T2 中性 50（不填充、不占权重）
     def test_main_capital_missing_returns_neutral(self):
         score, detail = score_main_capital(_sd())
         assert score == 50.0
@@ -532,29 +533,43 @@ class TestCapitalScoring:
     @pytest.mark.parametrize(
         'inflow,expected',
         [
-            (5000, 95.0),  # 大幅净流入
-            (1000, 87.0),  # 温和净流入
-            (0, 85.0),  # 实测 0（非缺失）必须仍 85 —— 019T 回归断言
-            (-1000, 60.0),  # 小幅净流出
-            (-5000, 42.0),  # 温和净流出
-            (-5001, 20.0),  # 大幅净流出
+            (5000, 92.0),  # 显著净流入 >=5000
+            (1000, 70.0),  # 温和净流入 >=1000
+            (0, 50.0),  # 噪声区中性（旧口径 85 正偏已移除）
+            (-1000, 50.0),  # 噪声区中性 >=-1000
+            (-3000, 30.0),  # 温和净流出
+            (-5000, 30.0),  # 温和净流出边界
+            (-5001, 12.0),  # 显著净流出
         ],
     )
     def test_main_capital_levels(self, inflow, expected):
-        # 实测值路径与修复前逐位一致（T2 零回归）
         score, _ = score_main_capital(_sd(main_net_inflow=inflow))
         assert score == expected
 
-    def test_main_capital_four_branches(self):
-        """019T T2 四类分支：缺失 / 实测0 / 实测正 / 实测负"""
-        missing, _ = score_main_capital(_sd())
-        zero, _ = score_main_capital(_sd(main_net_inflow=0.0))
-        positive, _ = score_main_capital(_sd(main_net_inflow=5000.0))
-        negative, _ = score_main_capital(_sd(main_net_inflow=-5000.0))
-        assert missing == 50.0
-        assert zero == 85.0
-        assert positive == 95.0
-        assert negative == 42.0
+    def test_main_capital_blend_today_and_5day(self):
+        # 中免实测场景：当日 -3212 万 + 5日均 +7393 万 → 融合 +2090.5 → 温和净流入
+        score, detail = score_main_capital(
+            _sd(main_net_inflow=-3212.0, main_net_inflow_5day=7393.0)
+        )
+        assert score == 70.0
+        assert '融合' in detail['main_net_inflow']
+
+    def test_main_capital_blend_noise_zone(self):
+        # 当日 +900 / 5日均 -700 → 融合 +100 → 噪声区中性 50（旧口径当日正→85 偏多）
+        score, _ = score_main_capital(
+            _sd(main_net_inflow=900.0, main_net_inflow_5day=-700.0)
+        )
+        assert score == 50.0
+
+    def test_main_capital_fallback_single_source(self):
+        # 仅当日（5日均缺失，如次新股）：回退当日口径
+        only_today, d1 = score_main_capital(_sd(main_net_inflow=2000.0))
+        assert only_today == 70.0
+        assert '仅当日' in d1['main_net_inflow']
+        # 仅5日均（当日行缺失）：回退 5 日均口径
+        only_5d, d2 = score_main_capital(_sd(main_net_inflow_5day=-6000.0))
+        assert only_5d == 12.0
+        assert '仅5日均' in d2['main_net_inflow']
 
     # --- score_margin_capital 杠杆资金 ---
     # 019T T2（开放项 A）：缺失 68 → 50，实测档位不变

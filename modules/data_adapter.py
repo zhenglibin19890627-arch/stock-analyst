@@ -308,6 +308,22 @@ def _read_fundamental_data(stock_id: int) -> dict | None:
     return fund
 
 
+def _mean_main_inflow_5d(cap_rows: list[dict]) -> float | None:
+    """最近 5 个交易日主力净流入均值（2026-09-07 评分降噪字段）。
+
+    与 advisor.main_avg_5d 同口径：过滤估算行后的正序序列取最后 5 行的非空值平均；
+    cap_rows 不足 5 行（次新股/新入库）时按实际行数平均。
+    """
+    vals = [
+        float(r['main_net_inflow'])
+        for r in cap_rows[-5:]
+        if r.get('main_net_inflow') is not None
+    ]
+    if not vals:
+        return None
+    return round(sum(vals) / len(vals), 2)
+
+
 def _read_capital_data(stock_id: int, limit: int = 10) -> list[dict]:
     """读取最近 N 天资金面数据（正序）。
     019E-R1：过滤估算行（is_estimated=1），确保评分仅使用真实数据。
@@ -578,6 +594,7 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
 
     # 资金面映射
     main_net_inflow = None
+    main_net_inflow_5day = None
     north_net_buy = None
     margin_balance_chg = None
     # 021Q：港股南下资金（展示字段——最新行的当日值；占比向后搜索最近非空）
@@ -587,6 +604,7 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
     if cap_rows:
         latest_cap = cap_rows[-1]
         main_net_inflow = latest_cap.get('main_net_inflow')
+        main_net_inflow_5day = _mean_main_inflow_5d(cap_rows)
         south_net_buy = latest_cap.get('south_net_buy')
 
         # DATASRC-C: north_net_buy 向后搜索最近非空值
@@ -686,6 +704,7 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
         news_positive_ratio=news_positive_ratio,  # B22 新增
         news_negative_count=news_negative_count,  # B22 新增
         main_net_inflow=main_net_inflow,
+        main_net_inflow_5day=main_net_inflow_5day,
         north_net_buy=north_net_buy,
         margin_balance_chg=margin_balance_chg,
         holder_increase=fund.get('holder_increase')
