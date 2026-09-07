@@ -83,16 +83,16 @@ def api_get_groups():
 
 @bp.route('/api/groups', methods=['POST'])
 def api_create_group():
-    """创建分组（支持自动同步到另一类型）。
+    """创建分组（021AO：两侧分组独立，默认不再自动同步到另一类型）。
     Body:
       - name: 分组名称
       - type: watchlist | portfolio（默认 watchlist）
-      - sync_to_other_type: bool（默认 True，自动在另一类型下创建同名分组）
+      - sync_to_other_type: bool（默认 False；显式传 True 才在另一类型下创建同名分组）
     """
     data = request.get_json(silent=True) or {}
     name = data.get('name', '').strip()
     group_type = data.get('type', 'watchlist')
-    sync_to_other = data.get('sync_to_other_type', True)
+    sync_to_other = data.get('sync_to_other_type', False)
 
     if not name:
         return jsonify({'success': False, 'message': '分组名称不能为空'}), 400
@@ -134,14 +134,14 @@ def api_create_group():
 
 @bp.route('/api/groups/<int:group_id>', methods=['PUT'])
 def api_update_group(group_id):
-    """修改分组名称（支持同步修改另一类型下的同名分组）。
+    """修改分组名称（021AO：默认只改当前类型；显式 sync_to_other_type=True 才同步另一类型同名组）。
     Body:
       - name: 新名称
-      - sync_to_other_type: bool（默认 True）
+      - sync_to_other_type: bool（默认 False）
     """
     data = request.get_json(silent=True) or {}
     name = data.get('name', '').strip()
-    sync_to_other = data.get('sync_to_other_type', True)
+    sync_to_other = data.get('sync_to_other_type', False)
 
     if not name:
         return jsonify({'success': False, 'message': '分组名称不能为空'}), 400
@@ -252,7 +252,13 @@ def api_get_stocks():
                 ORDER BY dr2.report_date DESC LIMIT 1) as latest_key_factors
         FROM stocks s
         LEFT JOIN groups g ON s.group_id = g.id AND g.type='watchlist'
-        LEFT JOIN holdings h ON s.id = h.stock_id
+        LEFT JOIN holdings h ON h.id = (
+            -- 021S 多账户：同一股票可能有多条分账户持仓，
+            -- 自选股列表每股仅一行，取持仓数量最大的一条展示
+            SELECT h2.id FROM holdings h2
+            WHERE h2.stock_id = s.id
+            ORDER BY h2.quantity DESC LIMIT 1
+        )
         LEFT JOIN price_cache pc ON s.id = pc.stock_id
         WHERE 1=1
     """
@@ -536,7 +542,15 @@ def api_get_kline(stock_id):
 
 @bp.route('/api/stocks/<int:stock_id>/fundamental', methods=['GET'])
 def api_get_fundamental(stock_id):
-    """查看采集到的基本面数据（百分比指标已格式化，PE/PB保留2位小数）"""
+    """查看采集到的基本面数据（百分比指标已格式化，PE/PB保留2位小数）
+
+    021W-2：历史期 PE/PB 关联"当时真实估值"。
+    PE/PB 是实时行情估值，raw_fundamental 历史期行为 NULL；本接口按财报期
+    report_date 关联 stock_valuation_history（百度历史估值，021W-2 采集）中
+    trade_date <= report_date 的最近一个快照点，输出 hist_pe_ttm/hist_pb/
+    hist_valuation_date 供前端展示"当时估值"。未采集历史估值时返回
+    valuation_history_ready=false，前端提示补采。纯展示层，不改库内数据。
+    """
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -547,6 +561,17 @@ def api_get_fundamental(stock_id):
         (stock_id,),
     )
     rows = [dict(row) for row in cursor.fetchall()]
+
+    # 021W-2：一次性载入该股票全部历史估值快照（按日期升序，供各行关联）
+    hist_rows = cursor.execute(
+        """
+        SELECT trade_date, pe_ttm, pb FROM stock_valuation_history
+        WHERE stock_id = ? ORDER BY trade_date ASC
+    """,
+        (stock_id,),
+    ).fetchall()
+    hist = [dict(r) for r in hist_rows]
+    valuation_history_ready = len(hist) > 0
     conn.close()
 
     # 百分比指标列表
@@ -564,6 +589,20 @@ def api_get_fundamental(stock_id):
     num_fields = ['pe_ratio', 'pb_ratio', 'ps_ratio', 'peg_ratio', 'current_ratio', 'quick_ratio']
 
     for row in rows:
+        # 当时估值：取 trade_date <= report_date 的最近一个历史快照点
+        if hist:
+            rp = str(row.get('report_date') or '')
+            hist_pe = hist_pb = None
+            hist_date = None
+            for h in hist:
+                if h['trade_date'] <= rp:
+                    hist_pe, hist_pb, hist_date = h['pe_ttm'], h['pb'], h['trade_date']
+                else:
+                    break
+            if hist_date is not None:
+                row['hist_pe_ttm'] = hist_pe
+                row['hist_pb'] = hist_pb
+                row['hist_valuation_date'] = hist_date
         for f in pct_fields:
             key = f + '_fmt'
             row[key] = _fmt_pct(row.get(f))
@@ -571,7 +610,36 @@ def api_get_fundamental(stock_id):
             key = f + '_fmt'
             row[key] = _fmt_num(row.get(f))
 
-    return jsonify({'success': True, 'data': rows, 'count': len(rows)})
+    return jsonify(
+        {
+            'success': True,
+            'data': rows,
+            'count': len(rows),
+            'valuation_history_ready': valuation_history_ready,
+        }
+    )
+
+
+@bp.route('/api/stocks/<int:stock_id>/valuation-history/collect', methods=['POST'])
+def api_collect_valuation_history(stock_id):
+    """021W-2：采集历史估值（百度股市通，A股）——为基本面历史表提供当时 PE/PB"""
+    from modules.data_collector import fetch_valuation_history
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT symbol, market FROM stocks WHERE id = ?', (stock_id,))
+    stock = cursor.fetchone()
+    conn.close()
+
+    if not stock:
+        return jsonify({'success': False, 'message': '股票不存在'}), 404
+
+    try:
+        status, message = fetch_valuation_history(stock['symbol'], stock['market'])
+    except Exception as e:
+        return jsonify({'success': False, 'message': '采集异常：' + str(e)}), 500
+
+    return jsonify({'success': status != 'failed', 'status': status, 'message': message})
 
 
 @bp.route('/api/stocks/<int:stock_id>/forecast', methods=['GET'])
@@ -759,7 +827,7 @@ def api_get_news(stock_id):
     conn.close()
 
     # 去重：语义级去重（三元组精确 + 标题相似度聚类）
-    from modules.analysis_engine import _dedup_news
+    from modules.news_detail import _dedup_news
 
     deduped_rows, raw_news_count = _dedup_news(raw_rows)
 
@@ -890,8 +958,8 @@ def api_batch_analyze():
             # 步骤1: 数据采集
             collect_stock_data(symbol, market)
 
-            # 步骤2: 通过 advisor.generate_advice() 统一引擎入口
-            # 由 engine_switcher 自动分流 v5/legacy，与每日报告生成路径一致
+            # 步骤2: 通过 advisor.generate_advice() 统一引擎入口（v5 单引擎）
+            # 与每日报告生成路径一致
             advice = generate_advice(sid)
             if not advice.get('success'):
                 results.append(
@@ -969,7 +1037,7 @@ def api_get_portfolio_groups():
 
 @bp.route('/api/portfolio/groups', methods=['POST'])
 def api_create_portfolio_group():
-    """新建持仓分组（兼容别名：自动同步创建 watchlist 同名分组）"""
+    """新建持仓分组（021AO：兼容别名端点；不再自动同步创建 watchlist 同名分组）"""
     data = request.get_json(silent=True) or {}
     name = data.get('name', '').strip()
     if not name:
@@ -977,28 +1045,15 @@ def api_create_portfolio_group():
 
     conn = get_connection()
     cursor = conn.cursor()
-    counterpart_created = False
     try:
         cursor.execute(
             'INSERT INTO groups (name, type, display_order) VALUES (?, "portfolio", ?)',
             (name, data.get('display_order', 0)),
         )
         group_id = cursor.lastrowid
-        # 自动同步：检查 watchlist 是否有同名分组
-        cursor.execute('SELECT id FROM groups WHERE name=? AND type="watchlist"', (name,))
-        if not cursor.fetchone():
-            cursor.execute('INSERT INTO groups (name, type) VALUES (?, "watchlist")', (name,))
-            counterpart_created = True
         conn.commit()
         conn.close()
-        return jsonify(
-            {
-                'success': True,
-                'group_id': group_id,
-                'counterpart_created': counterpart_created,
-                'counterpart_type': 'watchlist',
-            }
-        )
+        return jsonify({'success': True, 'group_id': group_id})
     except Exception as e:
         conn.close()
         if 'UNIQUE' in str(e):

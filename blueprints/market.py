@@ -1,6 +1,10 @@
 """市场行情 API 蓝图：大盘指数复用 index_ratings，本蓝图提供行业资金流向。"""
 
+import logging
+
 from flask import Blueprint, jsonify, request
+
+logger = logging.getLogger(__name__)
 
 bp = Blueprint('market', __name__)
 
@@ -79,6 +83,15 @@ def api_market_industry_fund_flow_refresh():
 
     try:
         items, trade_date, updated_at = refresh_industry_fund_flow()
+        # 021BJ：刷新成功后后台回补"上一工作日缺口"（断连日丢失的快照），不阻塞响应
+        try:
+            from modules.market_overview import maybe_backfill_gap_async
+
+            gap = maybe_backfill_gap_async()
+            if gap:
+                logger.info('[行业资金流] 检测到缺口 %s，已启动后台回补', gap)
+        except Exception:  # noqa: BLE001
+            pass
         dates = get_industry_fund_flow_dates()
         # 刷新落库后重新读取（附带 5 日累计列）
         items, updated_at = get_industry_fund_flow_for_date(trade_date)
@@ -96,3 +109,73 @@ def api_market_industry_fund_flow_refresh():
         )
     except Exception as e:  # noqa: BLE001
         return jsonify({'success': False, 'error': f'{e!s}'}), 500
+
+
+# ============================================================
+# 021BI: 全市场选股扫描
+# ============================================================
+
+
+@bp.route('/api/market/scan', methods=['POST'])
+def api_market_scan():
+    """第①段 快照粗筛：快照（缓存或重拉）→ 行业回填 → 筛选 → 量比增强。
+
+    Body: {filters: {...}, refresh: bool}
+    filters 缺省项按 DEFAULT_HYGIENE 兜底（剔ST/市值≥100亿/换手≥1%）。
+    耗时约 1 分钟（首次/强制刷新时，新浪 ~56 页）。
+    """
+    try:
+        from modules.market_screener import DEFAULT_HYGIENE, run_coarse_scan
+
+        body = request.get_json(silent=True) or {}
+        filters = body.get('filters') or {}
+        refresh = bool(body.get('refresh'))
+        # 服务端兜底卫生线（前端不传时生效）
+        for k, v in DEFAULT_HYGIENE.items():
+            filters.setdefault(k, v)
+        result = run_coarse_scan(filters=filters, refresh=refresh)
+        return jsonify(result)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({'available': False, 'error': f'{e!s}'}), 500
+
+
+@bp.route('/api/market/scan-signals', methods=['POST'])
+def api_market_scan_signals():
+    """第②段 技术信号精筛（单批 ≤50 只）：逐票拉腾讯K线 → 检测信号。
+
+    Body: {entries: [{symbol, name}], signals: [key...], window: 3}
+    前端分批驱动 + 进度条（避免单请求超长阻塞）。
+    """
+    try:
+        from modules.market_screener import run_signal_chunk
+
+        body = request.get_json(silent=True) or {}
+        entries = body.get('entries') or []
+        signals = body.get('signals') or None
+        window = int(body.get('window') or 3)
+        window = min(max(window, 1), 10)
+        result = run_signal_chunk(entries, signals=signals, window=window)
+        return jsonify({'success': True, **result})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({'success': False, 'error': f'{e!s}'}), 500
+
+
+@bp.route('/api/market/scan/library', methods=['GET'])
+def api_market_scan_library():
+    """信号库元数据（label/note），供前端渲染信号说明。"""
+    from modules.market_screener import SIGNAL_LIBRARY
+
+    return jsonify({'success': True, 'signals': SIGNAL_LIBRARY})
+
+
+@bp.route('/api/market/scan/status', methods=['GET'])
+def api_market_scan_status():
+    """扫描器卡片初始化：只查快照状态，不触发拉取（首次扫描须用户手动点）。"""
+    from modules.market_screener import load_snapshot
+
+    snap = load_snapshot()
+    if snap is None:
+        return jsonify({'success': True, 'has_snapshot': False})
+    return jsonify({'success': True, 'has_snapshot': True,
+                    'snapshot_at': snap['snapshot_at'], 'stale': snap['stale'],
+                    'universe': len(snap['rows'])})

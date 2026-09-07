@@ -17,30 +17,252 @@ from database.db_manager import get_connection
 
 bp = Blueprint('portfolio', __name__)
 
+
+# ============================================================
+# 021S 多交易账户：辅助函数 + 账户 CRUD
+# 持仓域隔离维度 = account_id；'all'/缺省 = 全部账户（聚合视图）。
+# 自选股/分析/预警不区分账户，保持全局共享。
+# ============================================================
+
+
+def _get_default_account_id(cursor):
+    """取默认账户 id（is_default=1 优先，否则最早创建的账户）。"""
+    cursor.execute('SELECT id FROM accounts WHERE is_default = 1 ORDER BY id LIMIT 1')
+    row = cursor.fetchone()
+    if not row:
+        cursor.execute('SELECT id FROM accounts ORDER BY id LIMIT 1')
+        row = cursor.fetchone()
+    return row['id'] if row else None
+
+
+def _parse_account_scope(raw):
+    """解析账户范围参数：''/'all'/None → None(全部账户)；数字字符串 → int。
+
+    非法值抛 ValueError，由调用方转 400。
+    """
+    if raw is None or raw == '' or raw == 'all':
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f'非法 account_id: {raw}')
+
+
+def _account_exists(cursor, account_id):
+    cursor.execute('SELECT 1 FROM accounts WHERE id = ?', (account_id,))
+    return cursor.fetchone() is not None
+
+
+@bp.route('/api/accounts', methods=['GET'])
+def api_list_accounts():
+    """交易账户列表（含持仓/流水统计，供前端切换器与管理弹窗使用）"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT a.id, a.name, a.broker, a.notes, a.is_default,
+               a.display_order, a.created_at,
+               (SELECT COUNT(*) FROM holdings h
+                 WHERE h.account_id = a.id AND h.quantity > 0) AS holding_count,
+               (SELECT COUNT(*) FROM trade_records tr
+                 WHERE tr.account_id = a.id) AS trade_count
+        FROM accounts a
+        ORDER BY a.is_default DESC, a.display_order ASC, a.id ASC
+    """
+    )
+    accounts = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return jsonify({'success': True, 'accounts': accounts, 'count': len(accounts)})
+
+
+@bp.route('/api/accounts', methods=['POST'])
+def api_create_account():
+    """新建交易账户。Body: {name(必填), broker(可选), notes(可选)}"""
+    import sqlite3 as _sqlite3
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'success': False, 'message': '账户名称不能为空'}), 400
+    if len(name) > 50:
+        return jsonify({'success': False, 'message': '账户名称不能超过 50 字符'}), 400
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            'INSERT INTO accounts (name, broker, notes) VALUES (?, ?, ?)',
+            (name, (data.get('broker') or '').strip(), data.get('notes') or ''),
+        )
+        account_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True, 'account_id': account_id, 'message': f'账户「{name}」已创建'})
+    except _sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({'success': False, 'message': f'账户名称「{name}」已存在'}), 409
+
+
+@bp.route('/api/accounts/<int:account_id>', methods=['PUT'])
+def api_update_account(account_id):
+    """编辑交易账户。Body 可含: name / broker / notes / display_order"""
+    import sqlite3 as _sqlite3
+
+    data = request.get_json(silent=True) or {}
+    conn = get_connection()
+    cursor = conn.cursor()
+    if not _account_exists(cursor, account_id):
+        conn.close()
+        return jsonify({'success': False, 'message': '账户不存在'}), 404
+
+    fields, params = [], []
+    if 'name' in data:
+        name = (data.get('name') or '').strip()
+        if not name:
+            conn.close()
+            return jsonify({'success': False, 'message': '账户名称不能为空'}), 400
+        if len(name) > 50:
+            conn.close()
+            return jsonify({'success': False, 'message': '账户名称不能超过 50 字符'}), 400
+        fields.append('name = ?')
+        params.append(name)
+    for col in ('broker', 'notes', 'display_order'):
+        if col in data:
+            fields.append(f'{col} = ?')
+            params.append(data[col])
+
+    if fields:
+        try:
+            cursor.execute(
+                f'UPDATE accounts SET {", ".join(fields)} WHERE id = ?',
+                (*params, account_id),
+            )
+            conn.commit()
+        except _sqlite3.IntegrityError:
+            conn.close()
+            return jsonify({'success': False, 'message': '账户名称已被其他账户使用'}), 409
+    conn.close()
+    return jsonify({'success': True, 'message': '账户已更新'})
+
+
+@bp.route('/api/accounts/<int:account_id>', methods=['DELETE'])
+def api_delete_account(account_id):
+    """删除交易账户（风控约束）：
+    1. 默认账户禁止删除（存量数据归属锚点）
+    2. 最后一个账户禁止删除
+    3. 账户下仍有持仓时需 force_confirm=true 二次确认；
+       删除时持仓移除、流水保留并归入默认账户（审计可追溯）。
+    """
+    data = request.get_json(silent=True) or {}
+    force_confirm = data.get('force_confirm', False)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT * FROM accounts WHERE id = ?', (account_id,))
+    account = cursor.fetchone()
+    if not account:
+        conn.close()
+        return jsonify({'success': False, 'message': '账户不存在'}), 404
+    if account['is_default']:
+        conn.close()
+        return jsonify({'success': False, 'message': '默认账户不可删除'}), 403
+
+    total = cursor.execute('SELECT COUNT(*) FROM accounts').fetchone()[0]
+    if total <= 1:
+        conn.close()
+        return jsonify({'success': False, 'message': '至少保留一个账户，不可删除'}), 400
+
+    holding_cnt = cursor.execute(
+        'SELECT COUNT(*) FROM holdings WHERE account_id = ?', (account_id,)
+    ).fetchone()[0]
+    active_cnt = cursor.execute(
+        'SELECT COUNT(*) FROM holdings WHERE account_id = ? AND quantity > 0', (account_id,)
+    ).fetchone()[0]
+    trade_cnt = cursor.execute(
+        'SELECT COUNT(*) FROM trade_records WHERE account_id = ?', (account_id,)
+    ).fetchone()[0]
+
+    if holding_cnt > 0 and not force_confirm:
+        conn.close()
+        return jsonify(
+            {
+                'success': False,
+                'message': (
+                    f'账户「{account["name"]}」下有 {holding_cnt} 条持仓记录'
+                    f'（{active_cnt} 条在仓），删除后这些持仓将一并移除、'
+                    f'{trade_cnt} 条流水保留并归入默认账户。确认请传 force_confirm=true'
+                ),
+                'holding_count': holding_cnt,
+                'active_count': active_cnt,
+                'trade_count': trade_cnt,
+                'need_force_confirm': True,
+            }
+        ), 409
+
+    default_id = _get_default_account_id(cursor)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        # 流水断链 + 归入默认账户（保留备查）
+        cursor.execute(
+            'UPDATE trade_records SET holding_id = NULL '
+            'WHERE holding_id IN (SELECT id FROM holdings WHERE account_id = ?)',
+            (account_id,),
+        )
+        cursor.execute(
+            'UPDATE trade_records SET account_id = ? WHERE account_id = ?',
+            (default_id, account_id),
+        )
+        cursor.execute('DELETE FROM holdings WHERE account_id = ?', (account_id,))
+        cursor.execute('DELETE FROM accounts WHERE id = ?', (account_id,))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        return jsonify({'success': False, 'message': f'删除账户失败（已回滚）：{e}'}), 500
+    conn.close()
+    return jsonify(
+        {'success': True, 'message': f'账户「{account["name"]}」已删除，{trade_cnt} 条流水归入默认账户'}
+    )
+
 @bp.route('/api/portfolio/holdings', methods=['GET'])
 def api_get_holdings():
-    """获取所有持仓列表（含股票信息 + 最新价格缓存）"""
+    """获取持仓列表（含股票信息 + 最新价格缓存）。
+
+    021S 多账户：?account_id=<id> 按账户过滤；缺省/'all' 返回全部账户持仓，
+    每行附带 account_id / account_name 供前端区分展示。
+    """
     group_id = request.args.get('group_id', '')
+    try:
+        account_id = _parse_account_scope(request.args.get('account_id'))
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
 
     conn = get_connection()
     cursor = conn.cursor()
     sql = """
-        SELECT h.id, h.stock_id, h.group_id, h.cost_price, h.quantity,
+        SELECT h.id, h.account_id, h.stock_id, h.group_id, h.cost_price, h.quantity,
                h.notes, h.created_at, h.updated_at,
                h.realized_pnl, h.status, h.is_cost_adjusted,
                s.symbol, s.name, s.market,
+               a.name as account_name,
                pg.name as group_name,
                pc.latest_price as latest_price, pc.pct_change as price_pct_change,
                pc.updated_at as price_cache_time
         FROM holdings h
         INNER JOIN stocks s ON h.stock_id = s.id
+        LEFT JOIN accounts a ON h.account_id = a.id
         LEFT JOIN groups pg ON h.group_id = pg.id AND pg.type='portfolio'
         LEFT JOIN price_cache pc ON h.stock_id = pc.stock_id
+        WHERE 1=1
     """
     params = []
     if group_id:
-        sql += ' WHERE h.group_id = ?'
+        sql += ' AND h.group_id = ?'
         params.append(group_id)
+    if account_id is not None:
+        sql += ' AND h.account_id = ?'
+        params.append(account_id)
     sql += ' ORDER BY h.updated_at DESC'
 
     cursor.execute(sql, params)
@@ -103,6 +325,12 @@ def api_get_holdings():
         else:
             h['unrealized_pnl'] = None
 
+        # ---- 021BL：持仓盈亏比例（券商口径的 盈亏% 列） ----
+        if price is not None and qty > 0 and cost_price > 0:
+            h['unrealized_pnl_pct'] = round((price - cost_price) / cost_price * 100, 2)
+        else:
+            h['unrealized_pnl_pct'] = None
+
         # ---- 总收益 = 已实现盈亏 + 浮动盈亏 ----
         if h['unrealized_pnl'] is not None:
             h['total_pnl'] = round(realized + h['unrealized_pnl'], 2)
@@ -133,27 +361,37 @@ def api_portfolio_summary():
 
     _CN_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
     group_id = request.args.get('group_id', '')
+    try:
+        account_scope = _parse_account_scope(request.args.get('account_id'))
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
     conn = get_connection()
     cursor = conn.cursor()
 
-    # ---------- 1. 持仓汇总（原逻辑不变） ----------
+    # ---------- 1. 持仓汇总（021S：支持按账户过滤） ----------
     sql = """
-        SELECT h.id, h.stock_id, h.group_id, h.cost_price, h.quantity,
+        SELECT h.id, h.account_id, h.stock_id, h.group_id, h.cost_price, h.quantity,
                h.notes, h.created_at, h.updated_at,
                h.realized_pnl, h.status, h.is_cost_adjusted,
                s.symbol, s.name, s.market,
+               a.name as account_name,
                pg.name as group_name,
                pc.latest_price as latest_price, pc.pct_change as price_pct_change,
                pc.updated_at as price_cache_time
         FROM holdings h
         INNER JOIN stocks s ON h.stock_id = s.id
+        LEFT JOIN accounts a ON h.account_id = a.id
         LEFT JOIN groups pg ON h.group_id = pg.id AND pg.type='portfolio'
         LEFT JOIN price_cache pc ON h.stock_id = pc.stock_id
+        WHERE 1=1
     """
     params = []
     if group_id:
-        sql += ' WHERE h.group_id = ?'
+        sql += ' AND h.group_id = ?'
         params.append(group_id)
+    if account_scope is not None:
+        sql += ' AND h.account_id = ?'
+        params.append(account_scope)
 
     cursor.execute(sql, params)
     holdings = [dict(row) for row in cursor.fetchall()]
@@ -190,8 +428,62 @@ def api_portfolio_summary():
             )
             has_unrealized = True
 
+    # ---------- 1.5 021S：全账户视图时输出分账户汇总 ----------
+    accounts_breakdown = None
+    if account_scope is None:
+        _acc_map = {}
+        for h in holdings:
+            aid = h.get('account_id')
+            if aid is None:
+                continue
+            m = _acc_map.setdefault(
+                aid,
+                {
+                    'account_id': aid,
+                    'account_name': h.get('account_name') or f'账户{aid}',
+                    'total_market_value': 0.0,
+                    'total_unrealized_pnl': 0.0,
+                    'total_realized_pnl': 0.0,
+                    'holding_count': 0,
+                    'active_count': 0,
+                    '_has_mv': False,
+                    '_has_upnl': False,
+                },
+            )
+            qty = h.get('quantity') or 0
+            price = h.get('latest_price')
+            cost_price = h.get('cost_price') or 0
+            realized = h.get('realized_pnl') or 0
+            m['holding_count'] += 1
+            m['total_realized_pnl'] += realized
+            if qty > 0:
+                m['active_count'] += 1
+            if price is not None and price > 0 and qty > 0:
+                m['total_market_value'] += float(
+                    decimal.Decimal(str(qty * price)).quantize(
+                        decimal.Decimal('0.01'), rounding=decimal.ROUND_HALF_EVEN
+                    )
+                )
+                m['_has_mv'] = True
+                m['total_unrealized_pnl'] += float(
+                    decimal.Decimal(str((price - cost_price) * qty)).quantize(
+                        decimal.Decimal('0.01'), rounding=decimal.ROUND_HALF_EVEN
+                    )
+                )
+                m['_has_upnl'] = True
+        accounts_breakdown = []
+        for m in sorted(_acc_map.values(), key=lambda x: x['account_id']):
+            _has_mv = m.pop('_has_mv')
+            _has_upnl = m.pop('_has_upnl')
+            m['total_market_value'] = round(m['total_market_value'], 2) if _has_mv else None
+            m['total_unrealized_pnl'] = round(m['total_unrealized_pnl'], 2) if _has_upnl else None
+            m['total_realized_pnl'] = round(m['total_realized_pnl'], 2)
+            accounts_breakdown.append(m)
+
     result = {
         'success': True,
+        'account_scope': account_scope if account_scope is not None else 'all',
+        'accounts_breakdown': accounts_breakdown,
         'total_market_value': round(total_market_value, 2) if has_market_value else None,
         'total_unrealized_pnl': round(total_unrealized, 2) if has_unrealized else None,
         'total_realized_pnl': round(total_realized, 2),
@@ -221,7 +513,8 @@ def api_portfolio_summary():
 
     avg_score = None
     rating_dist = {}
-    engine_stats = {'v5': 0, 'legacy': 0}
+    # 021AE：v5 单引擎——'history' 统计历史行（engine_version 为 NULL/旧值）
+    engine_stats = {'v5': 0, 'history': 0}
     scores_list = []
     report_generated_at = None
 
@@ -239,8 +532,10 @@ def api_portfolio_summary():
             if rt:
                 rating_dist[rt] = rating_dist.get(rt, 0) + 1
             ev = r['engine_version']
-            if ev in engine_stats:
-                engine_stats[ev] += 1
+            if ev == 'v5':
+                engine_stats['v5'] += 1
+            else:
+                engine_stats['history'] += 1
             ga = r['generated_at']
             if ga and (report_generated_at is None or ga > report_generated_at):
                 report_generated_at = ga
@@ -272,6 +567,41 @@ def api_portfolio_summary():
 # ============================================================
 
 
+def _parse_pa_zone(pa_json):
+    """021BM：从最新报告已存 price_advice JSON 提取看板建议卡所需区间摘要。
+
+    只读展示层（零重算）：区间标签/上下沿 + 买入侧前两档网格
+    （无持仓即"第一/第二买入位"，有持仓即"补仓一档/二档"）。
+    无数据或解析失败返回 None（前端退化为不显示区间，不影响主卡片）。
+    """
+    if not pa_json:
+        return None
+    try:
+        pa = json.loads(pa_json) if isinstance(pa_json, str) else pa_json
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(pa, dict):
+        return None
+    low, high = pa.get('buy_range_low'), pa.get('buy_range_high')
+    if low is None or high is None:
+        return None
+    levels = []
+    for g in pa.get('grid') or []:
+        if isinstance(g, dict) and g.get('type') == 'buy' and g.get('price') is not None:
+            levels.append(
+                {'price': g.get('price'), 'pct': g.get('pct'), 'label': g.get('label') or ''}
+            )
+        if len(levels) >= 2:
+            break
+    return {
+        'label': pa.get('zone_label') or '买入区间',
+        'low': round(low, 2),
+        'high': round(high, 2),
+        'stop_loss': pa.get('stop_loss'),
+        'levels': levels,
+    }
+
+
 @bp.route('/api/portfolio/watchlist-scores')
 def api_portfolio_watchlist_scores():
     """自选股批量评分看板数据（单次四表 JOIN，零引擎侵入）。
@@ -299,9 +629,15 @@ def api_portfolio_watchlist_scores():
                lr.engine_version, lr.total_score, lr.rating,
                lr.rating_label, lr.score_change, lr.prev_score,
                lr.key_factors, lr.data_warnings, lr.status as report_status, lr.generated_at,
-               lr.report_date
+               lr.report_date, lr.price_advice
         FROM stocks s
-        LEFT JOIN holdings h     ON s.id = h.stock_id
+        LEFT JOIN holdings h ON h.id = (
+            -- 021S 多账户：同一股票可能有多条分账户持仓，
+            -- 看板每股仅一行，取持仓数量最大的一条展示
+            SELECT h2.id FROM holdings h2
+            WHERE h2.stock_id = s.id
+            ORDER BY h2.quantity DESC LIMIT 1
+        )
         LEFT JOIN price_cache pc ON s.id = pc.stock_id
         LEFT JOIN """ + _latest_report_join_sql() + """
         ON lr.stock_id = s.id
@@ -334,7 +670,8 @@ def api_portfolio_watchlist_scores():
     industry_bg_map = {}
     match_board_name = None
     try:
-        from modules.market_overview import get_industry_flow_bg_map, match_board_name as _mbn
+        from modules.market_overview import get_industry_flow_bg_map
+        from modules.market_overview import match_board_name as _mbn
 
         industry_bg_map = get_industry_flow_bg_map()
         match_board_name = _mbn
@@ -409,6 +746,8 @@ def api_portfolio_watchlist_scores():
                 'data_warnings': r.get('data_warnings'),
                 # DEV-TASKS-20260727-003：超买超卖信号（从 key_factors 派生，不暴露原始因子）
                 'obos_signal': _derive_obos_signal(r.get('key_factors')),
+                # 021BM：价格建议区间（最新报告已存 JSON，零重算；建议卡买入侧展示）
+                'pa_zone': _parse_pa_zone(r.get('price_advice')),
             }
         )
 
@@ -433,7 +772,11 @@ def api_portfolio_watchlist_scores():
 
 @bp.route('/api/portfolio/holdings/<int:stock_id>', methods=['POST'])
 def api_upsert_holding(stock_id):
-    """创建或更新持仓（成本价/数量/分组）"""
+    """创建或更新持仓（成本价/数量/分组/账户）。
+
+    021S 多账户：body.account_id 指定归属账户（缺省=默认账户）；
+    同一股票可在不同账户各有一条持仓，冲突键为 (account_id, stock_id)。
+    """
     data = request.get_json(silent=True) or {}
     cost_price = data.get('cost_price', 0)
     quantity = data.get('quantity', 0)
@@ -449,41 +792,88 @@ def api_upsert_holding(stock_id):
         conn.close()
         return jsonify({'success': False, 'message': '股票不存在'}), 404
 
+    # 解析目标账户：显式指定 > 默认账户
+    account_id = data.get('account_id')
+    if account_id is not None:
+        try:
+            account_id = int(account_id)
+        except (TypeError, ValueError):
+            conn.close()
+            return jsonify({'success': False, 'message': f'非法 account_id: {account_id}'}), 400
+        if not _account_exists(cursor, account_id):
+            conn.close()
+            return jsonify({'success': False, 'message': '账户不存在'}), 404
+    else:
+        account_id = _get_default_account_id(cursor)
+        if account_id is None:
+            conn.close()
+            return jsonify({'success': False, 'message': '系统无可用账户，请先创建'}), 500
+
     cursor.execute(
         """
-        INSERT INTO holdings (stock_id, group_id, cost_price, quantity, notes, updated_at)
-        VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))
-        ON CONFLICT(stock_id) DO UPDATE SET
+        INSERT INTO holdings (account_id, stock_id, group_id, cost_price, quantity, notes, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+        ON CONFLICT(account_id, stock_id) DO UPDATE SET
             group_id = excluded.group_id,
             cost_price = excluded.cost_price,
             quantity = excluded.quantity,
             notes = excluded.notes,
             updated_at = datetime('now', 'localtime')
     """,
-        (stock_id, group_id, cost_price, quantity, notes),
+        (account_id, stock_id, group_id, cost_price, quantity, notes),
     )
 
     holding_id = cursor.execute(
-        'SELECT id FROM holdings WHERE stock_id = ?', (stock_id,)
+        'SELECT id FROM holdings WHERE stock_id = ? AND account_id = ?',
+        (stock_id, account_id),
     ).fetchone()['id']
     conn.commit()
     conn.close()
-    return jsonify({'success': True, 'holding_id': holding_id})
+    return jsonify({'success': True, 'holding_id': holding_id, 'account_id': account_id})
 
 
 @bp.route('/api/portfolio/holdings/<int:stock_id>', methods=['DELETE'])
 def api_delete_holding(stock_id):
-    """删除持仓：交易流水保留（holding_id 置 NULL）"""
+    """删除持仓：交易流水保留（holding_id 置 NULL）。
+
+    021S 多账户：同一股票可能存在多条（分账户）持仓。
+    - ?account_id=<id> 删除指定账户的持仓
+    - 缺省时若该股票仅一条持仓则直接删除；多条则返回 409 要求指定账户
+    """
+    try:
+        account_id = _parse_account_scope(request.args.get('account_id'))
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT id FROM holdings WHERE stock_id = ?', (stock_id,))
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return jsonify({'success': False, 'message': '持仓不存在'}), 404
+    if account_id is None:
+        cursor.execute('SELECT id, account_id FROM holdings WHERE stock_id = ?', (stock_id,))
+        rows = cursor.fetchall()
+        if not rows:
+            conn.close()
+            return jsonify({'success': False, 'message': '持仓不存在'}), 404
+        if len(rows) > 1:
+            conn.close()
+            return jsonify(
+                {
+                    'success': False,
+                    'message': '该股票在多个账户均有持仓，请指定 account_id 后删除',
+                    'holdings': [dict(r) for r in rows],
+                }
+            ), 409
+        holding_id = rows[0]['id']
+    else:
+        row = cursor.execute(
+            'SELECT id FROM holdings WHERE stock_id = ? AND account_id = ?',
+            (stock_id, account_id),
+        ).fetchone()
+        if not row:
+            conn.close()
+            return jsonify({'success': False, 'message': '该账户下不存在此股票的持仓'}), 404
+        holding_id = row['id']
 
-    holding_id = row['id']
-    # 交易流水的 holding_id 置 NULL（流水保留）
+    # 交易流水的 holding_id 置 NULL（流水保留，账户归属不变）
     cursor.execute('UPDATE trade_records SET holding_id = NULL WHERE holding_id = ?', (holding_id,))
     cursor.execute('DELETE FROM holdings WHERE id = ?', (holding_id,))
     conn.commit()
@@ -496,39 +886,49 @@ def api_delete_holding(stock_id):
 # ============================================================
 
 
-def _recalculate_holding(cursor, stock_id):
-    """根据该股票所有有效流水（按时间顺序）重新计算持仓。
+def _recalculate_holding(cursor, stock_id, account_id):
+    """根据该（股票, 账户）下所有有效流水（按时间顺序）重新计算持仓。
+    021S 多账户：重算范围严格限定在单一账户内，账户间成本/盈亏互不影响。
     计算规则：
     - 买入(buy)：增加数量，加权平均成本 = (旧持仓成本 + 新买入金额) / 新数量
     - 卖出(sell)：减少数量，已实现盈亏 += (卖出价 - 持仓均价) * 卖出数量
     - 分红(dividend)：数量不变，已实现盈亏 += 分红金额(amount)
+    - 红利补税(dividend_tax)：数量不变，已实现盈亏 -= 补税金额(amount)——
+      021AM：股息红利差异扣税（A股按持股期限补扣/港股通代扣20%）与派息日
+      不同天发生，作独立流水记录，金额为补扣税款（正数存储）
     - 若重算后数量 ≤ 0，标记 status='cleared'（保留记录，不物理删除）
     返回重算后的持仓快照 dict。
     """
     # 确保持仓记录存在
-    cursor.execute('SELECT id FROM holdings WHERE stock_id=?', (stock_id,))
+    cursor.execute(
+        'SELECT id FROM holdings WHERE stock_id=? AND account_id=?',
+        (stock_id, account_id),
+    )
     h_row = cursor.fetchone()
     if not h_row:
         # 自动创建持仓记录
         cursor.execute(
-            'INSERT OR IGNORE INTO holdings (stock_id, cost_price, quantity, realized_pnl, status) '
-            'VALUES (?, 0, 0, 0, "active")',
-            (stock_id,),
+            'INSERT OR IGNORE INTO holdings (account_id, stock_id, cost_price, quantity, realized_pnl, status) '
+            'VALUES (?, ?, 0, 0, 0, "active")',
+            (account_id, stock_id),
         )
-        cursor.execute('SELECT id FROM holdings WHERE stock_id=?', (stock_id,))
+        cursor.execute(
+            'SELECT id FROM holdings WHERE stock_id=? AND account_id=?',
+            (stock_id, account_id),
+        )
         h_row = cursor.fetchone()
 
     holding_id = h_row['id']
 
-    # 按时间顺序获取所有有效流水
+    # 按时间顺序获取本账户内所有有效流水
     cursor.execute(
         """
-        SELECT trade_type, price, quantity, amount, trade_date, created_at
+        SELECT trade_type, price, quantity, amount, commission, trade_date, created_at
         FROM trade_records
-        WHERE stock_id=?
+        WHERE stock_id=? AND account_id=?
         ORDER BY trade_date ASC, created_at ASC
     """,
-        (stock_id,),
+        (stock_id, account_id),
     )
     trades = cursor.fetchall()
 
@@ -541,25 +941,37 @@ def _recalculate_holding(cursor, stock_id):
         qty = int(t['quantity'] or 0)
         price = float(t['price'] or 0)
         amount = float(t['amount'] or 0)
+        # 021X：手续费口径——买入计入成本基数，卖出/分红扣减已实现盈亏
+        commission = float(t['commission'] or 0)
 
         if t['trade_type'] == 'buy':
             if qty > 0:
-                total_cost += qty * price
+                # 021BL：优先实际成交金额（021AM 金额直填），缺失回退 价格×数量——与券商口径一致
+                buy_amount = amount if amount > 0 else qty * price
+                total_cost += buy_amount + commission
                 total_qty += qty
                 avg_cost = total_cost / total_qty if total_qty > 0 else 0
         elif t['trade_type'] == 'sell':
             if qty > 0:
                 sell_qty = min(qty, total_qty) if total_qty > 0 else qty
-                realized_pnl += (price - avg_cost) * sell_qty
+                # 021BL：已实现盈亏按实际成交金额口径（券商一致）：卖出金额-费用-卖出数量×摊薄成本
+                sell_amount = amount if amount > 0 else price * sell_qty
+                if qty > sell_qty:
+                    sell_amount = sell_amount * sell_qty / qty  # 超卖钳制时按比例折算
+                realized_pnl += sell_amount - commission - sell_qty * avg_cost
                 total_qty -= qty
                 if total_qty <= 0:
                     total_qty = 0
                     total_cost = 0
+                    avg_cost = 0   # 021BL：清仓后成本价归零（券商口径），不再残留旧成本
                 else:
                     total_cost = avg_cost * total_qty
         elif t['trade_type'] == 'dividend':
-            # 分红：金额直接计入已实现盈亏
-            realized_pnl += max(0, amount)
+            # 分红：金额计入已实现盈亏（手续费/划扣费一并扣除）
+            realized_pnl += max(0, amount) - commission
+        elif t['trade_type'] == 'dividend_tax':
+            # 021AM：红利补税——金额从已实现盈亏中扣减（amount 正数=补扣税款）
+            realized_pnl -= max(0, amount) + commission
 
     # 判断状态
     status = 'cleared' if total_qty <= 0 else 'active'
@@ -573,13 +985,14 @@ def _recalculate_holding(cursor, stock_id):
             realized_pnl = ?,
             status = ?,
             updated_at = datetime('now', 'localtime')
-        WHERE stock_id = ?
+        WHERE id = ?
     """,
-        (total_qty, round(avg_cost, 4), round(realized_pnl, 2), status, stock_id),
+        (total_qty, round(avg_cost, 4), round(realized_pnl, 2), status, holding_id),
     )
 
     return {
         'stock_id': stock_id,
+        'account_id': account_id,
         'holding_id': holding_id,
         'quantity': total_qty,
         'avg_cost': round(avg_cost, 4),
@@ -591,19 +1004,27 @@ def _recalculate_holding(cursor, stock_id):
 
 @bp.route('/api/portfolio/holdings/<int:stock_id>/trades', methods=['GET'])
 def api_get_trades(stock_id):
-    """查看某只股票的交易流水"""
+    """查看某只股票的交易流水（021S：可选 ?account_id= 按账户过滤）"""
+    try:
+        account_id = _parse_account_scope(request.args.get('account_id'))
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT tr.*, s.symbol, s.name
+    sql = """
+        SELECT tr.*, s.symbol, s.name, a.name as account_name
         FROM trade_records tr
         INNER JOIN stocks s ON tr.stock_id = s.id
+        LEFT JOIN accounts a ON tr.account_id = a.id
         WHERE tr.stock_id = ?
-        ORDER BY tr.trade_date DESC, tr.created_at DESC
-    """,
-        (stock_id,),
-    )
+    """
+    params = [stock_id]
+    if account_id is not None:
+        sql += ' AND tr.account_id = ?'
+        params.append(account_id)
+    sql += ' ORDER BY tr.trade_date DESC, tr.created_at DESC'
+    cursor.execute(sql, params)
     trades = [dict(row) for row in cursor.fetchall()]
     conn.close()
     return jsonify({'success': True, 'trades': trades, 'count': len(trades)})
@@ -611,27 +1032,40 @@ def api_get_trades(stock_id):
 
 @bp.route('/api/portfolio/trades', methods=['GET'])
 def api_get_all_trades():
-    """全局交易流水列表（所有股票，支持分页与筛选）"""
+    """全局交易流水列表（所有股票，支持分页与筛选；021S 支持按账户过滤）"""
+    try:
+        account_id = _parse_account_scope(request.args.get('account_id'))
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+
     conn = get_connection()
     cursor = conn.cursor()
     trade_type = request.args.get('type', '')
     sql = """
-        SELECT tr.*, s.symbol, s.name, s.market
+        SELECT tr.*, s.symbol, s.name, s.market, a.name as account_name
         FROM trade_records tr
         INNER JOIN stocks s ON tr.stock_id = s.id
+        LEFT JOIN accounts a ON tr.account_id = a.id
+        WHERE 1=1
     """
     params = []
-    if trade_type in ('buy', 'sell', 'dividend'):
-        sql += ' WHERE tr.trade_type = ?'
+    if trade_type in ('buy', 'sell', 'dividend', 'dividend_tax'):
+        sql += ' AND tr.trade_type = ?'
         params.append(trade_type)
+    if account_id is not None:
+        sql += ' AND tr.account_id = ?'
+        params.append(account_id)
     sql += ' ORDER BY tr.trade_date DESC, tr.created_at DESC'
     cursor.execute(sql, params)
     trades = [dict(row) for row in cursor.fetchall()]
     conn.close()
-    # 汇总统计
+    # 汇总统计（021AM：红利补税单列并计入净流入）
     total_buy = sum(t['amount'] or 0 for t in trades if t.get('trade_type') == 'buy')
     total_sell = sum(t['amount'] or 0 for t in trades if t.get('trade_type') == 'sell')
     total_dividend = sum(t['amount'] or 0 for t in trades if t.get('trade_type') == 'dividend')
+    total_dividend_tax = sum(
+        t['amount'] or 0 for t in trades if t.get('trade_type') == 'dividend_tax'
+    )
     return jsonify(
         {
             'success': True,
@@ -641,7 +1075,10 @@ def api_get_all_trades():
                 'total_buy_amount': round(total_buy, 2),
                 'total_sell_amount': round(total_sell, 2),
                 'total_dividend': round(total_dividend, 2),
-                'net_amount': round(total_sell + total_dividend - total_buy, 2),
+                'total_dividend_tax': round(total_dividend_tax, 2),
+                'net_amount': round(
+                    total_sell + total_dividend - total_dividend_tax - total_buy, 2
+                ),
             },
         }
     )
@@ -654,11 +1091,14 @@ def api_get_all_cost_adjustments():
     cursor = conn.cursor()
     # 020R-22：直接用修正记录自带的 stock_id 关联股票——
     # 此前经 holdings 关联，持仓被删后 holding 断链，h.stock_id(NULL) 还会覆盖
-    # pca.stock_id 导致股票代码/名称丢失
+    # pca.stock_id 导致股票代码/名称丢失。
+    # 021S：经 holding_id 弱关联带出账户名（断链时显示 '--'，不影响主字段）
     cursor.execute("""
-        SELECT pca.*, s.symbol, s.name
+        SELECT pca.*, s.symbol, s.name, a.name as account_name
         FROM position_cost_adjustments pca
         LEFT JOIN stocks s ON pca.stock_id = s.id
+        LEFT JOIN holdings h ON pca.holding_id = h.id
+        LEFT JOIN accounts a ON h.account_id = a.id
         ORDER BY pca.created_at DESC
     """)
     records = [dict(row) for row in cursor.fetchall()]
@@ -676,45 +1116,104 @@ def api_get_all_cost_adjustments():
 
 @bp.route('/api/portfolio/holdings/<int:stock_id>/trades', methods=['POST'])
 def api_add_trade(stock_id):
-    """新增交易流水记录（自动触发持仓重算）"""
+    """新增交易流水记录（自动触发持仓重算）。
+
+    021S 多账户：body.account_id 指定归属账户（缺省=默认账户），
+    重算仅影响该账户内该股票的持仓。
+    """
     data = request.get_json(silent=True) or {}
     trade_type = data.get('trade_type', '').strip()
-    if trade_type not in ('buy', 'sell', 'dividend'):
-        return jsonify({'success': False, 'message': 'trade_type 必须为 buy/sell/dividend'}), 400
+    # 021AM：dividend_tax=红利补税（差异扣税独立流水，日期与派息日不同）
+    if trade_type not in ('buy', 'sell', 'dividend', 'dividend_tax'):
+        return jsonify({'success': False, 'message': 'trade_type 必须为 buy/sell/dividend/dividend_tax'}), 400
 
     price = data.get('price', 0)
     quantity = data.get('quantity', 0)
     amount = data.get('amount') or (float(price) * int(quantity) if quantity else 0)
     trade_date = data.get('trade_date', '')
     notes = data.get('notes', '')
+    # 021X：手续费（可选，默认0；买入计入成本，卖出/分红扣减已实现盈亏）
+    # 021BK：佣金留空 → 自动估算（按账户匹配券商费率，隔天交割单出来后可改实际值）
+    raw_commission = data.get('commission')
+    commission_explicit = raw_commission is not None and str(raw_commission).strip() != ''
+    try:
+        commission = float(raw_commission or 0)
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': 'commission 必须是数字'}), 400
+    if commission < 0:
+        return jsonify({'success': False, 'message': '手续费不能为负数'}), 400
+    commission_estimated = 0
 
     conn = get_connection()
     cursor = conn.cursor()
     try:
         conn.execute('BEGIN IMMEDIATE')  # 加锁，防止并发冲突
 
-        # 获取 holding_id（如果持仓存在）
-        cursor.execute('SELECT id FROM holdings WHERE stock_id = ?', (stock_id,))
+        # 解析目标账户（显式指定 > 默认账户），并校验存在性
+        account_id = data.get('account_id')
+        if account_id is not None:
+            try:
+                account_id = int(account_id)
+            except (TypeError, ValueError):
+                conn.rollback()
+                conn.close()
+                return jsonify({'success': False, 'message': f'非法 account_id: {account_id}'}), 400
+            if not _account_exists(cursor, account_id):
+                conn.rollback()
+                conn.close()
+                return jsonify({'success': False, 'message': '账户不存在'}), 404
+        else:
+            account_id = _get_default_account_id(cursor)
+            if account_id is None:
+                conn.rollback()
+                conn.close()
+                return jsonify({'success': False, 'message': '系统无可用账户，请先创建'}), 500
+
+        # 021BK：佣金留空 → 按账户券商费率自动估算（A股：佣金+印花税(卖)+过户费）
+        if not commission_explicit and trade_type in ('buy', 'sell'):
+            try:
+                from modules.trade_fees import estimate_trade_fee
+
+                cursor.execute('SELECT name FROM accounts WHERE id = ?', (account_id,))
+                acc_row = cursor.fetchone()
+                cursor.execute('SELECT market FROM stocks WHERE id = ?', (stock_id,))
+                stock_row = cursor.fetchone()
+                commission = estimate_trade_fee(
+                    trade_type, amount,
+                    account_name=(acc_row['name'] if acc_row else None),
+                    market=(stock_row['market'] if stock_row else 'a_stock'),
+                )
+                commission_estimated = 1 if commission > 0 else 0
+            except Exception:  # noqa: BLE001 — 估算失败不影响录入（回落为 0）
+                commission = 0.0
+                commission_estimated = 0
+
+        # 获取本账户内该股票的 holding_id（如果持仓存在）
+        cursor.execute(
+            'SELECT id FROM holdings WHERE stock_id = ? AND account_id = ?',
+            (stock_id, account_id),
+        )
         h = cursor.fetchone()
         holding_id = h['id'] if h else None
 
         cursor.execute(
             """
-            INSERT INTO trade_records (holding_id, stock_id, trade_type, price, quantity, amount, trade_date, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO trade_records (holding_id, account_id, stock_id, trade_type, price, quantity, amount, commission, commission_estimated, trade_date, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-            (holding_id, stock_id, trade_type, price, quantity, amount, trade_date, notes),
+            (holding_id, account_id, stock_id, trade_type, price, quantity, amount, commission, commission_estimated, trade_date, notes),
         )
 
         trade_id = cursor.lastrowid
 
-        # 触发持仓重算
-        recalculated = _recalculate_holding(cursor, stock_id)
+        # 触发持仓重算（仅本账户）
+        recalculated = _recalculate_holding(cursor, stock_id, account_id)
 
         conn.commit()
         conn.close()
         return jsonify(
-            {'success': True, 'trade_id': trade_id, 'recalculated_position': recalculated}
+            {'success': True, 'trade_id': trade_id, 'recalculated_position': recalculated,
+             'commission': commission, 'commission_estimated': bool(commission_estimated)}
         )
     except Exception as e:
         conn.rollback()
@@ -753,41 +1252,78 @@ def api_update_trade(trade_id):
 
         old_stock_id = trade['stock_id']
         new_stock_id = data.get('stock_id', old_stock_id)
+        # 021S：账户归属变更（旧流水 account_id 为 NULL 时归入默认账户）
+        old_account_id = (
+            trade['account_id']
+            if trade['account_id'] is not None
+            else _get_default_account_id(cursor)
+        )
+        new_account_id = data.get('account_id', old_account_id)
+        if new_account_id is not None and int(new_account_id) != int(old_account_id):
+            if not _account_exists(cursor, int(new_account_id)):
+                conn.rollback()
+                conn.close()
+                return jsonify({'success': False, 'message': '目标账户不存在'}), 404
+            new_account_id = int(new_account_id)
+        elif new_account_id is not None:
+            new_account_id = int(new_account_id)
 
-        # 动态构建 UPDATE 语句
+        # 动态构建 UPDATE 语句（account_id 单独处理，不走通用列循环）
         fields = []
         params = []
-        for col in ['trade_type', 'price', 'quantity', 'amount', 'trade_date', 'notes', 'stock_id']:
+        for col in ['trade_type', 'price', 'quantity', 'amount', 'commission', 'trade_date', 'notes', 'stock_id']:
             if col in data:
+                if col == 'commission':
+                    # 021X：手续费校验（非负数字）
+                    try:
+                        c = float(data['commission'] or 0)
+                    except (TypeError, ValueError):
+                        conn.rollback()
+                        conn.close()
+                        return jsonify({'success': False, 'message': 'commission 必须是数字'}), 400
+                    if c < 0:
+                        conn.rollback()
+                        conn.close()
+                        return jsonify({'success': False, 'message': '手续费不能为负数'}), 400
                 fields.append(f'{col} = ?')
                 params.append(data[col])
+                if col == 'commission':
+                    # 021BK：手工填写佣金即视为实际值，清除估算标记
+                    fields.append('commission_estimated = 0')
 
         if fields:
             # 校验 trade_type
-            if 'trade_type' in data and data['trade_type'] not in ('buy', 'sell', 'dividend'):
+            if 'trade_type' in data and data['trade_type'] not in (
+                'buy', 'sell', 'dividend', 'dividend_tax',
+            ):
                 conn.rollback()
                 conn.close()
                 return jsonify(
                     {'success': False, 'message': 'trade_type 必须为 buy/sell/dividend'}
                 ), 400
 
-            # 如果 stock_id 变了，更新 holding_id 指向
-            if new_stock_id != old_stock_id:
-                cursor.execute('SELECT id FROM holdings WHERE stock_id=?', (new_stock_id,))
+            # 如果股票或账户变了，更新 holding_id 指向（021S：按 账户+股票 定位）
+            if new_stock_id != old_stock_id or new_account_id != old_account_id:
+                cursor.execute(
+                    'SELECT id FROM holdings WHERE stock_id=? AND account_id=?',
+                    (new_stock_id, new_account_id),
+                )
                 new_h = cursor.fetchone()
                 new_holding_id = new_h['id'] if new_h else None
                 fields.append('holding_id = ?')
                 params.append(new_holding_id)
+                fields.append('account_id = ?')
+                params.append(new_account_id)
 
             params.append(trade_id)
             cursor.execute(f'UPDATE trade_records SET {", ".join(fields)} WHERE id=?', params)
 
-            # 重算新股票持仓
-            recalculated = _recalculate_holding(cursor, new_stock_id)
+            # 重算新归属（股票, 账户）持仓
+            recalculated = _recalculate_holding(cursor, new_stock_id, new_account_id)
 
-            # 如果跨股票编辑，还要重算原股票持仓
-            if new_stock_id != old_stock_id:
-                recalculated_old = _recalculate_holding(cursor, old_stock_id)
+            # 如果跨股票/跨账户编辑，还要重算原归属持仓
+            if new_stock_id != old_stock_id or new_account_id != old_account_id:
+                recalculated_old = _recalculate_holding(cursor, old_stock_id, old_account_id)
                 conn.commit()
                 conn.close()
                 return jsonify(
@@ -798,7 +1334,7 @@ def api_update_trade(trade_id):
                     }
                 )
         else:
-            recalculated = _recalculate_holding(cursor, old_stock_id)
+            recalculated = _recalculate_holding(cursor, old_stock_id, old_account_id)
 
         conn.commit()
         conn.close()
@@ -830,7 +1366,7 @@ def api_delete_trade(trade_id):
             conn.close()
             return jsonify({'success': False, 'message': err_msg}), status_code
 
-        cursor.execute('SELECT stock_id FROM trade_records WHERE id=?', (trade_id,))
+        cursor.execute('SELECT stock_id, account_id FROM trade_records WHERE id=?', (trade_id,))
         trade = cursor.fetchone()
         if not trade:
             conn.rollback()
@@ -838,9 +1374,15 @@ def api_delete_trade(trade_id):
             return jsonify({'success': False, 'message': '流水记录不存在'}), 404
 
         stock_id = trade['stock_id']
+        # 021S：旧流水 account_id 为 NULL 时按默认账户重算
+        account_id = (
+            trade['account_id']
+            if trade['account_id'] is not None
+            else _get_default_account_id(cursor)
+        )
         cursor.execute('DELETE FROM trade_records WHERE id=?', (trade_id,))
 
-        recalculated = _recalculate_holding(cursor, stock_id)
+        recalculated = _recalculate_holding(cursor, stock_id, account_id)
 
         conn.commit()
         conn.close()
@@ -871,9 +1413,18 @@ def _check_trade_edit_restriction(cursor, trade_id, operation='edit', force_conf
         return False, '流水记录不存在', 404
 
     stock_id = trade['stock_id']
+    # 021S：清算状态按（股票, 账户）维度判断；旧流水无账户归属时按默认账户
+    account_id = (
+        trade['account_id']
+        if trade['account_id'] is not None
+        else _get_default_account_id(cursor)
+    )
 
-    # 1. 检查持仓是否已清算
-    cursor.execute('SELECT quantity, status FROM holdings WHERE stock_id=?', (stock_id,))
+    # 1. 检查持仓是否已清算（仅本账户）
+    cursor.execute(
+        'SELECT quantity, status FROM holdings WHERE stock_id=? AND account_id=?',
+        (stock_id, account_id),
+    )
     h = cursor.fetchone()
     if h and (h['quantity'] or 0) <= 0:
         return (
@@ -1064,20 +1615,27 @@ def api_cost_adjustment(holding_id):
 @bp.route('/api/portfolio/holdings/<int:stock_id>/trade-suggestion', methods=['GET'])
 def api_trade_suggestion(stock_id):
     """获取近3次同股票买入记录，用于预填推荐。
+    021S：可选 ?account_id= 按账户过滤（缺省=全部账户）。
     返回 avg_price, avg_quantity, count, latest_trade_date
     """
+    try:
+        account_id = _parse_account_scope(request.args.get('account_id'))
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        """
+    sql = """
         SELECT price, quantity, trade_date
         FROM trade_records
         WHERE stock_id=? AND trade_type='buy'
-        ORDER BY trade_date DESC, created_at DESC
-        LIMIT 3
-    """,
-        (stock_id,),
-    )
+    """
+    params = [stock_id]
+    if account_id is not None:
+        sql += ' AND account_id = ?'
+        params.append(account_id)
+    sql += ' ORDER BY trade_date DESC, created_at DESC LIMIT 3'
+    cursor.execute(sql, params)
     trades = cursor.fetchall()
     conn.close()
 
@@ -1141,6 +1699,8 @@ def _fetch_realtime_price_batch(symbols_markets):
 
     import requests as _requests
 
+    from modules.data_collector import _normalize_hk_symbol
+
     _log019y = _logging019y.getLogger(__name__)
 
     result = {}
@@ -1152,8 +1712,11 @@ def _fetch_realtime_price_batch(symbols_markets):
     stock_id_map = {}
     for stock_id, symbol, market in symbols_markets:
         if market == 'hk_stock':
-            # 港股：5位数字
-            hk_code = symbol.zfill(5)
+            # 港股：库内 HK3690 形态 → 腾讯 hk03690（剥离 HK 前缀+左补零至5位）
+            # 021M 修复：原 symbol.zfill(5) 对带前缀代码（'HK3690' 已6字符）无效，
+            # 生成 hkHK3690 错误代码 → 腾讯返回空 → 港股全部降级写入昨收（实测
+            # 2026-08-18：cache 价=08-17 收盘 88.0，实时价实为 84.95）
+            hk_code = _normalize_hk_symbol(symbol)
             tc = 'hk' + hk_code
         elif market == 'a_stock':
             if symbol.startswith('6'):

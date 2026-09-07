@@ -349,7 +349,8 @@ def _read_holder_structure(stock_id: int) -> dict | None:
     try:
         row = conn.execute(
             'SELECT stat_date, holder_count, holder_count_change_pct, total_shares, '
-            'inst_shares, inst_ratio, inst_report_date FROM holder_structure '
+            'inst_shares, inst_ratio, inst_report_date, inst_count, inst_count_change_pct '
+            'FROM holder_structure '
             'WHERE stock_id=? ORDER BY stat_date DESC LIMIT 1',
             (stock_id,),
         ).fetchone()
@@ -552,10 +553,14 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
     main_net_inflow = None
     north_net_buy = None
     margin_balance_chg = None
+    # 021Q：港股南下资金（展示字段——最新行的当日值；占比向后搜索最近非空）
+    south_net_buy = None
+    south_hold_ratio = None
 
     if cap_rows:
         latest_cap = cap_rows[-1]
         main_net_inflow = latest_cap.get('main_net_inflow')
+        south_net_buy = latest_cap.get('south_net_buy')
 
         # DATASRC-C: north_net_buy 向后搜索最近非空值
         # （北向资金数据可能不在最新一行）
@@ -563,6 +568,13 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
             v = row.get('north_holding_change')
             if v is not None:
                 north_net_buy = v
+                break
+
+        # 021Q: south_hold_ratio 向后搜索最近非空（港股通标的中途调入时首日即有）
+        for row in reversed(cap_rows):
+            v = row.get('south_hold_ratio')
+            if v is not None:
+                south_hold_ratio = v
                 break
 
         # DATASRC-C: margin_balance_chg 向后搜索最近两个非空值计算日变化
@@ -656,6 +668,12 @@ def load_stockdata_from_db(stock_id: int) -> StockData | None:
         if holder_structure
         else None,
         institution_hold_ratio=holder_structure.get('inst_ratio') if holder_structure else None,
+        # 021Q：港股资金面补强（展示字段；南下仅港股有值，机构数量环比仅港股 westock 行有值）
+        south_net_buy=south_net_buy,
+        south_hold_ratio=south_hold_ratio,
+        inst_count_change_pct=holder_structure.get('inst_count_change_pct')
+        if holder_structure
+        else None,
         # 扩展
         extra={'name': name, 'stock_id': stock_id},
     )

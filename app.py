@@ -135,7 +135,7 @@ def main():
     init_database()
 
     # P0-1: 评级配置自检（三处评级定义一致性，不一致时告警但不阻断启动）
-    from modules.analysis_engine import validate_rating_config
+    from modules.rating_config import validate_rating_config
 
     rating_issues = validate_rating_config()
     if rating_issues:

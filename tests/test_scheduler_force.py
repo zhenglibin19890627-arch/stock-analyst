@@ -32,6 +32,7 @@ def mocked_flow(monkeypatch):
 
     def fake_generate(**kwargs):
         captured['force'] = kwargs.get('force', False)
+        captured['market'] = kwargs.get('market_filter')
         return None
 
     monkeypatch.setattr(daily_report, 'generate_daily_report', fake_generate)
@@ -57,3 +58,54 @@ def test_weekend_scheduled_run_keeps_reuse(mocked_flow, monkeypatch):
     monkeypatch.setattr(daily_report, 'datetime', _FixedDatetime)
     daily_report._run_full_report_flow()
     assert mocked_flow['force'] is False
+
+
+# ---- 021Z：市场拆分（A股主批次 / 港股独立批次）----
+
+def test_main_batch_filters_a_stock_only(mocked_flow, monkeypatch):
+    """021Z：A股主批次仅生成 a_stock——港股 16:00 收盘晚于主批次，由独立批次负责"""
+    _FixedDatetime.DAY = datetime(2026, 8, 17, 15, 54, tzinfo=_CN_TZ)  # 周一
+    monkeypatch.setattr(daily_report, 'datetime', _FixedDatetime)
+    daily_report._run_full_report_flow()
+    assert mocked_flow['market'] == 'a_stock'
+
+
+def test_hk_batch_trading_day_forces_recalc(mocked_flow, monkeypatch):
+    """021Z：港股批次（交易日）→ force=True 且仅生成 hk_stock，完成后注册次日批次"""
+    _FixedDatetime.DAY = datetime(2026, 8, 17, 16, 10, tzinfo=_CN_TZ)  # 周一
+    monkeypatch.setattr(daily_report, 'datetime', _FixedDatetime)
+    registered = {}
+    monkeypatch.setattr(
+        daily_report, '_register_hk_report', lambda next_day=False: registered.update(next_day=next_day)
+    )
+    daily_report._hk_report_tick()
+    assert mocked_flow['force'] is True
+    assert mocked_flow['market'] == 'hk_stock'
+    assert registered['next_day'] is True
+
+
+def test_hk_batch_weekend_keeps_reuse(mocked_flow, monkeypatch):
+    """021Z：港股批次（非交易日）→ force=False 复用，不脏写"""
+    _FixedDatetime.DAY = datetime(2026, 8, 15, 16, 10, tzinfo=_CN_TZ)  # 周六
+    monkeypatch.setattr(daily_report, 'datetime', _FixedDatetime)
+    monkeypatch.setattr(daily_report, '_register_hk_report', lambda next_day=False: None)
+    daily_report._hk_report_tick()
+    assert mocked_flow['force'] is False
+    assert mocked_flow['market'] == 'hk_stock'
+
+
+def test_hk_tick_reschedules_even_on_exception(mocked_flow, monkeypatch):
+    """021Z：生成异常也不断链——finally 中仍注册次日批次"""
+    _FixedDatetime.DAY = datetime(2026, 8, 17, 16, 10, tzinfo=_CN_TZ)  # 周一
+    monkeypatch.setattr(daily_report, 'datetime', _FixedDatetime)
+
+    def boom(**kwargs):
+        raise RuntimeError('模拟生成失败')
+
+    monkeypatch.setattr(daily_report, 'generate_daily_report', boom)
+    registered = {}
+    monkeypatch.setattr(
+        daily_report, '_register_hk_report', lambda next_day=False: registered.update(next_day=next_day)
+    )
+    daily_report._hk_report_tick()  # 不应抛出
+    assert registered['next_day'] is True

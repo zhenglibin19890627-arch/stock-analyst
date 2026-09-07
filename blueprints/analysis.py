@@ -71,6 +71,35 @@ def _technical_detail_for_stock(stock_id):
                     f'多周期指标计算失败 stock_id={stock_id} table={table}: {e}'
                 )
         conn.close()
+
+        # 021S：技术面打分子项（月线方向/周线波段/日线择时 7 子项得分+权重+明细）。
+        # 复用评分引擎同口径计算（只读调用，不改引擎）；失败静默降级——
+        # 前端退回仅显示指标读数（旧形态），不影响报告主流程。
+        try:
+            from modules.data_adapter import load_stockdata_from_db
+            from modules.scoring_engine import TECHNICAL_SUBITEMS, score_dimension
+
+            sd = load_stockdata_from_db(stock_id)
+            if sd is not None:
+                sub_score, sub_detail = score_dimension(sd, TECHNICAL_SUBITEMS, 'technical')
+                if sub_detail.get('subitems'):
+                    # 与 analyze() 同口径的月线空头惩罚标记（仅展示文案，分值不重复收缩）
+                    if (
+                        sub_score is not None
+                        and sd.monthly_ma5 is not None
+                        and sd.monthly_ma10 is not None
+                        and sd.monthly_ma5 < sd.monthly_ma10
+                    ):
+                        sub_detail['monthly_penalty'] = '月线空头(MA5<MA10)，技术面得分×0.85'
+                    merged['scoring_score'] = sub_score
+                    merged['scoring_subitems'] = sub_detail['subitems']
+                    if sub_detail.get('monthly_penalty'):
+                        merged['monthly_penalty'] = sub_detail['monthly_penalty']
+        except Exception as e:  # noqa: BLE001 —— 子项得分属增强展示，失败不阻塞
+            logging.getLogger(__name__).warning(
+                f'技术面打分子项计算失败 stock_id={stock_id}: {e}'
+            )
+
         return merged if merged else None
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).warning(f'技术指标明细计算失败 stock_id={stock_id}: {e}')
@@ -124,15 +153,17 @@ def _capital_detail_for_stock(stock_id):
         mrow = cursor.fetchone()
         is_hk = bool(mrow and mrow['market'] == 'hk_stock')
         cursor.execute(
-            'SELECT trade_date, main_net_inflow, north_holding_change, margin_balance '
+            'SELECT trade_date, main_net_inflow, north_holding_change, margin_balance, '
+            'south_net_buy, south_hold_ratio '
             'FROM raw_capital_flow WHERE stock_id = ? ORDER BY trade_date ASC',
             (stock_id,),
         )
         rows = [dict(r) for r in cursor.fetchall()]
-        # 020R-45：股东人数/机构持仓最新一期
+        # 020R-45：股东人数/机构持仓最新一期（021Q：含港股机构股东数量）
         cursor.execute(
             'SELECT stat_date, holder_count, holder_count_change_pct, total_shares, '
-            'inst_shares, inst_ratio, inst_report_date FROM holder_structure '
+            'inst_shares, inst_ratio, inst_report_date, inst_count, inst_count_change_pct '
+            'FROM holder_structure '
             'WHERE stock_id = ? ORDER BY stat_date DESC LIMIT 1',
             (stock_id,),
         )
@@ -280,6 +311,98 @@ def api_analyze_stock(stock_id):
         return jsonify({'success': False, 'message': f'分析失败: {e!s}'}), 500
 
 
+def _attach_scoring_subitems(stock_id, result):
+    """021V：基本面/资金面/消息面打分子项注入（021S 技术面同口径）。
+
+    只读复用评分引擎（score_dimension + 各维 SUBITEMS，引擎零改动），在四维明细
+    dict 上附带 scoring_score / scoring_subitems（name/score/normalized_weight/
+    completeness/degradation/detail）；明细为 None 的维度跳过。
+    失败静默降级——前端退回纯指标读数形态，不影响报告主流程。
+    """
+    try:
+        from modules.data_adapter import load_stockdata_from_db
+        from modules.scoring_engine import (
+            CAPITAL_SUBITEMS,
+            FUNDAMENTAL_SUBITEMS,
+            NEWS_SUBITEMS,
+            score_dimension,
+        )
+
+        sd = load_stockdata_from_db(stock_id)
+        if sd is None:
+            return
+        for detail_key, subitems, dim_name in (
+            ('fundamental_detail', FUNDAMENTAL_SUBITEMS, 'fundamental'),
+            ('capital_detail', CAPITAL_SUBITEMS, 'capital'),
+            ('news_detail', NEWS_SUBITEMS, 'news'),
+        ):
+            detail = result.get(detail_key)
+            if not isinstance(detail, dict):
+                continue
+            sub_score, sub_detail = score_dimension(sd, subitems, dim_name)
+            if sub_detail.get('subitems'):
+                detail['scoring_score'] = sub_score
+                detail['scoring_subitems'] = sub_detail['subitems']
+    except Exception as e:  # noqa: BLE001 —— 子项得分属增强展示，失败不阻塞
+        logging.getLogger(__name__).warning(f'打分子项计算失败 stock_id={stock_id}: {e}')
+
+
+def _enrich_advice_result(stock_id, result):
+    """021K：实时建议结果的统一增强后处理。
+
+    /advise 端点与 report-latest 实时路径共用，保证「打开报告」与「手动刷新」
+    返回完全同源同构的数据（021E~021K 系列教训：两路口径漂移 = UX 不一致）。
+    仅做后处理增强，不修改 generate_advice 本体（B24 红线）。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from modules.advisor import _build_markdown_single
+    from modules.price_advisor import generate_price_advice
+
+    _CN_TZ = timezone(timedelta(hours=8))
+
+    # 005: 价格建议（后处理集成）
+    result['price_advice'] = generate_price_advice(stock_id, result)
+    # 009补充：动态操作建议覆盖旧建议，避免矛盾
+    if result.get('price_advice', {}).get('action_suggestion'):
+        result['position_advice'] = result['price_advice']['action_suggestion']
+    # 019L: generated_at（与 DB 行路径一致）
+    result['generated_at'] = datetime.now(_CN_TZ).isoformat()
+    # 020R-41：补齐数据完整度行
+    _enrich_data_warnings(result, stock_id)
+    # 020R-43：advice_detail 结构化 markdown
+    result['advice_detail'] = _build_markdown_single(result, result.get('previous_score'))
+    # 020R-35/37/38/39：四维指标明细（四维评分详情卡片数据）
+    result['technical_detail'] = _technical_detail_for_stock(stock_id)
+    result['fundamental_detail'] = _fundamental_detail_for_stock(stock_id)
+    result['capital_detail'] = _capital_detail_for_stock(stock_id)
+    result['news_detail'] = _news_detail_for_stock(stock_id)
+    # 021V：基本面/资金面/消息面打分子项（021S 技术面同口径，实时/快照两路径同源）
+    _attach_scoring_subitems(stock_id, result)
+    # 020R-54：行业资金背景
+    result['industry_flow_bg'] = _industry_flow_bg_for_stock(stock_id)
+    return result
+
+
+def _generate_fresh_advice(stock_id):
+    """021K：实时重评 = generate_advice + 统一增强；任何失败返回 None（调用方回落快照）。"""
+    try:
+        from modules.advisor import generate_advice
+
+        advice = generate_advice(stock_id)
+        if advice.get('success'):
+            return _enrich_advice_result(stock_id, advice)
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            f'[report-latest] 实时重评失败 stock_id={stock_id}: {e}'
+        )
+    return None
+
+
+# 021K：当日报告快照过旧阈值（分钟）——超过即服务端实时重评（与手动刷新同源）
+_REPORT_STALE_MINUTES = 15
+
+
 @bp.route('/api/stocks/<int:stock_id>/report-latest', methods=['GET'])
 def api_get_report_latest(stock_id):
     """P3-A 附加修复：从 daily_reports 表读取该股票最新报告的评分数据。
@@ -312,6 +435,34 @@ def api_get_report_latest(stock_id):
     )
     row = cursor.fetchone()
 
+    # 021K：当日已有报告但快照过旧（>15分钟，工作日）→ 服务端实时重评，
+    # 与手动「🔄 刷新报告」同源同副作用；失败回落快照展示（不影响打开）。
+    if row is not None:
+        _stale = True
+        try:
+            _gen_dt = datetime.fromisoformat(row['generated_at'])
+            _stale = (datetime.now(_CN_TZ) - _gen_dt).total_seconds() > _REPORT_STALE_MINUTES * 60
+        except (ValueError, TypeError):
+            pass  # 时间戳缺失/解析失败 → 视为过旧
+        if _stale and datetime.now(_CN_TZ).weekday() < 5:
+            conn.close()
+            _fresh = _generate_fresh_advice(stock_id)
+            if _fresh is not None:
+                return jsonify(_fresh)
+            # 重评失败：重开连接回落快照路径
+            conn = get_connection()
+            cursor = conn.cursor()
+            target_type = _resolve_report_type(cursor, today)
+            cursor.execute(
+                """SELECT dr.*, s.symbol, s.name, s.market
+                   FROM daily_reports dr
+                   JOIN stocks s ON dr.stock_id = s.id
+                   WHERE dr.stock_id = ? AND dr.report_date = ?
+                   AND dr.status = 'ok' AND dr.report_type = ? """,
+                (stock_id, today, target_type),
+            )
+            row = cursor.fetchone()
+
     # B11-DETAIL-LOAD：当日无报告时，自动触发分析（静默）
     if not row:
         conn.close()
@@ -324,35 +475,11 @@ def api_get_report_latest(stock_id):
                 '跳过实时生成，直接回退最新日报快照（020M）'
             )
         else:
-            try:
-                from modules.advisor import generate_advice
-
-                advice = generate_advice(stock_id)
-                if advice.get('success'):
-                    # 005: 追加 price_advice（与 /advise 端点一致）
-                    from modules.price_advisor import generate_price_advice as _gpa2
-
-                    advice['price_advice'] = _gpa2(stock_id, advice)
-                    # 009补充：动态操作建议覆盖旧建议，避免矛盾
-                    if advice.get('price_advice', {}).get('action_suggestion'):
-                        advice['position_advice'] = advice['price_advice']['action_suggestion']
-                    # 020M：补齐综合文本（与日报快照同源 markdown），前端「综合分析」不再缺失
-                    try:
-                        from modules.advisor import _build_markdown_single as _bmd
-                        from modules.daily_report import _get_prev_score as _gps
-
-                        _prev = _gps(stock_id, today)
-                        advice['advice_detail'] = _bmd(advice, _prev)
-                    except Exception as _e_md:
-                        logging.getLogger(__name__).warning(
-                            f'[report-latest] advice_detail 构建失败: {_e_md}'
-                        )
-                    # 分析成功，直接返回引擎结果
-                    # 019D: 补充 generated_at（报告生成时刻，与 DB 行路径一致）
-                    advice['generated_at'] = datetime.now(_CN_TZ).isoformat()
-                    return jsonify(advice)
-            except Exception:
-                pass
+            # 021K：实时重评统一走 _generate_fresh_advice（含全量字段增强，
+            # 与手动「🔄 刷新报告」完全同源——修复首开缺四维明细/亮点/行业背景的口径漂移）
+            _fresh = _generate_fresh_advice(stock_id)
+            if _fresh is not None:
+                return jsonify(_fresh)
 
         # 引擎也失败，回退到历史报告
         conn = get_connection()
@@ -545,6 +672,8 @@ def api_get_report_latest(stock_id):
     result['capital_detail'] = _capital_detail_for_stock(stock_id)
     # 020R-39：消息面指标明细（情绪/股东行为，供消息面卡展示）
     result['news_detail'] = _news_detail_for_stock(stock_id)
+    # 021V：快照路径同样注入打分子项（与 _enrich_advice_result 实时路径同源）
+    _attach_scoring_subitems(stock_id, result)
     # 020R-43：快照路径补齐 risk_warnings（从日报 markdown 解析，与实时路径一致）
     result['risk_warnings'] = _parse_markdown_risks(row['markdown_content'])
 
@@ -558,36 +687,9 @@ def api_advise_stock(stock_id):
 
     try:
         result = generate_advice(stock_id)
-        # 005: 后处理集成价格建议（不修改 generate_advice）
+        # 021K：成功时走统一增强（与 report-latest 实时路径同源，杜绝两路口径漂移）
         if result.get('success'):
-            from modules.price_advisor import generate_price_advice
-
-            result['price_advice'] = generate_price_advice(stock_id, result)
-            # 009补充：动态操作建议覆盖旧建议，避免矛盾
-            if result.get('price_advice', {}).get('action_suggestion'):
-                result['position_advice'] = result['price_advice']['action_suggestion']
-            # 019L: 补充 generated_at（报告生成时刻，与 /report-latest 019D 同型）
-            from datetime import datetime, timezone
-            from datetime import timedelta as _td
-
-            _CN_TZ = timezone(_td(hours=8), name='Asia/Shanghai')
-            result['generated_at'] = datetime.now(_CN_TZ).isoformat()
-            # 020R-41：补齐数据完整度行（与每日报告路径一致）
-            _enrich_data_warnings(result, stock_id)
-            # 020R-43：advice_detail 统一为结构化 markdown（与快照路径一致，不再是一段纯文本）
-            from modules.advisor import _build_markdown_single
-
-            result['advice_detail'] = _build_markdown_single(result, result.get('previous_score'))
-            # 020R-35：技术指标明细（均线/MACD/RSI/KDJ/布林/量能）
-            result['technical_detail'] = _technical_detail_for_stock(stock_id)
-            # 020R-37：基本面指标明细（估值/盈利/成长/现金流/财务健康）
-            result['fundamental_detail'] = _fundamental_detail_for_stock(stock_id)
-            # 020R-38：资金面指标明细（主力/北向/两融）
-            result['capital_detail'] = _capital_detail_for_stock(stock_id)
-            # 020R-39：消息面指标明细（情绪/股东行为）
-            result['news_detail'] = _news_detail_for_stock(stock_id)
-            # 020R-54：行业资金背景（所属行业当日资金流向 + 排名 + 连续方向；港股/无匹配为 None）
-            result['industry_flow_bg'] = _industry_flow_bg_for_stock(stock_id)
+            result = _enrich_advice_result(stock_id, result)
         return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'message': f'建议生成失败: {e!s}'}), 500

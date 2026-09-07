@@ -1,5 +1,5 @@
 """
-v5.0 四维评分引擎原型 (Scoring Engine Prototype)
+v5.0 四维评分引擎 (Scoring Engine)
 
 基于标准数据契约(StockData)的四维量化评分引擎。
 实现 v5.0 报告第3章"维度内子权重调整"机制（Q03决策），
@@ -8,7 +8,8 @@ v5.0 四维评分引擎原型 (Scoring Engine Prototype)
 输入：StockData 对象（由数据采集层/适配器层/MockDataProvider 提供）
 输出：AnalysisResult 对象（v5.0标准分析结果契约）
 
-与旧版 analysis_engine.py 的区别：
+021AE：本引擎为唯一评分引擎（经典引擎 analysis_engine.py 及灰度切换器已删除）。
+相对已删除的经典引擎的核心优势：
 1. 完全消费 StockData 契约，与数据库解耦（可用 MockDataProvider 直接测试）
 2. 实现子项级权重调整（A类归零/B类降权/C类默认填充），而非维度级粗粒度归零
 3. 输出符合 v5.0 AnalysisResult 契约
@@ -853,15 +854,26 @@ def score_fin_health(data: StockData) -> tuple[float, dict]:
 
 
 def score_sentiment(data: StockData) -> tuple[float, dict]:
-    """情绪子项评分：news_sentiment 映射（缺失时用中性0.0填充，D01）"""
+    """情绪子项评分：news_sentiment 映射（缺失时用中性0.0填充，D01）
+
+    021BC 非对称映射：负向保持全斜率 (s+1)*48（-1→0，负面情绪全额惩罚）；
+    正向斜率减半 48+s*24（+1→72 封顶）。依据：699 条 v5 回测样本维度归因——
+    消息面分是四维中唯一与 1w 收益负相关的维度（-0.098），且高分错误样本的
+    消息分均值（76.8）显著高于正确样本（67.1）：正面情绪多为已定价噪音，
+    负面情绪才携带增量信息。002 校准档位与子项结构零改动（§6 豁免登记）。
+    """
     sentiment = data.news_sentiment
     if sentiment is None:
         sentiment = NEUTRAL_SENTIMENT  # D01: 中性值0.0
 
     detail = {'news_sentiment': f'{sentiment:+.2f}'}
-    # -1.0(极空) ~ +1.0(极多) 映射到 0 ~ 100，50为中性
-    # B18-T4: 映射曲线从 (sentiment+1)*50 → (sentiment+1)*48，轻微压缩上限
-    score = _clamp((sentiment + 1.0) * 48.0, 0, 95)
+    # 021BC：非对称映射（替代 B18-T4 对称曲线 (s+1)*48）
+    #   s<=0：(s+1)*48  → -1→0 / -0.5→24 / 0→48，负向全额惩罚
+    #   s>0：48+s*24    → +0.5→60 / +1→72，正向减半封顶
+    if sentiment > 0:
+        score = _clamp(48.0 + sentiment * 24.0, 0, 95)
+    else:
+        score = _clamp((sentiment + 1.0) * 48.0, 0, 95)
     if sentiment > 0.3:
         detail['note'] = '显著正面'
     elif sentiment > 0.1:
@@ -1153,17 +1165,76 @@ def _normalize_dim_weights(
     return normalized, was_rescaled
 
 
-def _map_rating(total_score: float) -> tuple[str, str]:
+def _map_rating(total_score: float, market: str = 'A') -> tuple[str, str]:
     """总分 → 评级档位（中文5档，80/65/50/30 边界）
 
     RATING-ALIGN-004：返回中文5档，key 与 label 统一。
+    021R：港股差异化门槛——market='HK' 时热加载 config_weights.json
+    hk_stock.rating_overrides（推荐买入 65→70，矫正港股评级系统性偏多：
+    实测港股"推荐买入"占比 39% vs A股 16%，主因资金面数据缺失时归一化
+    放大剩余子项权重推高总分）。market 缺省 'A' 维持全局档位——
+    normalize_rating/回测等历史调用方零影响。
     """
-    sorted_ratings = sorted(RATING_THRESHOLDS.items(), key=lambda x: x[1]['min'], reverse=True)
+    thresholds = RATING_THRESHOLDS
+    if market == 'HK':
+        thresholds = _load_hk_rating_overrides()
+    sorted_ratings = sorted(thresholds.items(), key=lambda x: x[1]['min'], reverse=True)
     for grade, info in sorted_ratings:
         if total_score >= info['min']:
             return grade, grade  # 中文5档 key 即 label
     last = sorted_ratings[-1]
     return last[0], last[0]
+
+
+# 021R：港股评级门槛覆盖（config_weights.json 缺失/异常时的回退值）
+_HK_RATING_OVERRIDES_FALLBACK = {
+    '推荐买入': {'min': 70, 'max': 79},
+    '持有观望': {'min': 50, 'max': 69},
+}
+
+
+def _load_hk_rating_overrides() -> dict:
+    """021R：热加载港股评级门槛覆盖（hk_stock.rating_overrides）。
+
+    全局 rating_mapping（80/65/50/30）受红线核验锁定不动；港股覆盖是
+    独立键，仅 market='HK' 的评分路径消费。返回完整档位表（覆盖合并后）。
+    """
+    merged = {k: dict(v) for k, v in RATING_THRESHOLDS.items()}
+    try:
+        with open(_WEIGHTS_FILE, encoding='utf-8') as f:
+            config = json.load(f)
+        overrides = (config.get('hk_stock') or {}).get('rating_overrides')
+        if overrides:
+            for grade, info in overrides.items():
+                if grade in merged and isinstance(info, dict) and 'min' in info:
+                    merged[grade] = dict(info)
+            return merged
+    except (OSError, FileNotFoundError, json.JSONDecodeError) as e:
+        logger.warning(f'港股评级门槛覆盖加载失败: {e}，使用回退值')
+    merged.update(_HK_RATING_OVERRIDES_FALLBACK)
+    return merged
+
+
+def _shrink_dim_to_confidence(score, completeness: float | None, dim_cn: str, floor: float = 0.75):
+    """021R：维度置信收缩——数据完整度低于 floor 时，维度分向中性 50 收缩。
+
+    背景：子项缺失时维度内子权重归一化会放大剩余子项（港股资金面 4 子项
+    仅 2 项有数据，主力+机构持仓权重被放大 1.43 倍，维度分虚高——实测
+    港股资金面 >70 分占比 63% vs 数据完整度仅 50%）。收缩系数 =
+    completeness / floor，完整度达标（≥floor）时原分透传不受影响。
+
+    Returns:
+        (收缩后分数或原 None, 说明文案或 None)
+    """
+    if score is None or completeness is None or completeness >= floor:
+        return score, None
+    factor = round(max(completeness, 0.0) / floor, 4)
+    new_score = round(50 + (score - 50) * factor, 1)
+    note = (
+        f'{dim_cn}完整度 {completeness:.0%}（阈值 {floor:.0%}），维度分置信收缩 '
+        f'{score}→{new_score}（系数 {factor}）——子项缺失时归一化放大了剩余子项权重'
+    )
+    return new_score, note
 
 
 def _generate_suggestion(rating: str, dim_scores: dict) -> str:
@@ -1257,6 +1328,16 @@ def analyze(data: StockData) -> AnalysisResult:
     news_score, news_detail = score_dimension(data, NEWS_SUBITEMS, 'news')
     cap_score, cap_detail = score_dimension(data, CAPITAL_SUBITEMS, 'capital')
 
+    # 021R：资金面置信收缩——仅港股、完整度 <75% 时维度分向中性 50 收缩
+    # （港股资金面 4 子项常缺 2 项：两融无披露源+户数无披露源，归一化放大
+    # 剩余子项致虚高——实测港股资金面 >70 分占比 63% vs 完整度仅 50%）。
+    # A股不启用：A股资金面完整度常态 4/4，且 A股评分基线经 002 校准锁定（R7）。
+    cap_shrink_note = None
+    if cap_score is not None and data.market == 'HK':
+        cap_score, cap_shrink_note = _shrink_dim_to_confidence(cap_score, dq.capital, '资金面')
+        if cap_shrink_note:
+            cap_detail['confidence_shrinkage'] = cap_shrink_note
+
     dim_results = {
         'kline': tech_detail,
         'fundamental': fund_detail,
@@ -1287,8 +1368,8 @@ def analyze(data: StockData) -> AnalysisResult:
         total_score += dim_score_val * norm_dim_weights.get(dim_key, 0)
     total_score = round(total_score, 1)
 
-    # 6. 评级
-    rating, rating_label = _map_rating(total_score)
+    # 6. 评级（021R：港股走差异化门槛 hk_stock.rating_overrides）
+    rating, rating_label = _map_rating(total_score, data.market)
 
     # 7. 操作建议
     suggestion = _generate_suggestion(rating, dim_results)
@@ -1322,9 +1403,14 @@ def analyze(data: StockData) -> AnalysisResult:
                     )
     if was_rescaled:
         warnings.append(f'维度权重已重新归一化（活跃维度: {sorted(available_dims)}）')
+    # 021R：置信收缩提示进结果警告（港股低完整度资金面评分依据透明化）
+    if cap_shrink_note:
+        warnings.append(cap_shrink_note)
 
     # B10/020R-47：两融数据源不可用时提示用户（互联互通子项已移除，不再提及北向）
-    if data.margin_balance_chg is None:
+    # 021U：港股无两融披露源属制度性缺失（非故障），不再提示——替代数据
+    # （南下资金/机构股东数量）已在展示层呈现；仅 A股缺失时提示（可能是数据源故障）
+    if data.margin_balance_chg is None and data.market != 'HK':
         warnings.append('资金面提示：两融数据源暂不可用，当前评分基于主力资金/机构持仓/股东人数等')
 
     # 9. 组装结果

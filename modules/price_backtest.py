@@ -75,6 +75,16 @@ MIN_TARGET_GAIN = {
     '强烈建议卖出': 0.02,
 }
 
+# 021AJ/021AL同步：目标/止损距离市场校准（与 price_advisor.py 同步，修改时需双向同步；
+# 依据见 price_advisor.py 021AJ/021AL 注释——真实样本重放模拟）
+TARGET_CAP = {'a_stock': 0.075, 'hk_stock': 0.11}
+POSITION_STOP_PCT = {'a_stock': 0.11, 'hk_stock': 0.16}
+
+
+def _norm_market(market):
+    """市场归一化（与 price_advisor 同步）：('hk_stock','HK')→'hk_stock'，其余→'a_stock'。"""
+    return 'hk_stock' if market in ('hk_stock', 'HK') else 'a_stock'
+
 
 # ================================================================
 # 1. 历史技术指标计算
@@ -162,10 +172,10 @@ def _calc_resistance(close, ma60, boll_upper):
     return close * 1.10
 
 
-def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr):
+def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr, market='a_stock'):
     """无持仓：买入区间 / 目标价 / 止损价 / 建议仓位
 
-    与 price_advisor._gen_no_position 逻辑完全一致。
+    与 price_advisor._gen_no_position 逻辑完全一致（021AJ：目标价按市场封顶）。
     """
     position_pct = RATING_POSITION_PCT.get(rating, 0)
 
@@ -204,6 +214,11 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr):
     min_target = close * 1.05
     target_price = max(target_price, min_target)
 
+    # 021AJ：目标价封顶（市场校准，与 price_advisor 同步）
+    cap_gain = TARGET_CAP.get(_norm_market(market))
+    if cap_gain:
+        target_price = min(target_price, close * (1 + cap_gain))
+
     # ---- 止损价 ----
     if atr and atr > 0:
         stop_loss = buy_low - atr * 1.5
@@ -222,17 +237,25 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr):
     }
 
 
-def _gen_with_position(close, cost_price, rating, ma60=None, boll_upper=None, atr=None):
+def _gen_with_position(close, cost_price, rating, ma60=None, boll_upper=None, atr=None,
+                       market='a_stock'):
     """有持仓：止盈价 / 止损价 / 补仓价位（020P 现价锚定版）
 
     与 price_advisor._gen_with_position 逻辑一致，修改时需双向同步。
     020P：止盈/止损锚定现价（与成本解耦）——take_profit = max(min_tp, min(fixed_tp, resistance))
     其中 fixed_tp/min_tp 均基于 close；止损 = close * (1 - 评级止损比例)。
-    补仓价位与 price_advisor._build_grid 有持仓补仓位一致（S4 已破止损时不设）。
+    021AJ：A股止损距离校准为统一 -11%（评级分档 -3~8% 实测 T+20 触发 66%）。
+    补仓价位与 price_advisor._build_grid 补仓一档一致（S4 已破止损时不设；
+    021AQ：网格另有补仓二档，回测补仓区间口径锚定首档，此公式勿改）。
     """
     target_gain = RATING_TARGET_GAIN.get(rating, 0.12)
     min_target_gain = MIN_TARGET_GAIN.get(rating, 0.04)
     stop_loss_pct = RATING_STOP_LOSS.get(rating, 0.05)
+
+    # 021AJ/021AL：止损市场校准（与 price_advisor 同步）——A股 -11% / 港股 -16%
+    calibrated_stop = POSITION_STOP_PCT.get(_norm_market(market))
+    if calibrated_stop is not None:
+        stop_loss_pct = calibrated_stop
 
     # ---- 动态止盈：max(min_tp, min(fixed_tp, resistance))（020P：锚定现价）----
     fixed_tp = close * (1 + target_gain)
@@ -264,13 +287,14 @@ def _gen_with_position(close, cost_price, rating, ma60=None, boll_upper=None, at
     }
 
 
-def _gen_price_advice_at_date(indicators, rating, cost_price):
+def _gen_price_advice_at_date(indicators, rating, cost_price, market='a_stock'):
     """在指定日期生成价格建议
 
     Args:
         indicators: _calc_historical_indicators 返回的指标dict
         rating: 当前最新评级
         cost_price: 持仓成本价（None表示无持仓）
+        market: 'a_stock'/'hk_stock'（021AJ：目标封顶/止损校准按市场）
 
     Returns:
         dict: 价格建议字典
@@ -287,10 +311,12 @@ def _gen_price_advice_at_date(indicators, rating, cost_price):
 
     # 有持仓模式（传递 ma60/boll_upper 用于动态止盈计算）
     if cost_price and cost_price > 0:
-        return _gen_with_position(close, cost_price, rating, ma60, boll_upper, indicators['atr'])
+        return _gen_with_position(
+            close, cost_price, rating, ma60, boll_upper, indicators['atr'], market=market
+        )
 
     # 无持仓模式
-    return _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr)
+    return _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr, market=market)
 
 
 # ================================================================
@@ -347,6 +373,7 @@ def _check_hit(kline_slice, advice, period_label):
     take_profit = advice.get('take_profit')
 
     # 补仓区间（有持仓网格补仓位）：优先 advice['add_price']，兼容 grid 中 type='add' 档位
+    # 021AQ：网格有两档补仓，回测口径锚定最高档（最先触发的补仓机会）
     add_price = None
     add_raw = advice.get('add_price')
     if add_raw is not None:
@@ -356,8 +383,8 @@ def _check_hit(kline_slice, advice, period_label):
         if isinstance(grid, list):
             for g in grid:
                 if g.get('type') == 'add' and g.get('price'):
-                    add_price = float(g['price'])
-                    break
+                    p = float(g['price'])
+                    add_price = p if add_price is None else max(add_price, p)
 
     for day_idx, row in enumerate(kline_slice):
         day_high = float(row['high'] or 0)
@@ -397,14 +424,15 @@ def _check_hit(kline_slice, advice, period_label):
                 if result[f'{period_label}_hit_add'] is None:
                     result[f'{period_label}_hit_add'] = 1
 
-    # 未命中的设为0（buy_range/target/stop_loss）
-    for key in [
-        f'{period_label}_hit_buy_range',
-        f'{period_label}_hit_target',
-        f'{period_label}_hit_stop_loss',
-    ]:
-        if result[key] is None:
-            result[key] = 0
+    # 未命中设0——021AJ口径修复：仅当对应价位存在时才计"未命中"，
+    # 与下方 take_profit 的处理对齐（有持仓行 target_price=None，
+    # 旧口径把它算进"目标未命中"分母，稀释目标命中率：125 条中 29 条持仓行全计未中）
+    if buy_low is not None and buy_high is not None and result[f'{period_label}_hit_buy_range'] is None:
+        result[f'{period_label}_hit_buy_range'] = 0
+    if target_price is not None and result[f'{period_label}_hit_target'] is None:
+        result[f'{period_label}_hit_target'] = 0
+    if stop_loss is not None and result[f'{period_label}_hit_stop_loss'] is None:
+        result[f'{period_label}_hit_stop_loss'] = 0
 
     # take_profit 特殊处理：仅当 advice 中 take_profit 不为 None 时才设为0，
     # 否则保持 None（避免无持仓样本稀释止盈命中率）
@@ -447,7 +475,8 @@ def _read_cost_price(stock_id):
         try:
             cursor.execute(
                 'SELECT cost_price, quantity FROM holdings '
-                "WHERE stock_id = ? AND status = 'active'",
+                "WHERE stock_id = ? AND status = 'active' "
+                'ORDER BY quantity DESC LIMIT 1',
                 (stock_id,),
             )
             row = cursor.fetchone()
@@ -495,64 +524,65 @@ def _normalize_rating_for_compare(rating_str):
     return normalize_rating(rating_str)
 
 
-def _mark_rating_confidence(cursor, stock_id, bt_date, rating):
-    """查找回测日前后5天内最近的评级记录，判断锚点可信度。
-
-    Args:
-        cursor: 数据库游标
-        stock_id: 股票ID
-        bt_date: 回测日期 (YYYY-MM-DD)
-        rating: 回测使用的当前评级
+def _find_anchor_rating(cursor, stock_id, bt_date, window_days=5):
+    """021AU：查回测日 ±window_days 天内最近的评级记录（真实锚点）。
 
     Returns:
-        dict: {rating_confidence, anchor_rating_date, anchor_rating, days_since_rating}
+        sqlite3.Row（rating_date/rating/days_diff）或 None
     """
-    result = {
-        'rating_confidence': 'unknown',
-        'anchor_rating_date': None,
-        'anchor_rating': None,
-        'days_since_rating': None,
-    }
+    cursor.execute(
+        """
+        SELECT rating_date, rating,
+               CAST(ABS(julianday(rating_date) - julianday(?)) AS INTEGER) as days_diff
+        FROM ratings_history
+        WHERE stock_id = ?
+          AND rating_date BETWEEN date(?, '-5 days') AND date(?, '+5 days')
+        ORDER BY days_diff ASC
+        LIMIT 1
+    """,
+        (bt_date, stock_id, bt_date, bt_date),
+    )
+    return cursor.fetchone()
 
-    try:
-        cursor.execute(
-            """
-            SELECT rating_date, rating,
-                   CAST(ABS(julianday(rating_date) - julianday(?)) AS INTEGER) as days_diff
-            FROM ratings_history
-            WHERE stock_id = ?
-              AND rating_date BETWEEN date(?, '-5 days') AND date(?, '+5 days')
-            ORDER BY days_diff ASC
-            LIMIT 1
-        """,
-            (bt_date, stock_id, bt_date, bt_date),
-        )
-        row = cursor.fetchone()
 
-        if row:
-            anchor_rating_raw = row['rating']
-            anchor_date = row['rating_date']
-            days_diff = row['days_diff']
+def _historical_position_state(trades, bt_date):
+    """021AU：回测日时点的持仓状态——从买卖流水倒推（无未来函数）。
 
-            # 归一化两端评级进行比较
-            bt_norm = _normalize_rating_for_compare(rating)
-            anchor_norm = _normalize_rating_for_compare(anchor_rating_raw)
+    Args:
+        trades: 该股票全部 buy/sell 流水（正序）list[dict]
+        bt_date: 回测日 'YYYY-MM-DD'
 
-            if bt_norm and anchor_norm:
-                if bt_norm == anchor_norm:
-                    result['rating_confidence'] = 'confirmed'
+    Returns:
+        (has_position, cost_price)：cost 为全账户加权平均成本（无持仓时 None）
+
+    口径与 _recalculate_holding 的平均成本法一致（股票级跨账户聚合）；
+    分红/红利补税不影响数量与成本，不参与倒推。
+    """
+    total_qty = 0
+    total_cost = 0.0
+    for t in trades:
+        if (t.get('trade_date') or '') > bt_date:
+            break  # 正序流，遇首个未来日期即停（无未来函数）
+        qty = int(t.get('quantity') or 0)
+        price = float(t.get('price') or 0)
+        commission = float(t.get('commission') or 0)
+        if qty <= 0:
+            continue
+        if t['trade_type'] == 'buy':
+            total_cost += qty * price + commission
+            total_qty += qty
+        elif t['trade_type'] == 'sell':
+            if total_qty > 0:
+                avg = total_cost / total_qty
+                total_qty -= qty
+                if total_qty <= 0:
+                    total_qty = 0
+                    total_cost = 0.0
                 else:
-                    result['rating_confidence'] = 'mismatched'
-            else:
-                result['rating_confidence'] = 'unknown'
-
-            result['anchor_rating_date'] = anchor_date
-            result['anchor_rating'] = anchor_rating_raw
-            result['days_since_rating'] = days_diff
-    except Exception as e:
-        logger.debug(f'_mark_rating_confidence stock_id={stock_id} date={bt_date}: {e}')
-
-    return result
+                    total_cost = avg * total_qty
+    if total_qty > 0:
+        return True, round(total_cost / total_qty, 4)
+    return False, None
 
 
 def _calc_bias_risk(all_kline, bt_idx, rating):
@@ -622,14 +652,21 @@ def run_price_backtest(market=None, force=False):
     conn = get_connection()
     cursor = conn.cursor()
 
-    # force=True 时清除旧记录（全表清空，破坏性操作 → 先备份）
+    # force=True 时清除旧记录（破坏性操作 → 先备份）
+    # 021AT：指定 market 时只清该市场的行——原实现全表清空后仅重建所选市场，
+    # 导致"选A股重跑"把港股结果全部抹掉（实测 170 条港股行被误清）
     if force:
         backup_database('clear_price_backtest_results')
-        cursor.execute('DELETE FROM price_backtest_results')
+        if market:
+            cursor.execute(
+                'DELETE FROM price_backtest_results WHERE market = ?', (market,)
+            )
+        else:
+            cursor.execute('DELETE FROM price_backtest_results')
         cleared = cursor.rowcount if cursor.rowcount else 0
         conn.commit()
         if cleared:
-            logger.info(f'price_backtest: 清除 {cleared} 条旧记录')
+            logger.info(f'price_backtest: 清除 {cleared} 条旧记录 (market={market or "全部"})')
 
     # 获取所有有足够K线数据的股票
     if market:
@@ -692,8 +729,8 @@ def run_price_backtest(market=None, force=False):
             errors += 1
             continue
 
-        # 2. 获取当前持仓成本价
-        cost_price = _read_cost_price(stock_id)
+        # 2. 021AU：不再预读当前成本——持仓状态/成本改在回放点按流水倒推
+        #    （原实现用"现在的成本"回放全部历史，含未来函数）
 
         # 3. 读取全部K线数据（正序）
         conn = get_connection()
@@ -727,6 +764,15 @@ def run_price_backtest(market=None, force=False):
         conn = get_connection()
         cursor = conn.cursor()
 
+        # 021AU：预读该股票全部买卖流水（正序），回放时按日期切片倒推持仓状态
+        cursor.execute(
+            "SELECT trade_type, price, quantity, commission, trade_date, created_at "
+            "FROM trade_records WHERE stock_id = ? AND trade_type IN ('buy','sell') "
+            'ORDER BY trade_date ASC, created_at ASC',
+            (stock_id,),
+        )
+        all_trades = [dict(r) for r in cursor.fetchall()]
+
         for bt_idx in bt_indices:
             total += 1
             bt_date = all_kline[bt_idx]['trade_date']
@@ -740,8 +786,31 @@ def run_price_backtest(market=None, force=False):
                     errors += 1
                     continue
 
-                # 5. 生成价格建议
-                advice = _gen_price_advice_at_date(indicators, rating, cost_price)
+                # 4.5 021AU：锚点优先——回放评级用锚点当天系统真实评级
+                # （无未来函数、重跑结果稳定）；无锚点的早期时段退回当前实时
+                # 评级（历史重建点，anchor 为空，报告中仅作参照）。
+                # 持仓状态同步由流水倒推至回测日时点（非"现在是否持有"）。
+                anchor_row = _find_anchor_rating(cursor, stock_id, bt_date)
+                if anchor_row:
+                    anchor_norm = _normalize_rating_for_compare(anchor_row['rating'])
+                    replay_rating = anchor_norm or rating
+                    rating_confidence = 'confirmed' if anchor_norm else 'unknown'
+                    anchor_date = anchor_row['rating_date']
+                    anchor_rating_raw = anchor_row['rating']
+                    days_since_rating = anchor_row['days_diff']
+                else:
+                    replay_rating = rating
+                    rating_confidence = 'unknown'
+                    anchor_date = None
+                    anchor_rating_raw = None
+                    days_since_rating = None
+
+                has_pos_hist, cost_hist = _historical_position_state(all_trades, bt_date)
+
+                # 5. 生成价格建议（021AJ 市场校准；021AU 历史评级+历史持仓成本）
+                advice = _gen_price_advice_at_date(
+                    indicators, replay_rating, cost_hist, market=stock_market
+                )
 
                 if not advice.get('available'):
                     errors += 1
@@ -758,9 +827,8 @@ def run_price_backtest(market=None, force=False):
                 # 8. 写入数据库
                 has_position = 1 if advice['has_position'] else 0
 
-                # 010-3: 锚点标记 + 偏差风险
-                anchor_info = _mark_rating_confidence(cursor, stock_id, bt_date, rating)
-                bias_risk = _calc_bias_risk(all_kline, bt_idx, rating)
+                # 010-3: 偏差风险（021AU：按回放评级评估）
+                bias_risk = _calc_bias_risk(all_kline, bt_idx, replay_rating)
 
                 cursor.execute(
                     """
@@ -782,7 +850,7 @@ def run_price_backtest(market=None, force=False):
                     (
                         stock_id,
                         bt_date,
-                        rating,
+                        replay_rating,
                         stock_market,
                         has_position,
                         advice.get('buy_range_low'),
@@ -821,11 +889,11 @@ def run_price_backtest(market=None, force=False):
                         t20_result['t20_days_to_take_profit'],
                         t20_result['t20_max_high'],
                         t20_result['t20_min_low'],
-                        anchor_info['rating_confidence'],
-                        anchor_info['anchor_rating_date'],
-                        anchor_info['anchor_rating'],
+                        rating_confidence,
+                        anchor_date,
+                        anchor_rating_raw,
                         bias_risk,
-                        anchor_info['days_since_rating'],
+                        days_since_rating,
                     ),
                 )
                 success += 1
@@ -1050,10 +1118,12 @@ def compute_price_backtest_report(market='a_stock'):
     }
 
     # ---- 分评级统计（无持仓/有持仓拆分：各组分母一致，可横向比较）----
+    # 021AU：仅统计真实锚点样本（anchor 非空，评级=锚点当日真实评级）——
+    # 历史重建点评级为重跑时点评分（含未来函数），不再混入分评级表
     rating_order = ['强烈推荐买入', '推荐买入', '持有观望', '建议减仓', '强烈建议卖出']
     rating_stats = {}
     for rating in rating_order:
-        r_rows = [r for r in rows if r.get('rating') == rating]
+        r_rows = [r for r in real_rows if r.get('rating') == rating]
         if not r_rows:
             continue
 

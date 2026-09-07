@@ -61,6 +61,11 @@ def fetch_index_kline(index_info: dict) -> pd.DataFrame:
             # sina 多出的 amount 列在下方列投影中被忽略，列名映射天然兼容。
             try:
                 df = ak.stock_hk_index_daily_em(symbol=symbol)
+                # 021AX：EM 偶发列漂移（返回非空但缺 close 列，2026-08-26 实测
+                # "缺少列: close" → 空表返回、当日缺口滞留）。列不完整视同
+                # 不可用，降级新浪源，不等到下方统一列校验才失败。
+                if df is None or df.empty or 'close' not in df.columns:
+                    raise RuntimeError(f'EM 返回列不完整: {list(df.columns) if df is not None else None}')
             except Exception as e:
                 logger.warning(
                     f'[指数K线] {index_info["name"]}({symbol}) EM 接口不可用({e})，降级新浪源'

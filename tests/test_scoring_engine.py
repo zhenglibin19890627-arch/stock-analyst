@@ -466,16 +466,22 @@ class TestNewsScoring:
     @pytest.mark.parametrize(
         'sent,expected',
         [
-            (1.0, 95.0),  # 极多 (2*48=96 clamp 95)
-            (0.5, 72.0),  # 偏多 1.5*48
+            (1.0, 72.0),  # 021BC 极多：正向减半封顶 48+1*24（原对称曲线为 95）
+            (0.5, 60.0),  # 021BC 偏多 48+0.5*24（原 1.5*48=72）
             (0.0, 48.0),  # 中性
-            (-0.5, 24.0),  # 偏空 0.5*48
+            (-0.5, 24.0),  # 偏空 0.5*48（负向全斜率不变）
             (-1.0, 0.0),  # 极空
         ],
     )
     def test_sentiment_mapping(self, sent, expected):
         score, _ = score_sentiment(_sd(news_sentiment=sent))
         assert score == expected
+
+    def test_sentiment_asymmetric_negative_punishes_more(self):
+        """021BC：等幅正负情绪，负面惩罚幅度必须大于正面奖励"""
+        pos, _ = score_sentiment(_sd(news_sentiment=0.5))
+        neg, _ = score_sentiment(_sd(news_sentiment=-0.5))
+        assert (48.0 - neg) > (pos - 48.0)
 
     def test_sentiment_always_within_bounds(self):
         for s in [-1.0, -0.3, 0.0, 0.3, 1.0]:

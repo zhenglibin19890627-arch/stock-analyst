@@ -80,7 +80,7 @@ def _derive_obos_signal(key_factors_raw):
     top_factors = kline.get('top_factors') or {}
     rsi_status = str(top_factors.get('rsi_status', ''))
     boll_position = str(top_factors.get('boll_position', ''))
-    # 兼容新旧两套因子文案（advisor/analysis_engine 均输出'超买'/'超卖'子串）
+    # 因子文案兼容（advisor v5 路径输出'超买'/'超卖'子串；历史快照同口径）
     is_overbought = ('超买' in rsi_status) or ('上轨' in boll_position)
     is_oversold = ('超卖' in rsi_status) or ('下轨' in boll_position)
     if is_overbought:

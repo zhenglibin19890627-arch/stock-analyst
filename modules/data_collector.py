@@ -396,12 +396,15 @@ def _get_tencent_prefix(symbol, market):
 @retry
 def _fetch_valuation_tencent(symbol, market):
     """
-    从腾讯实时行情接口获取 PE/PB/总市值 估值数据。
+    从腾讯实时行情接口获取 PE/PB/总市值 估值数据（A股+港股统一）。
     注意：A股和港股的字段索引不同！
-      A股: [39]=PE(TTM), [46]=PB
+      A股: [39]=PE(TTM), [46]=PB, [45]=总市值(亿元)
       港股: [39]=PE(TTM), [43]=PB  (港股[46]是英文股票名而非PB)
-      港股: [45]=总市值(亿港元, 优先), [44]=流通市值/港股市值(亿港元, 兜底)
+           [45]=总市值(亿港元, 优先), [44]=流通市值/港股市值(亿港元, 兜底)
     返回: (pe, pb, total_mv_元)
+
+    021M：A股也返回总市值（[45] 字段，单位亿元→元），与港股统一处理。
+    腾讯接口实时返回当天数据，无 T+1 延迟，作为估值核心数据源。
     """
     prefix, normalized_code = _get_tencent_prefix(symbol, market)
     url = 'https://qt.gtimg.cn/q=' + prefix + normalized_code
@@ -422,9 +425,11 @@ def _fetch_valuation_tencent(symbol, market):
     else:
         pb_str = parts[46].strip().strip(';').strip('"')
 
-    # 020R-56：总市值（港股 [45] 总市值，兜底 [44]；单位=亿，换算为元）
+    # 021M：总市值（A股+港股统一从 [45] 获取，单位=亿，换算为元）
+    # A股 [45]=总市值(亿元)；港股 [45]=总市值(亿港元)，兜底 [44]
     total_mv = None
     if market == 'hk_stock':
+        # 港股优先 [45] 总市值，兜底 [44] 流通市值
         for idx in (45, 44):
             if len(parts) > idx:
                 mv_str = parts[idx].strip().strip('"').strip(';')
@@ -434,6 +439,15 @@ def _fetch_valuation_tencent(symbol, market):
                         break
                     except ValueError:
                         continue
+    else:
+        # A股 [45]=总市值(亿元)
+        if len(parts) > 45:
+            mv_str = parts[45].strip().strip('"').strip(';')
+            if mv_str:
+                try:
+                    total_mv = float(mv_str) * 1e8  # 亿元 → 元
+                except ValueError:
+                    pass
 
     pe = None
     pb = None
@@ -2082,6 +2096,7 @@ def fetch_holder_structure(symbol: str):
 def _save_holder_structure(stock_id: int, data):
     """020R-45：股东人数/机构持仓快照落库（按 stat_date 幂等，保留最近 12 期）。
     021I：新增 source 列（'em'=A股东财口径 / 'westock'=港股腾讯 shareholder 口径）。
+    021Q：新增 inst_count / inst_count_change_pct（港股机构股东数量，A股恒 NULL）。
     """
     if not data or data.get('stat_date') is None:
         return
@@ -2090,12 +2105,13 @@ def _save_holder_structure(stock_id: int, data):
     cursor.execute(
         'INSERT OR REPLACE INTO holder_structure '
         '(stock_id, stat_date, holder_count, holder_count_change_pct, total_shares, '
-        'inst_shares, inst_ratio, inst_report_date, source) VALUES (?,?,?,?,?,?,?,?,?)',
+        'inst_shares, inst_ratio, inst_report_date, source, inst_count, inst_count_change_pct) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?)',
         (
             stock_id, data['stat_date'], data.get('holder_count'),
             data.get('holder_count_change_pct'), data.get('total_shares'),
             data.get('inst_shares'), data.get('inst_ratio'), data.get('inst_report_date'),
-            data.get('source'),
+            data.get('source'), data.get('inst_count'), data.get('inst_count_change_pct'),
         ),
     )
     cursor.execute(
@@ -2169,6 +2185,9 @@ def _parse_westock_shareholder(text):
             continue
         if 'holdingPct' in headers and 'holdingShares' in headers:
             result['inst'] = rows[0]
+            # 021Q：保留上一报告期行（机构股东数量环比计算用）
+            if len(rows) > 1:
+                result['inst_prev'] = rows[1]
         elif 'institution' in headers:
             result['distribution'] = rows
     return result if (result.get('inst') or result.get('distribution')) else None
@@ -2213,7 +2232,11 @@ def _num_float(v):
 def _fetch_holder_structure_hk(symbol):
     """021I：港股机构持仓（腾讯 shareholder 机构持仓统计块）。
 
-    股东人数港股无披露源 → holder_count / holder_count_change_pct 恒 None。
+    021Q：新增机构股东数量（instCount）+ 环比——港交所无股东人数强制披露，
+    机构股东数量是港股最接近的筹码集中度代理指标（季度粒度）。
+    注意方向语义：机构数量下降=机构离场（利空），与 A股"户数下降=筹码集中"
+    （利好）相反——评分接入时须反向映射，本层只如实存数。
+    股东人数 holder_count / holder_count_change_pct 仍恒 None（无披露源）。
     stat_date = 机构持仓报告期（季度末），与 A股户数截止日同列共存。
     Returns: dict（source='westock'）或 None。
     """
@@ -2223,7 +2246,14 @@ def _fetch_holder_structure_hk(symbol):
     inst = parsed['inst']
     inst_shares = _num_float(inst.get('holdingShares'))
     inst_ratio = _num_float(inst.get('holdingPct'))
-    if inst_shares is None and inst_ratio is None:
+    # 021Q：机构股东数量 + 环比（与上一报告期比）
+    inst_count = _num_float(inst.get('instCount'))
+    inst_count_chg = None
+    prev = parsed.get('inst_prev') or {}
+    prev_count = _num_float(prev.get('instCount'))
+    if inst_count is not None and prev_count:
+        inst_count_chg = round((inst_count - prev_count) / prev_count * 100, 2)
+    if inst_shares is None and inst_ratio is None and inst_count is None:
         return None
     report_date = _quarter_to_date(inst.get('reportingPeriod'))
     return {
@@ -2234,6 +2264,8 @@ def _fetch_holder_structure_hk(symbol):
         'inst_shares': round(inst_shares, 2) if inst_shares is not None else None,
         'inst_ratio': round(inst_ratio, 2) if inst_ratio is not None else None,
         'inst_report_date': report_date,
+        'inst_count': int(inst_count) if inst_count is not None else None,
+        'inst_count_change_pct': inst_count_chg,
         'source': 'westock',
     }
 
@@ -2704,8 +2736,18 @@ def _fetch_valuation_baostock(symbol, market):
 
 
 def fetch_valuation(symbol, market, force_full=False):
-    """019Y T2：采集估值数据（PE/PB/PS/PCF/股息率）存入 stock_valuation 表。
-    降级链路：akshare → baostock（仅A股）→ 腾讯行情 PE/PB（仅港股，021C）→ 标记缺失。
+    """采集估值数据（PE/PB/PS/PCF/股息率/总市值）存入 stock_valuation 表。
+
+    021M 新降级链路（腾讯实时优先 + 东财补字段）：
+      1. 腾讯行情（A股+港股统一）—— PE/PB/总市值，实时无延迟，核心数据源
+      2. 东财 akshare（补充）—— PS/PCF/股息率，T+1 可接受，失败不影响核心
+      3. baostock（仅A股兜底）—— PE/PB/PS/PCF，腾讯失败时降级
+      4. 全部失败 → 标记缺失
+
+    背景：东财 stock_value_em 估值接口 T+1 更新（当天只能拿到昨天数据），
+    而腾讯行情接口实时返回当天 PE/PB/市值，且稳定可用（K线数据一直在用）。
+    实测 PE/PB 与东财完全一致，市值差异 <1%。
+
     估值属低频数据（日级），同日跳过。
     返回: (状态, 消息)
     """
@@ -2747,62 +2789,81 @@ def fetch_valuation(symbol, market, force_full=False):
 
     val = None
     src = None
-    # 主源：akshare（A股/港股）
+
+    # ================================================================
+    # 第一步：腾讯行情实时获取 PE/PB/总市值（A股+港股统一，核心数据源）
+    # 021M：从仅港股兜底升级为核心数据源，A股+港股统一走腾讯实时。
+    # ================================================================
     try:
-        val = _fetch_valuation_akshare(symbol, market)
-        if val and val.get('trade_date'):
-            src = 'akshare'
-            logger.info(f'[{symbol}] akshare 估值命中: {val["trade_date"]}')
+        pe, pb, total_mv = _fetch_valuation_tencent(symbol, market)
+        if pe is not None or pb is not None:
+            val = {
+                'trade_date': None,  # 下方以最新K线日期为准（腾讯快照无日期字段）
+                'pe_ttm': pe,
+                'pb_mrq': pb,
+                'pe': None,
+                'ps_ttm': None,
+                'ps': None,
+                'pcf_ncf_ttm': None,
+                'dv_ttm': None,
+                'total_mv': total_mv,
+            }
+            src = 'tencent'
+            logger.info(f'[{symbol}] 腾讯实时估值命中: PE={pe}, PB={pb}, 总市值={total_mv}')
     except Exception as e:
-        logger.warning(f'[{symbol}] akshare估值失败(尝试baostock降级): {e}')
-    # 备用源：baostock（仅A股）
-    if not val:
+        logger.warning(f'[{symbol}] 腾讯实时估值失败: {e}')
+
+    # ================================================================
+    # 第二步：东财 akshare 补充 PS/PCF/股息率（可选，失败不影响核心数据）
+    # T+1 数据，用于补充腾讯不提供的次要字段。
+    # ================================================================
+    if val:
+        try:
+            ak_val = _fetch_valuation_akshare(symbol, market)
+            if ak_val:
+                # 仅补充腾讯未提供的字段，不覆盖腾讯的 PE/PB/市值
+                for key in ('ps_ttm', 'pcf_ncf_ttm', 'dv_ttm', 'pe'):
+                    if ak_val.get(key) is not None and val.get(key) is None:
+                        val[key] = ak_val[key]
+                # 如果腾讯没拿到 PE/PB，用东财兜底
+                if val.get('pe_ttm') is None and ak_val.get('pe_ttm') is not None:
+                    val['pe_ttm'] = ak_val['pe_ttm']
+                if val.get('pb_mrq') is None and ak_val.get('pb_mrq') is not None:
+                    val['pb_mrq'] = ak_val['pb_mrq']
+                if val.get('total_mv') is None and ak_val.get('total_mv') is not None:
+                    val['total_mv'] = ak_val['total_mv']
+                src = 'tencent+akshare'
+                logger.info(f'[{symbol}] 东财补充估值字段: PS={ak_val.get("ps_ttm")}, PCF={ak_val.get("pcf_ncf_ttm")}')
+        except Exception as e:
+            logger.warning(f'[{symbol}] 东财补充估值失败(不影响核心): {e}')
+
+    # ================================================================
+    # 第三步：baostock 兜底（仅A股，腾讯失败时降级）
+    # ================================================================
+    if not val and market == 'a_stock':
         try:
             val = _fetch_valuation_baostock(symbol, market)
             if val and val.get('trade_date'):
                 src = 'baostock'
-                logger.info(f'[{symbol}] baostock 估值备用源命中: {val["trade_date"]}')
+                logger.info(f'[{symbol}] baostock 估值兜底命中: {val["trade_date"]}')
         except Exception as e:
             logger.warning(f'[{symbol}] baostock估值失败: {e}')
 
-    # 021C：港股第二备源——腾讯行情 PE(TTM)/PB/总市值 实时快照。
-    # 背景：akshare 港股 baidu 估值接口已失效（JSON 解析错误，2026-08-16 实测）、
-    # baostock 不支持港股，导致港股估值恒失败（HK3690 等）。
-    # 腾讯仅提供 PE/PB/总市值 三字段，其余字段保持缺失（诚实标注来源，不伪造）。
-    if not val and market == 'hk_stock':
+    # ================================================================
+    # 第四步：确定交易日（腾讯快照无日期字段，取最新K线日期）
+    # ================================================================
+    if val and not val.get('trade_date'):
         try:
-            pe, pb, total_mv = _fetch_valuation_tencent(symbol, market)
-            if pe is not None or pb is not None:
-                val = {
-                    'trade_date': None,  # 下方以最新K线日期为准（腾讯快照无日期字段）
-                    'pe_ttm': pe,
-                    'pb_mrq': pb,
-                    'pe': None,
-                    'ps_ttm': None,
-                    'ps': None,
-                    'pcf_ncf_ttm': None,
-                    'dv_ttm': None,
-                    'total_mv': total_mv,  # 020R-56：腾讯 [45]/[44] 总市值（元）
-                }
-                src = 'tencent'
-                logger.info(f'[{symbol}] 腾讯估值备用源命中: PE={pe}, PB={pb}, 总市值={total_mv}')
+            conn_td = get_connection()
+            td_row = conn_td.execute(
+                'SELECT MAX(trade_date) d FROM raw_kline WHERE stock_id=?', (stock_id,)
+            ).fetchone()
+            conn_td.close()
+            if td_row and td_row['d']:
+                val['trade_date'] = str(td_row['d'])[:10]
+                logger.info(f'[{symbol}] 估值交易日取最新K线: {val["trade_date"]}')
         except Exception as e:
-            logger.warning(f'[{symbol}] 腾讯估值备用源失败: {e}')
-
-    if not val or not val.get('trade_date'):
-        if val and src == 'tencent':
-            # 腾讯快照无日期：估值对应交易日 = 该股最新K线日期，避免周末脏日期
-            try:
-                conn_td = get_connection()
-                td_row = conn_td.execute(
-                    'SELECT MAX(trade_date) d FROM raw_kline WHERE stock_id=?', (stock_id,)
-                ).fetchone()
-                conn_td.close()
-                if td_row and td_row['d']:
-                    val['trade_date'] = str(td_row['d'])[:10]
-                    logger.info(f'[{symbol}] 腾讯估值交易日取最新K线: {val["trade_date"]}')
-            except Exception as e:
-                logger.warning(f'[{symbol}] 读取最新K线日期失败: {e}')
+            logger.warning(f'[{symbol}] 读取最新K线日期失败: {e}')
 
     if not val or not val.get('trade_date'):
         fail_msg = 'akshare与baostock估值均失败'
@@ -2841,6 +2902,106 @@ def fetch_valuation(symbol, market, force_full=False):
         f'PB={val.get("pb_mrq")}, PS_TTM={val.get("ps_ttm")}'
     )
     save_data_status(stock_id, 'valuation', 'success', msg)
+    logger.info(f'[{symbol}] {msg}')
+    return 'success', msg
+
+
+def fetch_valuation_history(symbol, market, force_refresh=False):
+    """采集历史估值（百度股市通，A股）存入 stock_valuation_history 表。
+
+    021W-2：为数据详情"基本面数据历史"表格提供各财报期的**当时真实 PE/PB**
+    （区别于 fetch_valuation 的实时估值，本表存历史时点真实估值快照）。
+
+    数据源：akshare stock_zh_valuation_baidu（约每两周一个快照点，覆盖 2000 年至今）。
+    - 仅 A 股支持：港股无稳定历史估值源，跳过并提示（不误报失败）
+    - 幂等：按 (stock_id, trade_date) UPSERT，重复调用安全
+    - 低频数据：成功采集后当日跳过（force_refresh=True 强制重采）
+    返回: (状态, 消息)
+    """
+    stock_id = get_stock_id(symbol, market)
+    if not stock_id:
+        return 'failed', f'数据库中未找到股票 {symbol}'
+    if market != 'a_stock':
+        return 'skipped', '历史估值采集暂仅支持 A 股（港股无稳定历史估值源）'
+
+    # 低频：当日已成功采集则跳过（与 fetch_valuation 同日跳过同型）
+    if not force_refresh:
+        try:
+            conn_chk = get_connection()
+            cursor_chk = conn_chk.cursor()
+            cursor_chk.execute(
+                """SELECT fetched_at, status, message FROM data_status
+                   WHERE stock_id = ? AND dimension = 'valuation_history'
+                   ORDER BY fetched_at DESC LIMIT 1""",
+                (stock_id,),
+            )
+            row = cursor_chk.fetchone()
+            conn_chk.close()
+            if (
+                row
+                and row['fetched_at']
+                and (row['status'] or '') == 'success'
+                and '同日跳过' not in (row['message'] or '')
+            ):
+                last_date = str(row['fetched_at'])[:10]
+                today_str = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
+                if last_date >= today_str:
+                    skip_msg = '同日跳过(历史估值当日已采集)'
+                    save_data_status(stock_id, 'valuation_history', 'skipped', skip_msg)
+                    logger.info(f'[{symbol}] {skip_msg}')
+                    return 'success', skip_msg
+        except Exception as e:
+            logger.warning(f'[{symbol}] 历史估值同日检查异常(降级为采集): {e}')
+
+    # 百度股市通历史估值：PE(TTM) 与 PB 分两次请求（日期序列一致，约每两周一点）
+    try:
+        df_pe = ak.stock_zh_valuation_baidu(symbol=symbol, indicator='市盈率(TTM)', period='全部')
+        df_pb = ak.stock_zh_valuation_baidu(symbol=symbol, indicator='市净率', period='全部')
+    except Exception as e:
+        msg = f'历史估值获取失败: {e}'
+        save_data_status(stock_id, 'valuation_history', 'failed', msg)
+        logger.warning(f'[{symbol}] {msg}')
+        return 'failed', msg
+
+    if df_pe is None or df_pe.empty or df_pb is None or df_pb.empty:
+        msg = '历史估值数据为空'
+        save_data_status(stock_id, 'valuation_history', 'failed', msg)
+        logger.warning(f'[{symbol}] {msg}')
+        return 'failed', msg
+
+    df = df_pe.rename(columns={'value': 'pe_ttm'}).copy()
+    df_pb_r = df_pb.rename(columns={'value': 'pb'})[['date', 'pb']]
+    df = df.merge(df_pb_r, on='date', how='left')
+
+    conn = get_connection()
+    try:
+        saved = 0
+        for _, r in df.iterrows():
+            trade_date = str(r.get('date'))[:10]
+            pe_ttm = _safe_num(r.get('pe_ttm'))
+            pb = _safe_num(r.get('pb'))
+            if not trade_date:
+                continue
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO stock_valuation_history
+                (stock_id, trade_date, pe_ttm, pb, source)
+                VALUES (?, ?, ?, ?, 'baidu')
+            """,
+                (stock_id, trade_date, pe_ttm, pb),
+            )
+            saved += 1
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        msg = f'历史估值入库失败: {e}'
+        save_data_status(stock_id, 'valuation_history', 'failed', msg)
+        logger.warning(f'[{symbol}] {msg}')
+        return 'failed', msg
+    conn.close()
+
+    msg = f'百度历史估值已入库: {saved} 个交易日快照 (PE_TTM/PB)'
+    save_data_status(stock_id, 'valuation_history', 'success', msg)
     logger.info(f'[{symbol}] {msg}')
     return 'success', msg
 
@@ -3119,12 +3280,14 @@ def _rotate_em_host(url):
 
 
 # ============================================================
-# 020A：腾讯自选股（westock）资金面备用层
+# 020A：腾讯自选股（westock）资金面层；021L 起由备用层提为【主源】
 # 数据源为腾讯自选股（社区实测不封 IP），主力净流入口径 = 超大单+大单（与东财同概念，
 # 探针实测 600276：MainNetFlow == JumboNetFlow + BlockNetFlow，精确相等）。
 # 交付方式：npm CLI（westock-data-clawhub@1.0.4 版本锁定）经腾讯共享签名网关；
 # 探针审计结论：CLI 仅访问 proxy.finance.qq.com 单域名，无其他网络行为。
-# 位置：东财三层 → 腾讯 westock → 新浪主力口径 → 估算兜底。
+# 位置（021L 起）：腾讯 westock（主源）→ 东财三层（兜底）→ 新浪主力口径 → 估算兜底。
+# 提主源依据（021L 实证）：EM 直接成功率仅约 1/3、7 月失败率 66%，westock 同口径
+# 顶替成功率最高且稳定；东财高频路径撤下后仅低频唯一点（新闻/预告）继续使用东财。
 # 共享通道存在失效可能 → 连续失败进入冷却 + 失败自动降级，不阻塞主链路。
 # ============================================================
 _WESTOCK_PACKAGE = 'westock-data-clawhub@1.0.4'
@@ -3273,6 +3436,11 @@ def _fetch_capital_flow_westock(symbol, market, date_str=''):
         # 020O：全资金净流入——仅港股 hkfund 提供（TotalNetFlow=主力+散户主动净额，
         # 有实际意义）；A股 asfund 散户为被动镜像、全口径恒等0，返回 None 不写入。
         _total_net = _safe_float_wan(row.get('TotalNetFlow'))
+        # 021Q：港股通(南下)持仓——hkfund 独有的 _lgtHoldInfo 块（仅港股通标的有值）。
+        # LgtCapChgDaily=当日持股市值变化(港元)→万港元；LgtHoldRatio=持股占比(%)。
+        # 语义：港股无两融汇总，南下增减持是港股最重要的杠杆/聪明钱资金指标。
+        _south_net = _safe_float_wan(row.get('_lgtHoldInfo.LgtCapChgDaily'))
+        _south_ratio = _num_float(row.get('_lgtHoldInfo.LgtHoldRatio'))
         _westock_reset()
         return {
             'trade_date': row.get('EndDate') or '',
@@ -3283,6 +3451,8 @@ def _fetch_capital_flow_westock(symbol, market, date_str=''):
             'medium_net': mid,
             'small_net': small,
             'total_net_inflow': _total_net,
+            'south_net_buy': _south_net,
+            'south_hold_ratio': _south_ratio,
         }
     except Exception as e:
         logger.warning(f'[{symbol}] westock 资金面层失败: {e}')
@@ -3586,8 +3756,8 @@ def fetch_capital_flow_batch(a_stock_symbols, progress_cb=None):
     018改造：同花顺批量预取 — 仅写入辅助指标 ths_net_inflow。
     同花顺"净额"= 全部资金净流入（总主动买入-总主动卖出），非主力净流入。
     本函数不写入 main_net_inflow / main_net_inflow_pct；
-    主力净流入链路为：东财三层 → 新浪 lscjfb 主力口径(sina_main) → 估算兜底（仅展示不参评）；
-    019S 起不再使用同花顺顶替主力净流入（ths_total 仅为历史存量，不产生新顶替行）。
+    主力净流入链路（021L 起）为：腾讯 westock（主源）→ 东财三层（兜底）→ 新浪 lscjfb 主力口径(sina_main)
+    → 估算兜底（仅展示不参评）；019S 起不再使用同花顺顶替主力净流入（ths_total 仅为历史存量）。
     同花顺净额作为辅助指标，用于判断主力与散户行为背离。
 
     Args:
@@ -3708,11 +3878,11 @@ def fetch_capital_flow_batch(a_stock_symbols, progress_cb=None):
 
     # 补采清单生成（评审 E-2 裁定）
     # 019Q Task 3（M-5）：补采清单 SQL 扩为 NOT IN ('ths_total','sina_main')。
-    # 语义：只有东财真数据（capital_source IS NULL 且非估算）才算"已完成"；
-    # sina_main / ths_total 行仍进入补采清单 —— 东财 30 分钟内恢复时可覆盖回补
-    # （"东财恢复后自动回补"的实现），新浪重采不降级已有数据（019Q QA F9 实证）。
+    # 021L：NOT IN 列表移除 'westock'——westock 为主源，其行计为"已完成"，
+    # 不再进入补采清单重试东财（日常东财请求密度归零是 021L 的核心目标）；
+    # sina_main / ths_total 行仍进入补采清单 —— 主源链恢复时可覆盖升级。
     # 019S：'ths_total' 字面量保留不动——防御存量 ths_total 行（方案 b 处置后已清零），
-    # 若删除则存量行被计为"已有真实数据"，东财恢复后永不回补覆盖；
+    # 若删除则存量行被计为"已有真实数据"，回补永不触发；
     # 待存量清零确认后经新批次评审简化（可改为 NOT IN ('sina_main') 或删除）。
     supplement_symbols = list(a_stock_symbols)
     try:
@@ -3726,7 +3896,7 @@ def fetch_capital_flow_batch(a_stock_symbols, progress_cb=None):
                     'SELECT 1 FROM raw_capital_flow WHERE stock_id=? AND trade_date=? '
                     'AND main_net_inflow IS NOT NULL '
                     'AND (is_estimated = 0 OR is_estimated IS NULL) '
-                    "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main','westock'))",
+                    "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main'))",
                     (sid, today_str),
                 )
                 if cursor_sup.fetchone():
@@ -4295,10 +4465,11 @@ def _fetch_capital_flow_sina_main(symbol, market, target_date=None):
 
 def backfill_capital_history(symbol, market, dates):
     """020H：逐日回补资金面历史缺口。
-    020I：链序改为 腾讯 westock --date（A股+港股）→ 新浪 lscjfb（仅A股）。
+    020I：链序为 腾讯 westock --date（A股+港股）→ 新浪 lscjfb（仅A股）。
+    021L：此链是历史缺口的主回补通道（日常采集 westock 仅写当日 1 行；
+    东财 push2his 120 天批量仅在 westock 失败的兜底路径偶发覆盖）。
 
-    供补采调度器在东财不可用（熔断）期间回填近 10 个交易日的历史缺失日；
-    EM 恢复后 push2his 120 天历史会自动覆盖回补（顶替行不阻断 EM 回填）。
+    供补采调度器回填近 10 个交易日的历史缺失日。
     返回成功回补的日期列表。
     """
     stock_id = get_stock_id(symbol, market)
@@ -4416,16 +4587,20 @@ def backfill_hk_total_net(symbol, dates):
 def fetch_capital_flow(symbol, market):
     """
     采集资金面数据。
-    主力净流入来源阶梯（019S 定稿，M-11 更新）：
-    Layer 1: 东方财富 push2his 个股历史资金流向（A股+港股，真实，capital_source=NULL）
-    Layer 2: 东方财富 push2 实时资金流向（A股+港股，真实）
-    Layer 3: akshare stock_individual_fund_flow（仅A股，底层仍为东方财富）
-    EM 三层全失败时降级阶梯：
+    主力净流入来源阶梯（021L 定稿：westock 提为主源）：
+    Layer 1: 腾讯自选股 westock asfund/hkfund（A股+港股，真实，capital_source='westock'，
+             主力口径=超大+大，与东财精确同口径——020A 探针实证相等）
+    Layer 2: 东方财富 push2his 个股历史资金流向（A股+港股，真实，capital_source=NULL）
+    Layer 3: 东方财富 push2 实时资金流向（A股+港股，真实）
+    Layer 4: akshare stock_individual_fund_flow（仅A股，底层仍为东方财富）
+    全部失败时降级阶梯：
       ① 新浪 lscjfb 主力口径顶替（capital_source='sina_main'，r0+r1 超大单+大单，
          is_estimated=0 参与评分，019Q）
       ② 估算兜底（is_estimated=1，仅展示，不参与评分；019S 起不再使用同花顺顶替主力净流入）
-    链路：东财三层 → 新浪 lscjfb 主力口径(sina_main) → 估算兜底（仅展示不参评）。
-    同日已有真实数据时自动跳过采集（防覆盖机制：EM > 新浪 > 估算）。
+    链路：腾讯 westock（主源）→ 东财三层（兜底）→ 新浪 lscjfb 主力口径(sina_main) → 估算兜底（仅展示不参评）。
+    同日已有真实数据时自动跳过采集（防覆盖机制：westock/东财真实 > 新浪 > 估算；
+    021L 起 westock 行计为"当日已完成"，东财不再每日自动回补，历史缺口由补采调度器
+    020I 链 westock --date → 新浪 负责）。
     """
     stock_id = get_stock_id(symbol, market)
     if not stock_id:
@@ -4447,27 +4622,29 @@ def fetch_capital_flow(symbol, market):
     source = ''
 
     # ============================================================
-    # 018/019K/019Q: 前置校验层 — 仅检测东方财富已写入的当日真实数据。
+    # 018/019K/019Q/021L: 前置校验层 — 检测当日已写入的真实数据。
     # 同花顺批量预取仅写入辅助字段 ths_net_inflow，不会触发本跳过逻辑。
     # 019K: THS 顶替行（capital_source='ths_total'）同样不触发跳过——
     # 019Q: 新浪顶替行（capital_source='sina_main'）同样不触发跳过——
-    # 东财恢复后必须能重采覆盖，故本跳过 SQL 显式排除顶替行（M-5 扩展 NOT IN）。
-    # 019S 起主力净流入链路为：东财三层 → 新浪 lscjfb 主力口径(sina_main) → 估算兜底
-    # （仅展示不参评）；ths_total 仅为历史存量，不再产生新顶替行。
+    # 链路可将其覆盖升级为同口径真实数据。
+    # 021L 起 westock 为主源：westock 行（capital_source='westock'）计为"当日已完成"
+    # （与东财真实行 capital_source=NULL 同待遇）——不再为覆盖 westock 而每日重试东财；
+    # 历史缺口由补采调度器 020I 链负责。sina_main/ths_total 行仍不触发跳过。
     # ============================================================
     today_str_pre = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
     conn_pre = get_connection()
     cursor_pre = conn_pre.cursor()
-    # 019E Task 2.4：前置校验适配——估算行（is_estimated=1）不阻止 EM 恢复后重写
-    # 019K Task 3：前置校验排除 THS 顶替行（capital_source='ths_total'），保证 EM 恢复可回补
+    # 019E Task 2.4：前置校验适配——估算行（is_estimated=1）不阻止重写
+    # 019K Task 3：前置校验排除 THS 顶替行（capital_source='ths_total'），保证可回补
     # 019Q Task 3：防覆盖 SQL 扩展为 NOT IN ('ths_total','sina_main')（M-5）
     # 019S：'ths_total' 字面量保留不动——防御存量 ths_total 行（08-05/08-06 共 27 行），
-    # 若删除则存量行会被误判为"已有真实数据"，东财恢复后永不回补覆盖；
+    # 若删除则存量行会被误判为"已有真实数据"，回补永不触发；
     # 待存量清零后（方案 b 处置 + 只读断言）经新批次评审简化。
+    # 021L：NOT IN 列表移除 'westock'——westock 行计为已完成（主源语义）。
     cursor_pre.execute(
         'SELECT COUNT(*) AS cnt FROM raw_capital_flow WHERE stock_id = ? AND trade_date = ? '
         'AND main_net_inflow IS NOT NULL AND (is_estimated = 0 OR is_estimated IS NULL) '
-        "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main','westock'))",
+        "AND (capital_source IS NULL OR capital_source NOT IN ('ths_total','sina_main'))",
         (stock_id, today_str_pre),
     )
     pre_cnt = cursor_pre.fetchone()['cnt']
@@ -4482,8 +4659,9 @@ def fetch_capital_flow(symbol, market):
 
     # ============================================================
     # 同日真实数据防覆盖机制（P3-A验收前置修复）
-    # 若今日已通过东方财富成功采集资金流数据，跳过本次采集
+    # 若今日已通过主源（westock/东财）成功采集资金流数据，跳过本次采集
     # 防止后续操作触发fallback用估算值覆盖真实数据
+    # 021L：westock 提为主源，成功消息（'腾讯自选股'开头）与东财同待遇触发跳过
     # ============================================================
     today_str = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
     conn_skip = get_connection()
@@ -4497,93 +4675,176 @@ def fetch_capital_flow(symbol, market):
     conn_skip.close()
     if skip_row and skip_row['message']:
         _src_msg = skip_row['message']
-        if _src_msg.startswith('东方财富') and not intraday_refresh:
-            logger.info(f'[{symbol}] 今日已有东方财富真实资金流数据，跳过采集（防覆盖）')
+        if _src_msg.startswith(('东方财富', '腾讯自选股')) and not intraday_refresh:
+            logger.info(f'[{symbol}] 今日已有主源真实资金流数据，跳过采集（防覆盖）')
             save_data_status(
                 stock_id, 'capital', 'success', f'同日跳过(已有真实数据): {_src_msg[:60]}'
             )
-            return 'success', '今日已有东方财富真实资金流数据，跳过采集（防覆盖）'
+            return 'success', '今日已有主源真实资金流数据，跳过采集（防覆盖）'
 
-    # === 主数据源：东方财富个股资金流向历史（A股+港股，secid区分）===
-    try:
-        rows_data = _fetch_capital_flow_em_individual(symbol, market)
-        if rows_data:
-            conn = get_connection()
-            cursor = conn.cursor()
-            skipped = 0
-
-            for row in rows_data:
-                trade_date = str(row.get('日期', '')).strip()
-                if not trade_date:
-                    continue
-
-                # 019N: 安全转换（None/NaN/'-'/±Inf → None，移除 or 0 伪造零），金额元→万元，占比不转换
-                main_net = _safe_float_wan(row.get('主力净流入-净额'))
-                main_net_pct = _safe_float_pct(row.get('主力净流入-净占比'))
-                super_large = _safe_float_wan(row.get('超大单净流入-净额'))
-                large = _safe_float_wan(row.get('大单净流入-净额'))
-                medium = _safe_float_wan(row.get('中单净流入-净额'))
-                small = _safe_float_wan(row.get('小单净流入-净额'))
-
-                # 019N: 六字段全 None → 跳过该行（不写 NULL 占位行、不清空该日既有字段）
-                if all(v is None for v in (main_net, main_net_pct, super_large, large, medium, small)):
-                    skipped += 1
-                    continue
-
-                # 019E M-7：EM 写入显式携带 is_estimated=0（防御估算→真实覆盖时标记归位）
-                # 019K Task 3：EM 写入显式携带 capital_source=NULL（顶替行被 EM 覆盖后来源归位）
-                # 020G：UPDATE + INSERT OR IGNORE（保留同花顺辅助字段 ths_net_inflow，
-                # 与 westock/新浪层同模式；INSERT OR REPLACE 会整行替换冲掉它）
+    # ============================================================
+    # 021L 主源：腾讯自选股（westock）资金面 — 原 020A 备用层提为主源
+    # A股 asfund / 港股 hkfund，主力口径=超大+大（与东财同概念，020A 探针实证
+    # MainNetFlow == JumboNetFlow + BlockNetFlow 精确相等；社区实测不封 IP）。
+    # 写库 is_estimated=0、capital_source='westock'（参与评分）；
+    # westock 行计为"当日已完成"（前置校验/补采清单/延迟补采 SQL 同步认定）。
+    # 成功后东财三层整体跳过（saved_count>0）——东财自此仅低频兜底。
+    # UPDATE 无来源守卫（可覆盖估算行/顶替行，口径更优），估算层守卫不受影响。
+    # ============================================================
+    if saved_count == 0:
+        try:
+            w_row = _fetch_capital_flow_westock(symbol, market)
+            if w_row:
+                w_date = (
+                    w_row['trade_date']
+                    or datetime.now(_CN_TZ).strftime('%Y-%m-%d')
+                )
+                conn = get_connection()
+                cursor = conn.cursor()
+                # 020F：UPDATE + INSERT OR IGNORE（与新浪层同模式）——
+                # INSERT OR REPLACE 会整行替换，冲掉同花顺批量预取的辅助字段 ths_net_inflow
+                # 021Q：UPDATE 追加南下两列（COALESCE 保旧值——非港股通标的/接口无
+                # _lgtHoldInfo 时写 NULL 会清掉已有南下数据，重跑不降级）
                 cursor.execute(
                     'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=?, '
-                    'super_large_net=?, large_net=?, medium_net=?, small_net=?, '
-                    'is_estimated=0, capital_source=NULL '
+                    'total_net_inflow=?, super_large_net=?, '
+                    'large_net=?, medium_net=?, small_net=?, is_estimated=0, capital_source=?, '
+                    'south_net_buy=COALESCE(?, south_net_buy), '
+                    'south_hold_ratio=COALESCE(?, south_hold_ratio) '
                     'WHERE stock_id=? AND trade_date=?',
                     (
-                        main_net,
-                        main_net_pct,
-                        super_large,
-                        large,
-                        medium,
-                        small,
+                        w_row['main_net_inflow'],
+                        w_row.get('main_net_inflow_pct'),
+                        w_row.get('total_net_inflow'),
+                        w_row['super_large_net'],
+                        w_row['large_net'],
+                        w_row['medium_net'],
+                        w_row['small_net'],
+                        'westock',
+                        w_row.get('south_net_buy'),
+                        w_row.get('south_hold_ratio'),
                         stock_id,
-                        trade_date,
+                        w_date,
                     ),
                 )
                 if cursor.rowcount == 0:
                     cursor.execute(
                         'INSERT OR IGNORE INTO raw_capital_flow '
-                        '(stock_id, trade_date, main_net_inflow, main_net_inflow_pct, '
-                        'super_large_net, large_net, medium_net, small_net, is_estimated, capital_source) '
-                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)',
+                        '(stock_id, trade_date, main_net_inflow, main_net_inflow_pct, total_net_inflow, '
+                        'super_large_net, large_net, '
+                        'medium_net, small_net, is_estimated, capital_source, '
+                        'south_net_buy, south_hold_ratio) '
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'westock', ?, ?)",
                         (
                             stock_id,
-                            trade_date,
+                            w_date,
+                            w_row['main_net_inflow'],
+                            w_row.get('main_net_inflow_pct'),
+                            w_row.get('total_net_inflow'),
+                            w_row['super_large_net'],
+                            w_row['large_net'],
+                            w_row['medium_net'],
+                            w_row['small_net'],
+                            w_row.get('south_net_buy'),
+                            w_row.get('south_hold_ratio'),
+                        ),
+                    )
+                conn.commit()
+                conn.close()
+                if w_row['main_net_inflow'] is not None:
+                    saved_count = 1
+                source = '腾讯自选股(westock)'
+                logger.info(
+                    f'[{symbol}] 腾讯自选股资金面成功(主源): '
+                    f'主力净流入={w_row["main_net_inflow"]}万, date={w_date}'
+                )
+            else:
+                warnings.append('腾讯自选股资金面层无数据')
+        except Exception as e:
+            warnings.append(f'腾讯自选股资金面层失败: {e}')
+            logger.warning(f'[{symbol}] 腾讯自选股资金面层失败: {e}')
+
+    # === 兜底层1：东方财富个股资金流向历史（A股+港股，secid区分；021L 起为兜底）===
+    if saved_count == 0:
+        try:
+            rows_data = _fetch_capital_flow_em_individual(symbol, market)
+            if rows_data:
+                conn = get_connection()
+                cursor = conn.cursor()
+                skipped = 0
+
+                for row in rows_data:
+                    trade_date = str(row.get('日期', '')).strip()
+                    if not trade_date:
+                        continue
+
+                    # 019N: 安全转换（None/NaN/'-'/±Inf → None，移除 or 0 伪造零），金额元→万元，占比不转换
+                    main_net = _safe_float_wan(row.get('主力净流入-净额'))
+                    main_net_pct = _safe_float_pct(row.get('主力净流入-净占比'))
+                    super_large = _safe_float_wan(row.get('超大单净流入-净额'))
+                    large = _safe_float_wan(row.get('大单净流入-净额'))
+                    medium = _safe_float_wan(row.get('中单净流入-净额'))
+                    small = _safe_float_wan(row.get('小单净流入-净额'))
+
+                    # 019N: 六字段全 None → 跳过该行（不写 NULL 占位行、不清空该日既有字段）
+                    if all(v is None for v in (main_net, main_net_pct, super_large, large, medium, small)):
+                        skipped += 1
+                        continue
+
+                    # 019E M-7：EM 写入显式携带 is_estimated=0（防御估算→真实覆盖时标记归位）
+                    # 019K Task 3：EM 写入显式携带 capital_source=NULL（顶替行被 EM 覆盖后来源归位）
+                    # 020G：UPDATE + INSERT OR IGNORE（保留同花顺辅助字段 ths_net_inflow，
+                    # 与 westock/新浪层同模式；INSERT OR REPLACE 会整行替换冲掉它）
+                    cursor.execute(
+                        'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=?, '
+                        'super_large_net=?, large_net=?, medium_net=?, small_net=?, '
+                        'is_estimated=0, capital_source=NULL '
+                        'WHERE stock_id=? AND trade_date=?',
+                        (
                             main_net,
                             main_net_pct,
                             super_large,
                             large,
                             medium,
                             small,
+                            stock_id,
+                            trade_date,
                         ),
                     )
-                # 019N: saved_count 仅计主字段 main 非 None 的行（假成功修正）
-                if main_net is not None:
-                    saved_count += 1
+                    if cursor.rowcount == 0:
+                        cursor.execute(
+                            'INSERT OR IGNORE INTO raw_capital_flow '
+                            '(stock_id, trade_date, main_net_inflow, main_net_inflow_pct, '
+                            'super_large_net, large_net, medium_net, small_net, is_estimated, capital_source) '
+                            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)',
+                            (
+                                stock_id,
+                                trade_date,
+                                main_net,
+                                main_net_pct,
+                                super_large,
+                                large,
+                                medium,
+                                small,
+                            ),
+                        )
+                    # 019N: saved_count 仅计主字段 main 非 None 的行（假成功修正）
+                    if main_net is not None:
+                        saved_count += 1
 
-            conn.commit()
-            conn.close()
-            source = '东方财富(个股历史)'
-            _EM_CONSECUTIVE_FAIL_COUNT = 0  # 020B：东财成功，重置连续失败计数
-            _em_clear_ban()
-            logger.info(
-                f'[{symbol}] 资金面保存成功: {saved_count}天有效数据, 跳过 {skipped} 天异常数据'
-            )
-        else:
-            warnings.append('东方财富个股资金流向返回空数据')
-    except Exception as e:
-        warnings.append(f'东方财富个股资金流向获取失败: {e}')
-        logger.warning(f'[{symbol}] 东方财富个股资金流向获取失败: {e}')
+                conn.commit()
+                conn.close()
+                source = '东方财富(个股历史)'
+                _EM_CONSECUTIVE_FAIL_COUNT = 0  # 020B：东财成功，重置连续失败计数
+                _em_clear_ban()
+                logger.info(
+                    f'[{symbol}] 资金面保存成功: {saved_count}天有效数据, 跳过 {skipped} 天异常数据'
+                )
+            else:
+                warnings.append('东方财富个股资金流向返回空数据')
+        except Exception as e:
+            warnings.append(f'东方财富个股资金流向获取失败: {e}')
+            logger.warning(f'[{symbol}] 东方财富个股资金流向获取失败: {e}')
 
     # === 备用数据源1：东方财富 push2（港股必须走这里）===
     if saved_count == 0:
@@ -4749,80 +5010,12 @@ def fetch_capital_flow(symbol, market):
             logger.warning(f'[{symbol}] akshare备用源失败: {e}')
 
     # ============================================================
-    # 020B：记录"东财三层失败"标志（westock 成功与否不影响此判定——westock 能成功
-    # 恰恰说明东财不可用），用于熔断累计。
+    # 020B/021L：EM 兜底层失败标志，用于熔断累计。
+    # 021L 语义：仅当"westock 失败且东财三层也未写入任何数据"才计失败——
+    # westock 成功时东财根本未被尝试，不构成"东财不可用"的证据，不累计熔断
+    # （旧序中 westock 成功前东财已挨过失败，故需计入；新序无此情形）。
     # ============================================================
     em_failed_this_stock = saved_count == 0
-
-    # ============================================================
-    # 020A：腾讯自选股（westock）资金面备用层 — 东财三层全失败后、新浪之前
-    # A股 asfund / 港股 hkfund，主力口径=超大+大（与东财同概念，社区实测不封 IP）。
-    # 写库 is_estimated=0、capital_source='westock'；东财恢复后仍可覆盖回补
-    # （防覆盖/补采清单 SQL 的 NOT IN 列表已含 'westock'）。
-    # ============================================================
-    if saved_count == 0:
-        try:
-            w_row = _fetch_capital_flow_westock(symbol, market)
-            if w_row:
-                w_date = (
-                    w_row['trade_date']
-                    or datetime.now(_CN_TZ).strftime('%Y-%m-%d')
-                )
-                conn = get_connection()
-                cursor = conn.cursor()
-                # 020F：UPDATE + INSERT OR IGNORE（与新浪层同模式）——
-                # INSERT OR REPLACE 会整行替换，冲掉同花顺批量预取的辅助字段 ths_net_inflow
-                cursor.execute(
-                    'UPDATE raw_capital_flow SET main_net_inflow=?, main_net_inflow_pct=?, '
-                    'total_net_inflow=?, super_large_net=?, '
-                    'large_net=?, medium_net=?, small_net=?, is_estimated=0, capital_source=? '
-                    'WHERE stock_id=? AND trade_date=?',
-                    (
-                        w_row['main_net_inflow'],
-                        w_row.get('main_net_inflow_pct'),
-                        w_row.get('total_net_inflow'),
-                        w_row['super_large_net'],
-                        w_row['large_net'],
-                        w_row['medium_net'],
-                        w_row['small_net'],
-                        'westock',
-                        stock_id,
-                        w_date,
-                    ),
-                )
-                if cursor.rowcount == 0:
-                    cursor.execute(
-                        'INSERT OR IGNORE INTO raw_capital_flow '
-                        '(stock_id, trade_date, main_net_inflow, main_net_inflow_pct, total_net_inflow, '
-                        'super_large_net, large_net, '
-                        'medium_net, small_net, is_estimated, capital_source) '
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'westock')",
-                        (
-                            stock_id,
-                            w_date,
-                            w_row['main_net_inflow'],
-                            w_row.get('main_net_inflow_pct'),
-                            w_row.get('total_net_inflow'),
-                            w_row['super_large_net'],
-                            w_row['large_net'],
-                            w_row['medium_net'],
-                            w_row['small_net'],
-                        ),
-                    )
-                conn.commit()
-                conn.close()
-                if w_row['main_net_inflow'] is not None:
-                    saved_count = 1
-                source = '腾讯自选股(westock)'
-                logger.info(
-                    f'[{symbol}] 腾讯自选股资金面成功: '
-                    f'主力净流入={w_row["main_net_inflow"]}万, date={w_date}'
-                )
-            else:
-                warnings.append('腾讯自选股资金面层无数据')
-        except Exception as e:
-            warnings.append(f'腾讯自选股资金面层失败: {e}')
-            logger.warning(f'[{symbol}] 腾讯自选股资金面层失败: {e}')
 
     # ============================================================
     # 019E Task 2：估算兜底（仅展示用，不参与评分）
@@ -4833,7 +5026,7 @@ def fetch_capital_flow(symbol, market):
     # 019E Task 2.6（M-4）：拆除提前 return，改为标志位继续执行估算降级链路
     em_all_failed = (saved_count == 0)
     est_source = ''
-    # 020B：东财三层失败的股票累计熔断计数（含 westock 顶替成功的股票），
+    # 020B：东财兜底层失败的股票累计熔断计数（021L 起仅在 westock 也失败时才会发生），
     # 达到阈值进入冷却——后续股票跳过东财直连（019Z 机制原先只在批量回退循环生效，
     # 手动报告生成的逐只链路此前每只都要空烧 4 轮重试 ≈5 分钟）。
     if em_failed_this_stock:
@@ -4842,8 +5035,9 @@ def fetch_capital_flow(symbol, market):
             _em_record_ban()
     if em_all_failed:
         logger.warning(
-            f'[{symbol}] 东方财富三层全失败（push2his/push2/akshare），'
-            '尝试新浪顶替 → 估算兜底（链路：东财三层 → 新浪 lscjfb 主力口径(sina_main) → 估算兜底仅展示不参评）'
+            f'[{symbol}] 资金面主源与东财兜底全失败（westock + push2his/push2/akshare），'
+            '尝试新浪顶替 → 估算兜底（链路：腾讯 westock → 东财三层 → 新浪 lscjfb 主力口径(sina_main) '
+            '→ 估算兜底仅展示不参评）'
         )
 
         # ============================================================
@@ -4897,14 +5091,14 @@ def fetch_capital_flow(symbol, market):
                 saved_count = 1
                 save_data_status(
                     stock_id, 'capital', 'fallback',
-                    '新浪顶替(主力口径r0+r1；东财恢复后自动回补)'
+                    '新浪顶替(主力口径r0+r1；主源恢复后自动回补)'
                 )
                 logger.info(
                     f'[{symbol}] 新浪 lscjfb 主力口径顶替成功: '
                     f'main={sina_row["main_net_inflow"]} 万'
                     f'（is_estimated=0，capital_source=sina_main，仅写当日 1 行）'
                 )
-                return 'fallback', '新浪顶替(主力口径r0+r1；东财恢复后自动回补)'
+                return 'fallback', '新浪顶替(主力口径r0+r1；主源恢复后自动回补)'
         except Exception as e:
             warnings.append(f'新浪顶替失败: {e}')
             logger.warning(f'[{symbol}] 新浪 lscjfb 顶替失败: {e}')
@@ -5431,27 +5625,38 @@ def fetch_sentiment(symbol, market, force_full=False):
     """
     采集消息面数据（模块4接入）。
     调用 news_collector 采集新闻 + 情绪分析。
-    011增量：当日已有 → 跳过。
+    增量逻辑：当日已采集过（无论有无新新闻）→ 跳过。
+
+    状态分类（由 news_collector.collect_news 返回）:
+        - success + 有新增新闻: 正常有数据
+        - success + 无新增新闻: 正常无数据（数据源今天确实没发新新闻）
+        - failed: 真正异常（接口报错/超时/反爬等）
     """
     stock_id = get_stock_id(symbol, market)
     if not stock_id:
         return 'failed', f'数据库中未找到股票 {symbol}'
 
-    # 011增量：当日跳过（020R-60：盘中时段旁路——午间公告/新闻可进盘中快报）
+    # 增量逻辑：当日已采集过 → 跳过
+    # 检查 news_sentiment 表是否有今天的记录（包括空标记记录）
     if not force_full:
         try:
             today_str = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
             conn_chk = get_connection()
             cursor_chk = conn_chk.cursor()
             cursor_chk.execute(
-                """SELECT COUNT(*) as cnt FROM news_sentiment
-                   WHERE stock_id = ? AND news_date LIKE ?""",
-                (stock_id, today_str + '%'),
+                """SELECT total_count FROM news_sentiment
+                   WHERE stock_id = ? AND news_date = ?""",
+                (stock_id, today_str),
             )
             row = cursor_chk.fetchone()
             conn_chk.close()
-            if row and row['cnt'] > 0 and not _is_intraday_session(market):
-                skip_msg = f'当日跳过(消息面已有{row["cnt"]}条记录)'
+            if row and not _is_intraday_session(market):
+                # 今天已采集过，跳过
+                total_count = row['total_count']
+                if total_count > 0:
+                    skip_msg = f'当日跳过(今日已采集{total_count}条新闻)'
+                else:
+                    skip_msg = '当日跳过(今日已采集，无新增新闻)'
                 save_data_status(stock_id, 'sentiment', 'success', skip_msg)
                 logger.info(f'[{symbol}] {skip_msg}')
                 return 'success', skip_msg
@@ -5507,15 +5712,41 @@ _LOCAL_INDUSTRY_MAP = {
 }
 
 
-def fetch_stock_industry(symbol: str, market: str = 'a_stock') -> str:
+def fetch_stock_industry(symbol: str, market: str = 'a_stock', patient: bool = False) -> str:
     """获取个股行业分类。
-    A股：优先 akshare stock_individual_info_em API，失败时使用本地映射兜底。
-    港股：无免费行业接口，默认返回“港股”。
-    获取失败时返回“未分类”，不阻塞主流程。
+    021BA：主源改为东财 push2 qt/stock/get 直连（复用项目 _http_get_em 请求层：
+    编号子域轮换/轮间退避/UA池，比 akshare 裸调抗 WAF/断连），字段 f127=行业板块名
+    （申万 2021 口径，与 market_overview 行业资金流、config_weights
+    industry_overrides 同名体系）；akshare stock_individual_info_em 降为备源；
+    本地映射最后兜底。
+    patient=False（加自选股/批量分析等同步场景）：EM 直连只试 1 轮，快速失败不拖长请求；
+    patient=True（补采调度器等后台场景）：EM 直连试 2 轮，容忍轮间退避换更高成功率。
+    港股：无免费行业接口，默认返回"港股"。
+    获取失败时返回"未分类"，不阻塞主流程；存量"未分类"由补采调度器行业自愈兜底（021BA）。
     """
     if market == 'hk_stock' or symbol.upper().startswith('HK'):
         return '港股'
-    # 优先尝试 API
+    # 尊重资金面熔断冷却：EM 整体不可达时不直连（与 _fetch_capital_flow_em 同款判断）
+    if not _em_banned():
+        try:
+            resp = _http_get_em(
+                'https://push2.eastmoney.com/api/qt/stock/get',
+                params={
+                    'secid': _get_em_secid(symbol, market),
+                    'invt': '2',
+                    'fltt': '2',
+                    'fields': 'f127',
+                },
+                timeout=10,
+                max_retries=2 if patient else 1,
+            )
+            data = (resp.json() or {}).get('data') or {}
+            val = str(data.get('f127') or '').strip()
+            if val and val != '-':
+                return val
+        except Exception as e:
+            logger.warning(f'[{symbol}] 行业EM直连失败，尝试akshare: {e}')
+    # 备源：akshare（东财同系接口，行业命名体系一致）
     try:
         df = ak.stock_individual_info_em(symbol=symbol)
         if df is not None and not df.empty:

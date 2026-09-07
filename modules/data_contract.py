@@ -142,6 +142,18 @@ class StockData(BaseModel):
     institution_hold_ratio: float | None = Field(
         default=None, description='机构持仓比例(%)（东财六类机构持股汇总/总股本）'
     )
+    # 021Q 新增：港股资金面补强（展示字段，暂不入完整度集合/评分——待 021R 校准后接入）
+    south_net_buy: float | None = Field(
+        default=None, description='港股通(南下)当日净增持市值(万港元)，正=南下净买入'
+    )
+    south_hold_ratio: float | None = Field(
+        default=None, description='港股通(南下)持股占比(%)'
+    )
+    inst_count_change_pct: float | None = Field(
+        default=None,
+        description='机构股东数量环比(%)（港股腾讯 shareholder 季度口径），正=机构增加；'
+        '注意方向语义与 holder_count_change_pct（A股户数）相反',
+    )
 
     # ================================================================
     # 四、扩展与元数据
@@ -220,6 +232,10 @@ class StockData(BaseModel):
         # 020R-45/021I：股东人数（A股专属）/机构持仓（A股东财口径+港股腾讯口径），缺失时子权重归零
         'holder_count_change_pct': '资金面-股东人数子项：维度内子权重调整为0（权重归零型）',
         'institution_hold_ratio': '资金面-机构持仓子项：维度内子权重调整为0（权重归零型）',
+        # 021Q：港股资金面补强（展示字段，未接入评分——021R 校准后再入完整度集合）
+        'south_net_buy': '资金面-南下资金（展示）：暂不参与评分，缺失不影响维度完整度',
+        'south_hold_ratio': '资金面-南下持仓占比（展示）：暂不参与评分，缺失不影响维度完整度',
+        'inst_count_change_pct': '资金面-机构股东数量（展示）：暂不参与评分，缺失不影响维度完整度',
     }
 
     def get_degradation(self, field_name: str) -> str:
@@ -405,6 +421,10 @@ class StockData(BaseModel):
             # 020R-45 新增：股东人数/机构持仓
             'holder_count_change_pct': self.holder_count_change_pct,
             'institution_hold_ratio': self.institution_hold_ratio,
+            # 021Q 新增：港股资金面补强（展示字段）
+            'south_net_buy': self.south_net_buy,
+            'south_hold_ratio': self.south_hold_ratio,
+            'inst_count_change_pct': self.inst_count_change_pct,
             # 元数据
             'extra': self.extra,
             'data_quality': self.data_quality.model_dump() if self.data_quality else None,

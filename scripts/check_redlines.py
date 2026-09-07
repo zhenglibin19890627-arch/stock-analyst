@@ -50,7 +50,7 @@ def _check(rid):
 @_check('R6')
 def rating_config_consistent():
     """评级边界 80/65/50/30 三处一致（config.py / config_weights.json / scoring_engine.py）"""
-    from modules.analysis_engine import validate_rating_config
+    from modules.rating_config import validate_rating_config
 
     issues = validate_rating_config()
     return (not issues), ('三处一致' if not issues else '; '.join(issues))

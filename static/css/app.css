@@ -1,5 +1,83 @@
 /* 本文件由 templates/index.html 内联样式拆分生成（2026-08-13），内容与拆分前完全一致。
    顺序：原 <head> 主样式块 + 原 <body> 内 P2 看板专用样式块 */
+
+/* ========== 021BD：多主题皮肤系统 ==========
+   变量在 :root 定义浅色基线，html[data-theme='xxx'] 覆盖；
+   结构外观由文件末尾「主题适配层」按变量重声明（原硬编码规则不动，整体可回滚）。
+   语义色（红涨绿跌 #e74c3c/#27ae60、主蓝 #1a73e8、告警橙）全主题恒定不翻转。 */
+:root {
+    --bg: #f5f6fa;
+    --surface: #ffffff;
+    --surface-alt: #f8f9fa;
+    --surface-2: #f0f0f0;
+    --surface-3: #f0f2f5;
+    --border: #dddddd;
+    --border-light: #eeeeee;
+    --text: #333333;
+    --text-2: #666666;
+    --text-3: #999999;
+    --nav-bg: #ffffff;
+    --nav-border: #e0e0e0;
+    --nav-text: #666666;
+    --nav-hover-bg: #f0f7ff;
+    --input-bg: #ffffff;
+    --shadow-card: rgba(0, 0, 0, 0.06);
+}
+html[data-theme='dark'] {
+    --bg: #12161c;
+    --surface: #1c222b;
+    --surface-alt: #222a34;
+    --surface-2: #2a333f;
+    --surface-3: #242d38;
+    --border: #39434f;
+    --border-light: #2e3843;
+    --text: #e4e9ee;
+    --text-2: #aeb9c4;
+    --text-3: #7f8b97;
+    --nav-bg: #171c23;
+    --nav-border: #2a333f;
+    --nav-text: #aeb9c4;
+    --nav-hover-bg: #24303e;
+    --input-bg: #1c222b;
+    --shadow-card: rgba(0, 0, 0, 0.45);
+}
+html[data-theme='green'] {
+    --bg: #c9e6cd;
+    --surface: #e8f3e9;
+    --surface-alt: #d8ebda;
+    --surface-2: #cfe4d2;
+    --surface-3: #d3e8d6;
+    --border: #a9c7ad;
+    --border-light: #bcd6bf;
+    --text: #273c2a;
+    --text-2: #4c634f;
+    --text-3: #71876f;
+    --nav-bg: #dcefe0;
+    --nav-border: #b3cfb7;
+    --nav-text: #4c634f;
+    --nav-hover-bg: #c4e2c8;
+    --input-bg: #eef7ef;
+    --shadow-card: rgba(48, 84, 53, 0.12);
+}
+html[data-theme='warm'] {
+    --bg: #f1e7d3;
+    --surface: #fbf6ea;
+    --surface-alt: #f4ecd9;
+    --surface-2: #ede2c8;
+    --surface-3: #f0e6cf;
+    --border: #d9cba8;
+    --border-light: #e5d9bd;
+    --text: #3c342a;
+    --text-2: #6e6250;
+    --text-3: #988b74;
+    --nav-bg: #f7f0df;
+    --nav-border: #ddcfae;
+    --nav-text: #6e6250;
+    --nav-hover-bg: #f0e4c8;
+    --input-bg: #fdfaf1;
+    --shadow-card: rgba(90, 74, 40, 0.12);
+}
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
@@ -27,7 +105,7 @@
         .badge-module { background: rgba(255,255,255,0.2); color: white; }
 
         .card {
-            background: white;
+            background: var(--surface,#fff);
             border-radius: 12px;
             padding: 24px;
             margin-bottom: 20px;
@@ -97,7 +175,7 @@
             font-size: 13px;
         }
         th {
-            background: #f0f2f5;
+            background: var(--surface-3,#f0f2f5);
             padding: 10px;
             text-align: left;
             border-bottom: 2px solid #ddd;
@@ -108,7 +186,7 @@
             padding: 10px;
             border-bottom: 1px solid #eee;
         }
-        tr:hover td { background: #f9f9f9; }
+        tr:hover td { background: var(--surface-2,#f9f9f9); }
         .tag {
             display: inline-block;
             padding: 2px 8px;
@@ -131,14 +209,14 @@
             margin-left: -6px;
             border-radius: 6px;
         }
-        .fold-title:hover { color: #1a73e8; background: #f0f4ff; }
+        .fold-title:hover { color: #1a73e8; background: var(--nav-hover-bg,#f0f4ff); }
         .fold-title::before { content: '▾ '; color: #1a73e8; }
         .fold-title.fold-closed::before { content: '▸ '; }
         .fold-body { overflow: hidden; }
 
         /* 数据采集结果 */
         .collect-result {
-            background: #f8f9fa;
+            background: var(--surface-alt,#f8f9fa);
             border-radius: 8px;
             padding: 16px;
             margin-top: 12px;
@@ -155,7 +233,7 @@
 
         /* 数据表格弹窗 */
         .data-popup {
-            background: #f8f9fa;
+            background: var(--surface-alt,#f8f9fa);
             border-radius: 8px;
             padding: 16px;
             margin-top: 12px;
@@ -186,7 +264,7 @@
             margin: 0 1%;
             padding: 16px;
             border-radius: 10px;
-            background: #f8f9fa;
+            background: var(--surface-alt,#f8f9fa);
             text-align: center;
         }
         .dim-card .dim-name { font-size: 13px; color: #666; font-weight: 600; }
@@ -201,7 +279,7 @@
             padding: 2px 8px;
             border-radius: 4px;
             font-size: 11px;
-            background: #e8eaf6;
+            background: var(--surface-3,#e8eaf6);
             color: #3f51b5;
             margin: 2px;
         }
@@ -232,7 +310,7 @@
             font-size: 15px;
             font-weight: 600;
             cursor: pointer;
-            background: #f0f6ff;
+            background: var(--nav-hover-bg,#f0f6ff);
             transition: all 0.2s;
             margin: 8px 0;
         }
@@ -243,7 +321,7 @@
 
         /* 模块3 评级建议卡片样式 */
         .advice-card {
-            background: #f8f9fa;
+            background: var(--surface-alt,#f8f9fa);
             border-radius: 10px;
             padding: 16px;
             margin: 12px 0;
@@ -312,7 +390,7 @@
             border-bottom: 1px solid #f0f0f0;
             gap: 8px;
         }
-        .gm-item:hover { background: #f8f9fa; }
+        .gm-item:hover { background: var(--surface-alt,#f8f9fa); }
         .gm-name {
             flex: 1;
             font-size: 14px;
@@ -364,7 +442,7 @@
         .prefill-tag {
             display: inline-block;
             font-size: 10px;
-            background: #e8f0fe;
+            background: var(--nav-hover-bg,#e8f0fe);
             color: #1a73e8;
             padding: 2px 6px;
             border-radius: 3px;
@@ -373,11 +451,11 @@
         }
         /* 预填字段背景色 */
         .prefill-bg {
-            background: #f0f7ff !important;
+            background: var(--nav-hover-bg,#f0f7ff) !important;
         }
         /* 锁定股票代码样式 */
         .locked-stock {
-            background: #f5f5f5 !important;
+            background: var(--surface-alt,#f5f5f5) !important;
             color: #666 !important;
             cursor: not-allowed;
         }
@@ -387,7 +465,7 @@
             transition: background 0.15s;
         }
         th.sortable:hover {
-            background: #e8f0fe !important;
+            background: var(--nav-hover-bg,#e8f0fe) !important;
         }
         th.sortable span {
             font-size: 12px;
@@ -398,7 +476,7 @@
             position: fixed;
             top: 0; left: 0; right: 0;
             height: 56px;
-            background: #fff;
+            background: var(--surface,#fff);
             border-bottom: 1px solid #e0e0e0;
             box-shadow: 0 2px 8px rgba(0,0,0,0.06);
             z-index: 1000;
@@ -433,7 +511,7 @@
         }
         .topnav-tab:hover {
             color: #1a73e8;
-            background: #f0f7ff;
+            background: var(--nav-hover-bg,#f0f7ff);
         }
         .topnav-tab.active {
             color: #1a73e8;
@@ -451,7 +529,7 @@
             width: 40px;
             height: 40px;
             border: none;
-            background: #f0f4f8;
+            background: var(--surface-3,#f0f4f8);
             border-radius: 50%;
             cursor: pointer;
             font-size: 20px;
@@ -460,7 +538,7 @@
             justify-content: center;
             transition: background 0.15s;
         }
-        .alert-bell-btn:hover { background: #e3edf7; }
+        .alert-bell-btn:hover { background: var(--surface-2,#e3edf7); }
         .alert-badge {
             position: absolute;
             top: -2px;
@@ -487,7 +565,7 @@
             right: 0;
             width: 380px;
             max-height: 540px;
-            background: #fff;
+            background: var(--surface,#fff);
             border: 1px solid #e0e0e0;
             border-radius: 10px;
             box-shadow: 0 8px 28px rgba(0,0,0,0.16);
@@ -515,7 +593,7 @@
             padding: 4px 8px;
             border-radius: 4px;
         }
-        .alert-dropdown-header .mark-all-btn:hover { background: #f0f7ff; }
+        .alert-dropdown-header .mark-all-btn:hover { background: var(--nav-hover-bg,#f0f7ff); }
         .alert-list {
             overflow-y: auto;
             flex: 1;
@@ -527,7 +605,7 @@
             cursor: pointer;
             transition: background 0.1s;
         }
-        .alert-item:hover { background: #f8f9fa; }
+        .alert-item:hover { background: var(--surface-alt,#f8f9fa); }
         .alert-item:last-child { border-bottom: none; }
         .alert-item-type {
             display: inline-block;
@@ -573,7 +651,7 @@
         .view-summary-card {
             flex: 1;
             min-width: 160px;
-            background: #f8f9fa;
+            background: var(--surface-alt,#f8f9fa);
             border: 1px solid #e0e0e0;
             border-radius: 8px;
             padding: 12px 16px;
@@ -594,7 +672,7 @@
             align-items: center;
             gap: 6px;
             padding: 6px 16px;
-            background: #f0f0f0;
+            background: var(--surface-2,#f0f0f0);
             border: 1px solid #ddd;
             border-radius: 6px;
             cursor: pointer;
@@ -602,7 +680,7 @@
             font-weight: 600;
             transition: all 0.2s;
         }
-        .report-back-btn:hover { background: #e8e8e8; border-color: #ccc; }
+        .report-back-btn:hover { background: var(--surface-2,#e8e8e8); border-color: #ccc; }
 
         .report-header {
             display: flex;
@@ -643,7 +721,7 @@
         }
         /* 020R-7/8：价格建议、网格计划独立卡片（四列一字排开，雷达图右侧） */
         .pa-side-card {
-            background: white;
+            background: var(--surface,#fff);
             border-radius: 12px;
             padding: 12px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.06);
@@ -653,7 +731,7 @@
         .pa-side-card .pa-grid-table { max-width: none; }
 
         .score-card {
-            background: white;
+            background: var(--surface,#fff);
             border-radius: 12px;
             padding: 20px;
             text-align: center;
@@ -718,18 +796,37 @@
         .score-card .rating-time { font-size: 11px; color: #aaa; margin-top: 4px; }
 
         .radar-card {
-            background: white;
+            background: var(--surface,#fff);
             border-radius: 12px;
             padding: 12px 14px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.06);
             display: flex;
             flex-direction: column;
+            /* 卡片大小保持原状（由 .report-top-grid stretch 决定，与兄弟卡片同高）。
+               之前试过 position:absolute 方案，浏览器 resize 时 CSS Grid stretch
+               临时失效，导致子元素溢出/错位（标题脱出、雷达图覆盖下方卡片），
+               不再使用 absolute。改为 JS 动态计算 ECharts center 偏移补偿标题占位。 */
         }
-        .radar-card .card-title { margin-bottom: 2px; }
-        #radarChart { width: 100%; flex: 1; min-height: 230px; }
+        .radar-card .card-title {
+            /* 标题回到原始 flex 布局，固定顶部 */
+            margin-bottom: 2px;
+            flex: 0 0 auto;
+        }
+        #radarChart {
+            width: 100%;
+            /* 021AC：flex-basis 必须为 0（原 auto）。auto = 以内容（ECharts canvas，
+                固定像素高度）为基准——窗口变化时容器高度被旧 canvas 粘住，
+                resize() 读到被污染的几何、圆心算错（不居中，须刷新页面才恢复）。
+                basis:0 让容器高度只由卡片 flex 布局决定，与 canvas 内容彻底解耦。 */
+            flex: 1 1 0;
+            min-height: 230px;
+            /* 注：不要给 #radarChart 加 display:flex / position:absolute，
+               前者破坏 ECharts canvas 定位，后者会在 resize 时失效。
+               居中靠 JS 动态 center 偏移 + ECharts 自身 center 配置。 */
+        }
 
         .kline-card {
-            background: white;
+            background: var(--surface,#fff);
             border-radius: 12px;
             padding: 20px;
             margin-bottom: 20px;
@@ -761,7 +858,7 @@
         }
         .dim-detail-card .card-title { margin-bottom: 6px; }
         .dim-card {
-            background: white;
+            background: var(--surface,#fff);
             border-radius: 10px;
             padding: 10px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.06);
@@ -805,7 +902,7 @@
         .dim-badge-health { background: #e8f5e9; color: #2e7d32; }
         .dim-badge-weak   { background: #fff3e0; color: #e65100; }
         .dim-badge-risk   { background: #ffebee; color: #c62828; }
-        .dim-badge-nodata { background: #f5f5f5; color: #999; }
+        .dim-badge-nodata { background: var(--surface-alt,#f5f5f5); color: #999; }
         /* ③ 底部：关键指标摘要（≤3行；020R-5：标签左对齐、数值右对齐，长文本换行完整显示） */
         .dim-card .dim-factors {
             font-size: 11.5px;
@@ -846,8 +943,18 @@
             color: #c62828;
         }
 
+        /* 021S：技术面周期分组折叠箭头——隐藏原生三角，▶ 随展开旋转 90° 成 ▾ */
+        details.tech-fold summary::-webkit-details-marker,
+        details.tech-fold summary::marker {
+            display: none;
+            content: '';
+        }
+        details.tech-fold[open] > summary .tech-fold-arrow {
+            transform: rotate(90deg);
+        }
+
         .advice-card {
-            background: white;
+            background: var(--surface,#fff);
             border-radius: 12px;
             padding: 14px;
             margin-bottom: 12px;
@@ -876,7 +983,7 @@
             color: #444;
             line-height: 1.6;
             padding: 8px 12px;
-            background: #f8f9fa;
+            background: var(--surface-alt,#f8f9fa);
             border-radius: 8px;
             border-left: 3px solid #1a73e8;
         }
@@ -915,7 +1022,7 @@
         }
         /* 020R-20：回测中心客观解读独立卡片（逐条观点） */
         .bt-interp-card {
-            background: #fff;
+            background: var(--surface,#fff);
             border-radius: 10px;
             border-left: 4px solid #f9a825;
             padding: 14px 18px;
@@ -969,7 +1076,7 @@
             overflow: hidden;
             margin-bottom: 10px;
             font-size: 13px;
-            background: #fff;
+            background: var(--surface,#fff);
         }
         .pa-kv-row {
             display: flex;
@@ -1002,10 +1109,10 @@
             margin: 0 0 10px;
             border-collapse: collapse;
             font-size: 12.5px;
-            background: #fff;
+            background: var(--surface,#fff);
         }
         .pa-grid-table th {
-            background: #e8ebf0;
+            background: var(--surface-3,#e8ebf0);
             color: #3d4450;
             font-weight: 600;
             font-size: 12px;
@@ -1024,6 +1131,12 @@
         .pa-grid-table .pa-buy { color: #1565c0; }
         .pa-grid-table .pa-reduce { color: #e65100; }
         .pa-grid-table .pa-add { color: #6a1b9a; }
+        .pa-grid-table .pa-watch { color: var(--text-3, #999); }
+
+        /* 021BI 扫描器：涨跌幅着色（语义红涨绿跌，全主题一致） */
+        #marketScannerCard .pa-up { color: #c62828; font-weight: 600; }
+        #marketScannerCard .pa-down { color: #2e7d32; font-weight: 600; }
+        #marketScannerCard .dash-table { font-size: 12.5px; }
         .pa-capital-signal {
             margin-top: 8px; padding: 6px 12px;
             background: #fff3e0; border-radius: 4px; font-size: 13px;
@@ -1053,7 +1166,7 @@
         }
         /* ========== 报告生成进度动效（步骤时间线 + 流光进度条） ========== */
         .rp-card {
-            background: #fff;
+            background: var(--surface,#fff);
             border-radius: 12px;
             padding: 24px 22px;
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
@@ -1095,7 +1208,7 @@
             left: 10%;
             right: 10%;
             height: 2px;
-            background: #e8ecf1;
+            background: var(--surface-3,#e8ecf1);
         }
         .rp-step {
             position: relative;
@@ -1110,7 +1223,7 @@
             width: 28px;
             height: 28px;
             border-radius: 50%;
-            background: #f0f2f5;
+            background: var(--surface-3,#f0f2f5);
             border: 2px solid #d5dae1;
             color: #a0a8b3;
             font-size: 13px;
@@ -1158,7 +1271,7 @@
             font-weight: 700;
         }
         .rp-bar {
-            background: #e8ecf1;
+            background: var(--surface-3,#e8ecf1);
             border-radius: 8px;
             height: 12px;
             overflow: hidden;
@@ -1205,7 +1318,7 @@
             display: flex;
             gap: 8px;
             padding: 10px 16px;
-            background: #f8f9fa;
+            background: var(--surface-alt,#f8f9fa);
             border-bottom: 1px solid #eee;
             align-items: center;
         }
@@ -1213,7 +1326,7 @@
             padding: 6px 14px;
             border-radius: 6px;
             border: 1px solid #ddd;
-            background: #fff;
+            background: var(--surface,#fff);
             cursor: pointer;
             font-size: 13px;
             transition: all .2s;
@@ -1267,7 +1380,7 @@
     border: 1px solid #e0e0e0;
 }
 .dash-card {
-    background: #fff;
+    background: var(--surface,#fff);
     border-radius: 10px;
     padding: 20px;
     box-shadow: 0 1px 4px rgba(0,0,0,0.08);
@@ -1312,7 +1425,7 @@
     gap: 12px;
     margin-bottom: 16px;
     padding: 12px 16px;
-    background: #f8f9fa;
+    background: var(--surface-alt,#f8f9fa);
     border-radius: 8px;
 }
 .dash-filter-bar select {
@@ -1326,5 +1439,73 @@
     user-select: none;
 }
 .dash-table th:hover {
-    background: #e8e8e8;
+    background: var(--surface-2,#e8e8e8);
 }
+
+/* ========== 021BD：主题适配层（必须保持在文件末尾） ==========
+   按变量重声明结构外观——利用同特异性下「源顺序取胜」覆盖上方硬编码值；
+   语义色（涨跌/主蓝/告警）不在此层，全主题恒定。移除本层即整体回退。 */
+body {
+    background: var(--bg);
+    color: var(--text);
+}
+.card {
+    background: var(--surface);
+    box-shadow: 0 2px 8px var(--shadow-card);
+}
+input, select {
+    border-color: var(--border);
+    background: var(--input-bg);
+    color: var(--text);
+}
+input:focus, select:focus { border-color: var(--primary, #1a73e8); }
+th {
+    background: var(--surface-3);
+    color: var(--text);
+    border-bottom-color: var(--border);
+}
+td {
+    color: var(--text);
+    border-bottom-color: var(--border-light);
+}
+tr:hover td { background: var(--surface-2); }
+.topnav {
+    background: var(--nav-bg);
+    border-bottom-color: var(--nav-border);
+    box-shadow: 0 2px 8px var(--shadow-card);
+}
+.topnav-tab { color: var(--nav-text); }
+.topnav-tab:hover { background: var(--nav-hover-bg); }
+.alert-bell-btn { background: var(--surface-3); }
+.alert-bell-btn:hover { background: var(--surface-2); }
+.alert-dropdown {
+    background: var(--surface);
+    border-color: var(--nav-border);
+}
+.alert-dropdown-header {
+    background: var(--surface);
+    color: var(--text);
+    border-bottom-color: var(--border-light);
+}
+.collect-result { background: var(--surface-alt); }
+.form-row label { color: var(--text); }
+.dash-filter-bar { background: var(--surface-alt); }
+.dash-filter-bar select { background: var(--input-bg); color: var(--text); }
+.dash-table th:hover { background: var(--surface-2); }
+/* 主题切换器 */
+.theme-switch-wrap { margin-left: 14px; flex-shrink: 0; }
+.theme-select {
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 13px;
+    background: var(--input-bg);
+    color: var(--text);
+    cursor: pointer;
+    outline: none;
+}
+/* 深色主题下的语义提示条（浅色透明底在暗面上刺眼，换深底浅字） */
+html[data-theme='dark'] .alert-info { background: #12263a; color: #8ec4ff; }
+html[data-theme='dark'] .alert-success { background: #0f2e1c; color: #7ddc9a; }
+html[data-theme='dark'] .alert-warning { background: #33260a; color: #ffc36b; }
+html[data-theme='dark'] .alert-error { background: #3a1518; color: #ff9e9e; }

@@ -845,4 +845,391 @@ class TestHkShareholder:
         row = conn.execute('SELECT inst_ratio, source FROM holder_structure WHERE stock_id=1').fetchone()
         conn.close()
         assert row['inst_ratio'] == 31.61
-        assert row['source'] == 'westock'
+
+
+# ============================================================
+# 021L：资金面链路 westock 提为主源（东财三层降为兜底）
+# ============================================================
+
+
+class _AfterCloseDateTime(datetime):
+    """021L：把 dc.datetime.now() 固定为交易日收盘后（周五 2026-08-14 16:30），
+    规避周末守卫与盘中刷新旁路（020R-59 的 intraday_refresh 会绕过同日跳过），
+    使"同日已有 westock 数据 → 跳过"路径可被稳定测试。"""
+
+    FIXED = datetime(2026, 8, 14, 16, 30, tzinfo=timezone(_td(hours=8)))
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.FIXED
+
+
+_TODAY = '2026-08-14'  # _AfterCloseDateTime 对应交易日
+
+
+def _westock_row(**overrides):
+    """构造 _fetch_capital_flow_westock 的成功返回（主力=超大+大，万元口径）"""
+    row = {
+        'trade_date': _TODAY,
+        'main_net_inflow': 5000.0,
+        'main_net_inflow_pct': 3.2,
+        'super_large_net': 3200.0,
+        'large_net': 1800.0,
+        'medium_net': -1200.0,
+        'small_net': -3800.0,
+        'total_net_inflow': None,
+    }
+    row.update(overrides)
+    return row
+
+
+def _em_history_rows():
+    """构造 _fetch_capital_flow_em_individual 的成功返回（akshare 字典行，单位元）"""
+    return [
+        {
+            '日期': _TODAY,
+            '主力净流入-净额': 50000000.0,
+            '主力净流入-净占比': 3.2,
+            '超大单净流入-净额': 32000000.0,
+            '大单净流入-净额': 18000000.0,
+            '中单净流入-净额': -12000000.0,
+            '小单净流入-净额': -38000000.0,
+        }
+    ]
+
+
+class TestCapitalWestockPrimary:
+    """021L：westock 主源链路——成功即短路东财；失败落东财兜底；westock 行计为已完成"""
+
+    def _make_db(self, tmp_path, monkeypatch, name='cap_westock.db'):
+        monkeypatch.setattr(db_manager, 'DB_PATH', str(tmp_path / name))
+        monkeypatch.setattr(db_manager, 'BACKUP_DIR', str(tmp_path / 'backups'))
+        db_manager.init_database()
+        conn = db_manager.get_connection()
+        conn.execute("INSERT INTO stocks (symbol, market, name) VALUES ('600276', 'a_stock', '恒瑞医药')")
+        conn.commit()
+        conn.close()
+
+    def _patch_downstream(self, monkeypatch):
+        """屏蔽 westock/EM 之后的降级层（新浪/估算），测试不应触达"""
+        monkeypatch.setattr(dc, '_fetch_capital_flow_sina_main', lambda *a, **k: None)
+        monkeypatch.setattr(dc, '_fetch_capital_flow_sina', lambda *a, **k: [])
+        monkeypatch.setattr(dc, '_fetch_capital_flow_netease', lambda *a, **k: [])
+
+    def test_westock_primary_short_circuits_em(self, tmp_path, monkeypatch):
+        """westock 成功 → 东财三层不被调用，行写为 capital_source='westock'"""
+        self._make_db(tmp_path, monkeypatch)
+        monkeypatch.setattr(dc, 'datetime', _AfterCloseDateTime)
+        self._patch_downstream(monkeypatch)
+        monkeypatch.setattr(dc, '_westock_cooldown_active', lambda: False)
+        monkeypatch.setattr(dc, '_fetch_capital_flow_westock', lambda *a, **k: _westock_row())
+
+        em_calls = []
+
+        def _em_spy(*a, **k):
+            em_calls.append(1)
+            raise AssertionError('021L：westock 成功后东财 push2his 不应被调用')
+
+        monkeypatch.setattr(dc, '_fetch_capital_flow_em_individual', _em_spy)
+        monkeypatch.setattr(dc, '_em_banned', lambda: True)  # akshare 层直接跳过
+
+        status, msg = dc.fetch_capital_flow('600276', 'a_stock')
+        assert status == 'success'
+        assert '腾讯自选股' in msg
+
+        conn = db_manager.get_connection()
+        row = conn.execute(
+            'SELECT main_net_inflow, super_large_net, is_estimated, capital_source '
+            'FROM raw_capital_flow WHERE trade_date=?',
+            (_TODAY,),
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row['capital_source'] == 'westock'
+        assert row['is_estimated'] == 0
+        assert row['main_net_inflow'] == 5000.0  # 参与评分的真实数据
+        assert em_calls == []
+
+    def test_westock_fail_falls_back_to_em(self, tmp_path, monkeypatch):
+        """westock 失败 → 东财 push2his 兜底写入（capital_source=NULL）"""
+        self._make_db(tmp_path, monkeypatch, name='cap_em_fb.db')
+        monkeypatch.setattr(dc, 'datetime', _AfterCloseDateTime)
+        self._patch_downstream(monkeypatch)
+        monkeypatch.setattr(dc, '_fetch_capital_flow_westock', lambda *a, **k: None)
+        monkeypatch.setattr(dc, '_fetch_capital_flow_em_individual', lambda *a, **k: _em_history_rows())
+        monkeypatch.setattr(dc, '_fetch_capital_flow_em', lambda *a, **k: [])
+        monkeypatch.setattr(dc, '_em_banned', lambda: True)
+
+        status, msg = dc.fetch_capital_flow('600276', 'a_stock')
+        assert status == 'success'
+        assert '东方财富' in msg
+
+        conn = db_manager.get_connection()
+        row = conn.execute(
+            'SELECT main_net_inflow, is_estimated, capital_source '
+            'FROM raw_capital_flow WHERE trade_date=?',
+            (_TODAY,),
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row['capital_source'] is None  # EM 真实行来源归位
+        assert row['is_estimated'] == 0
+        assert row['main_net_inflow'] == 5000.0  # 5000万元
+
+    def test_existing_westock_row_skips_all_sources(self, tmp_path, monkeypatch):
+        """当日已有 westock 行 → 前置校验直接跳过，任何网络层都不触达（021L 防覆盖语义）"""
+        self._make_db(tmp_path, monkeypatch, name='cap_skip.db')
+        monkeypatch.setattr(dc, 'datetime', _AfterCloseDateTime)
+        conn = db_manager.get_connection()
+        conn.execute(
+            "INSERT INTO raw_capital_flow (stock_id, trade_date, main_net_inflow, is_estimated, capital_source) "
+            "VALUES (1, ?, 100.0, 0, 'westock')",
+            (_TODAY,),
+        )
+        conn.commit()
+        conn.close()
+
+        def _boom(name):
+            def _f(*a, **k):
+                raise AssertionError(f'同日跳过未生效：{name} 不应被调用')
+
+            return _f
+
+        for fn in (
+            '_fetch_capital_flow_westock',
+            '_fetch_capital_flow_em_individual',
+            '_fetch_capital_flow_em',
+            '_fetch_capital_flow_sina_main',
+        ):
+            monkeypatch.setattr(dc, fn, _boom(fn))
+        monkeypatch.setattr(dc, '_em_banned', lambda: True)
+
+        status, msg = dc.fetch_capital_flow('600276', 'a_stock')
+        assert status == 'success'
+        assert '跳过采集' in msg
+
+    def test_sina_row_still_retried(self, tmp_path, monkeypatch):
+        """当日仅新浪顶替行（sina_main）→ 不跳过，westock 主源可覆盖升级"""
+        self._make_db(tmp_path, monkeypatch, name='cap_sina.db')
+        monkeypatch.setattr(dc, 'datetime', _AfterCloseDateTime)
+        self._patch_downstream(monkeypatch)
+        conn = db_manager.get_connection()
+        conn.execute(
+            "INSERT INTO raw_capital_flow (stock_id, trade_date, main_net_inflow, is_estimated, capital_source) "
+            "VALUES (1, ?, 100.0, 0, 'sina_main')",
+            (_TODAY,),
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(dc, '_fetch_capital_flow_westock', lambda *a, **k: _westock_row())
+
+        def _em_spy(*a, **k):
+            raise AssertionError('sina 行应被 westock 主源覆盖，无需东财')
+
+        monkeypatch.setattr(dc, '_fetch_capital_flow_em_individual', _em_spy)
+        monkeypatch.setattr(dc, '_em_banned', lambda: True)
+
+        status, msg = dc.fetch_capital_flow('600276', 'a_stock')
+        assert status == 'success'
+        assert '腾讯自选股' in msg
+        conn = db_manager.get_connection()
+        row = conn.execute(
+            'SELECT capital_source, main_net_inflow FROM raw_capital_flow WHERE trade_date=?',
+            (_TODAY,),
+        ).fetchone()
+        conn.close()
+        assert row['capital_source'] == 'westock'  # 覆盖升级为同口径主源数据
+
+
+class TestCapitalSupplementListWestock:
+    """021L：westock 行计为"已完成"——退出资金面补采清单（东财请求密度归零的核心）"""
+
+    def test_westock_row_excluded_from_supplement(self, tmp_path, monkeypatch):
+        import pandas as pd
+
+        monkeypatch.setattr(db_manager, 'DB_PATH', str(tmp_path / 'cap_sup.db'))
+        monkeypatch.setattr(db_manager, 'BACKUP_DIR', str(tmp_path / 'backups'))
+        db_manager.init_database()
+        conn = db_manager.get_connection()
+        conn.execute("INSERT INTO stocks (symbol, market, name) VALUES ('600276', 'a_stock', '恒瑞医药')")
+        conn.commit()
+        # 当日已有 westock 真实行
+        conn.execute(
+            "INSERT INTO raw_capital_flow (stock_id, trade_date, main_net_inflow, is_estimated, capital_source) "
+            "VALUES (1, ?, 100.0, 0, 'westock')",
+            (_TODAY,),
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(dc, 'datetime', _TradingDayDateTime)
+        # THS 批量源正常返回（仅辅助指标）
+        monkeypatch.setattr(
+            dc,
+            '_fetch_capital_flow_ths_batch',
+            lambda: pd.DataFrame([{'股票代码': '600276', '净额': '1.2亿'}]),
+        )
+        em_calls = []
+        monkeypatch.setattr(
+            dc,
+            '_em_batch_collect',
+            lambda symbols, **k: em_calls.append(list(symbols)) or {'success_count': 0, 'fail_count': 0, 'source': 'mock'},
+        )
+
+        result = dc.fetch_capital_flow_batch(['600276'])
+        assert result['source'] == '同花顺批量(辅助指标)'
+        assert em_calls == []  # westock 已覆盖 → 不触发 EM 逐只补采
+
+    def test_missing_row_still_supplemented(self, tmp_path, monkeypatch):
+        """当日无任何真实数据 → 仍进入补采清单（保持回补能力）"""
+        import pandas as pd
+
+        monkeypatch.setattr(db_manager, 'DB_PATH', str(tmp_path / 'cap_sup2.db'))
+        monkeypatch.setattr(db_manager, 'BACKUP_DIR', str(tmp_path / 'backups'))
+        db_manager.init_database()
+        conn = db_manager.get_connection()
+        conn.execute("INSERT INTO stocks (symbol, market, name) VALUES ('600276', 'a_stock', '恒瑞医药')")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(dc, 'datetime', _TradingDayDateTime)
+        monkeypatch.setattr(
+            dc,
+            '_fetch_capital_flow_ths_batch',
+            lambda: pd.DataFrame([{'股票代码': '600276', '净额': '1.2亿'}]),
+        )
+        em_calls = []
+        monkeypatch.setattr(
+            dc,
+            '_em_batch_collect',
+            lambda symbols, **k: em_calls.append(list(symbols)) or {'success_count': 1, 'fail_count': 0, 'source': 'mock'},
+        )
+
+        result = dc.fetch_capital_flow_batch(['600276'])
+        assert em_calls == [['600276']]  # 无数据 → 正常补采
+        assert result['success_count'] == 2  # THS 辅助 1 + 补采 mock 1
+
+
+# ============================================================
+# 021W-2：百度历史估值采集 fetch_valuation_history
+# ============================================================
+
+
+class TestFetchValuationHistory:
+    """021W-2：百度股市通历史估值采集（mock akshare，隔离库）。
+
+    覆盖：A股成功写入（PE/PB 双序列合并、UPSERT 幂等）、港股跳过、
+    akshare 异常 → failed + data_status、当日成功采集后同日跳过。
+    """
+
+    @pytest.fixture()
+    def db(self, tmp_path, monkeypatch):
+        db_file = tmp_path / 'test_val_hist.db'
+        monkeypatch.setattr(db_manager, 'DB_PATH', str(db_file))
+        monkeypatch.setattr(db_manager, 'BACKUP_DIR', str(tmp_path / 'backups'))
+        db_manager.init_database()
+        conn = db_manager.get_connection()
+        conn.execute("INSERT INTO stocks (symbol, market, name) VALUES ('600276', 'a_stock', '恒瑞医药')")
+        conn.execute("INSERT INTO stocks (symbol, market, name) VALUES ('HK3690', 'hk_stock', '美团-W')")
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def _mk_fake_baidu(pe_df, pb_df, calls):
+        """构造 akshare stock_zh_valuation_baidu 的 fake（记录调用，区分 PE/PB）"""
+        import akshare as ak
+
+        def _fake(symbol, indicator, period):
+            calls.append((symbol, indicator, period))
+            assert symbol == '600276'
+            if '市盈率' in indicator:
+                return pe_df
+            return pb_df
+
+        return _fake
+
+    def test_success_upsert_and_idempotent(self, db, monkeypatch):
+        """A股成功：PE/PB 合并入库；重复调用幂等（行数不变、值更新）"""
+        import akshare as ak
+        import pandas as pd
+
+        calls = []
+        pe_df = pd.DataFrame({'date': ['2025-12-20', '2026-01-06'], 'value': [48.5, 56.04]})
+        pb_df = pd.DataFrame({'date': ['2025-12-20', '2026-01-06'], 'value': [6.2, 7.0]})
+        monkeypatch.setattr(ak, 'stock_zh_valuation_baidu', self._mk_fake_baidu(pe_df, pb_df, calls))
+
+        status, msg = dc.fetch_valuation_history('600276', 'a_stock')
+        assert status == 'success'
+        assert '2 个交易日快照' in msg
+
+        conn = db_manager.get_connection()
+        rows = conn.execute(
+            'SELECT trade_date, pe_ttm, pb, source FROM stock_valuation_history ORDER BY trade_date'
+        ).fetchall()
+        conn.close()
+        assert len(rows) == 2
+        assert rows[0]['trade_date'] == '2025-12-20'
+        assert rows[0]['pe_ttm'] == 48.5
+        assert rows[0]['pb'] == 6.2
+        assert rows[0]['source'] == 'baidu'
+        assert rows[1]['pe_ttm'] == 56.04
+
+        # 幂等：再次采集（值变化后）→ UPSERT 更新而非新增
+        pe_df2 = pd.DataFrame({'date': ['2025-12-20', '2026-01-06', '2026-01-21'], 'value': [50.0, 53.41, 51.0]})
+        pb_df2 = pd.DataFrame({'date': ['2025-12-20', '2026-01-06', '2026-01-21'], 'value': [6.5, 6.8, 6.6]})
+        monkeypatch.setattr(ak, 'stock_zh_valuation_baidu', self._mk_fake_baidu(pe_df2, pb_df2, calls))
+        status2, _ = dc.fetch_valuation_history('600276', 'a_stock', force_refresh=True)
+        assert status2 == 'success'
+        conn = db_manager.get_connection()
+        rows2 = conn.execute(
+            'SELECT trade_date, pe_ttm, pb FROM stock_valuation_history ORDER BY trade_date'
+        ).fetchall()
+        conn.close()
+        assert len(rows2) == 3, '应 UPSERT 更新旧点并新增新点，而非重复插入'
+        assert rows2[0]['pe_ttm'] == 50.0, '旧点应被新值覆盖'
+        assert rows2[2]['trade_date'] == '2026-01-21'
+
+    def test_hk_skipped(self, db, monkeypatch):
+        """港股：无稳定历史估值源 → skipped（不误报失败）"""
+        status, msg = dc.fetch_valuation_history('HK3690', 'hk_stock')
+        assert status == 'skipped'
+        assert '仅支持 A 股' in msg
+
+    def test_akshare_failure_records_failed(self, db, monkeypatch):
+        """akshare 异常 → failed + data_status 留痕"""
+        import akshare as ak
+
+        def _boom(symbol, indicator, period):
+            raise RuntimeError('network down')
+
+        monkeypatch.setattr(ak, 'stock_zh_valuation_baidu', _boom)
+        status, msg = dc.fetch_valuation_history('600276', 'a_stock')
+        assert status == 'failed'
+        assert '历史估值获取失败' in msg
+        conn = db_manager.get_connection()
+        row = conn.execute(
+            "SELECT status, message FROM data_status WHERE stock_id=1 AND dimension='valuation_history' ORDER BY fetched_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row and row['status'] == 'failed'
+
+    def test_same_day_skip(self, db, monkeypatch):
+        """成功采集后当日再次调用 → 同日跳过（不再请求网络）"""
+        import akshare as ak
+        import pandas as pd
+
+        calls = []
+        pe_df = pd.DataFrame({'date': ['2026-08-01'], 'value': [45.0]})
+        pb_df = pd.DataFrame({'date': ['2026-08-01'], 'value': [5.5]})
+        monkeypatch.setattr(ak, 'stock_zh_valuation_baidu', self._mk_fake_baidu(pe_df, pb_df, calls))
+
+        status, _ = dc.fetch_valuation_history('600276', 'a_stock')
+        assert status == 'success'
+        assert len(calls) == 2
+
+        # 第二次调用：同日跳过，不触网
+        status2, msg2 = dc.fetch_valuation_history('600276', 'a_stock')
+        assert status2 == 'success'
+        assert '同日跳过' in msg2
+        assert len(calls) == 2, '同日跳过不应再次请求 akshare'

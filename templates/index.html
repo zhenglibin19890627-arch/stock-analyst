@@ -4,6 +4,15 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Stock Analyst - 智能个股分析系统</title>
+    <script>
+        /* 021BD：CSS 加载前恢复上次主题，避免首帧闪白 */
+        (function() {
+            try {
+                var t = localStorage.getItem('sa_theme');
+                if (t && t !== 'light') document.documentElement.setAttribute('data-theme', t);
+            } catch (e) {}
+        })();
+    </script>
     <link rel="stylesheet" href="/static/css/app.css?v={{ css_version }}">
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
@@ -21,6 +30,15 @@
         <button class="topnav-tab" data-route="#report" onclick="navigateTo('#report')">📊 分析报告</button>
         <button class="topnav-tab" data-route="#dashboard" onclick="navigateTo('#dashboard')">📈 总览看板</button>
         <button class="topnav-tab" data-route="#backtest" onclick="navigateTo('#backtest')">🔬 回测中心</button>
+    </div>
+    <!-- ========== 021BD: 主题皮肤切换 ========== -->
+    <div class="theme-switch-wrap">
+        <select id="themeSelect" class="theme-select" title="界面主题皮肤" onchange="setTheme(this.value)">
+            <option value="light">🎨 浅色</option>
+            <option value="dark">🌙 深色</option>
+            <option value="green">🌿 护眼</option>
+            <option value="warm">☀️ 暖阳</option>
+        </select>
     </div>
     <!-- ========== P3-B: 预警铃铛 ========== -->
     <div class="alert-bell-wrap">
@@ -41,46 +59,46 @@
             <div class="alert-list" id="alertRulesList" style="display:none;">
             </div>
             <!-- U5(#7): 底部操作栏 -->
-            <div style="display:flex;gap:8px;padding:10px 16px;border-top:1px solid #eee;background:#fafbfc;">
+            <div style="display:flex;gap:8px;padding:10px 16px;border-top:1px solid var(--border-light,#eee);background:var(--surface-alt,#fafbfc);">
                 <button class="btn btn-primary btn-sm" style="flex:1;" onclick="openAlertRuleModal(event)">➕ 添加预警规则</button>
-                <button class="btn btn-sm" id="alertManageBtn" style="background:#f0f0f0;border:1px solid #ddd;" onclick="toggleAlertRulesView(event)">⚙ 管理规则</button>
+                <button class="btn btn-sm" id="alertManageBtn" style="background:var(--surface-2,#f0f0f0);border:1px solid var(--border,#ddd);" onclick="toggleAlertRulesView(event)">⚙ 管理规则</button>
             </div>
         </div>
 
         <!-- U5(#7): 添加预警规则弹窗 -->
         <div id="alertRuleModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:2000;align-items:center;justify-content:center;">
-            <div style="background:#fff;border-radius:12px;padding:24px;width:440px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.2);">
+            <div style="background:var(--surface,#fff);border-radius:12px;padding:24px;width:440px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.2);">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
                     <h3 style="margin:0;font-size:18px;">➕ 添加预警规则</h3>
-                    <button onclick="closeAlertRuleModal()" style="border:none;background:none;font-size:22px;cursor:pointer;color:#999;line-height:1;">✕</button>
+                    <button onclick="closeAlertRuleModal()" style="border:none;background:none;font-size:22px;cursor:pointer;color:var(--text-3,#999);line-height:1;">✕</button>
                 </div>
                 <div style="margin-bottom:16px;">
-                    <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:#555;">预警类型</label>
-                    <select id="alertRuleType" style="width:100%;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:14px;" onchange="onAlertRuleTypeChange()">
+                    <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:var(--text,#555);">预警类型</label>
+                    <select id="alertRuleType" style="width:100%;padding:8px 12px;border:1px solid var(--border,#ddd);border-radius:6px;font-size:14px;" onchange="onAlertRuleTypeChange()">
                         <option value="rating_change">评级变动（评级发生升降级时提醒）</option>
                         <option value="score_below">评分跌破（总分跌破阈值时提醒）</option>
                         <option value="capital_outflow">资金流出（主力资金大幅流出时提醒）</option>
                     </select>
                 </div>
                 <div id="alertThresholdWrap" style="margin-bottom:16px;">
-                    <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:#555;" id="alertThresholdLabel">阈值</label>
-                    <input type="number" id="alertThresholdInput" style="width:100%;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:14px;" placeholder="如 60">
-                    <p style="font-size:12px;color:#888;margin-top:4px;" id="alertThresholdHint"></p>
+                    <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:var(--text,#555);" id="alertThresholdLabel">阈值</label>
+                    <input type="number" id="alertThresholdInput" style="width:100%;padding:8px 12px;border:1px solid var(--border,#ddd);border-radius:6px;font-size:14px;" placeholder="如 60">
+                    <p style="font-size:12px;color:var(--text-3,#888);margin-top:4px;" id="alertThresholdHint"></p>
                 </div>
                 <div style="margin-bottom:16px;">
-                    <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:#555;">适用范围</label>
-                    <select id="alertRuleScope" style="width:100%;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:14px;" onchange="onAlertScopeChange()">
+                    <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:var(--text,#555);">适用范围</label>
+                    <select id="alertRuleScope" style="width:100%;padding:8px 12px;border:1px solid var(--border,#ddd);border-radius:6px;font-size:14px;" onchange="onAlertScopeChange()">
                         <option value="global">全部股票（全局）</option>
                         <option value="stock">指定个股</option>
                     </select>
                 </div>
                 <div id="alertStockSelectWrap" style="display:none;margin-bottom:16px;">
-                    <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:#555;">选择股票</label>
-                    <select id="alertStockSelect" style="width:100%;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:14px;"></select>
+                    <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:var(--text,#555);">选择股票</label>
+                    <select id="alertStockSelect" style="width:100%;padding:8px 12px;border:1px solid var(--border,#ddd);border-radius:6px;font-size:14px;"></select>
                 </div>
                 <div id="alertRuleError" style="display:none;margin-bottom:12px;padding:8px 12px;background:#fff3e0;border:1px solid #ffcc02;border-radius:6px;font-size:13px;color:#e65100;"></div>
                 <div style="display:flex;gap:12px;justify-content:flex-end;">
-                    <button onclick="closeAlertRuleModal()" style="padding:8px 20px;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:14px;background:#f8f9fa;">取消</button>
+                    <button onclick="closeAlertRuleModal()" style="padding:8px 20px;border:1px solid var(--border,#ddd);border-radius:6px;cursor:pointer;font-size:14px;background:var(--surface-alt,#f8f9fa);">取消</button>
                     <button onclick="submitAlertRule()" style="padding:8px 20px;border:none;border-radius:6px;cursor:pointer;font-size:14px;background:#1a73e8;color:#fff;font-weight:600;">确认添加</button>
                 </div>
             </div>
@@ -94,28 +112,35 @@
 <!-- ========== 视图：持仓管理 ========== -->
 <div id="view-holdings" class="view">
     <div class="card">
-        <div class="card-title">💼 持仓管理 <span style="font-size:13px;color:#888;font-weight:normal;">（分组Tab切换 + 持仓编辑 + 交易流水）</span></div>
+        <div class="card-title">💼 持仓管理 <span style="font-size:13px;color:var(--text-3,#888);font-weight:normal;">（分组Tab切换 + 持仓编辑 + 交易流水）</span></div>
         <div class="form-row" style="margin-bottom:12px;">
-            <button class="btn btn-sm" style="background:#f0f0f0;border:1px solid #ccc;" onclick="openGroupManager('portfolio')" title="管理分组">⚙ 管理分组</button>
-            <button class="btn btn-sm" style="background:#e8f0fe;border:1px solid #1a73e8;color:#1a73e8;" onclick="refreshPrices()" title="刷新最新价格" id="refreshPricesBtn">🔄 刷新价格</button>
+            <button class="btn btn-sm" style="background:var(--surface-2,#f0f0f0);border:1px solid var(--border,#ccc);" onclick="openGroupManager('portfolio')" title="管理分组">⚙ 管理分组</button>
+            <button class="btn btn-sm" style="background:#e8f0fe;border:1px solid #1a73e8;color:#1a73e8;" onclick="refreshPrices()" title="联网拉取实时最新价格并刷新整个持仓页（分组Tab/列表/汇总；取价失败保留旧价并仅本地重载）" id="refreshPricesBtn">🔄 刷新价格</button>
             <span id="priceDataStatus" style="font-size:11px;padding:2px 8px;border-radius:10px;display:none;"></span>
-            <button class="btn btn-success btn-sm" onclick="loadPortfolioGroups()">刷新</button>
+        </div>
+        <!-- 021S 多账户：账户切换条 -->
+        <div id="accountSwitchBar" style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap;">
+            <label style="font-size:13px;color:var(--text-2,#666);">交易账户</label>
+            <select id="accountSwitchSelect" onchange="selectAccount(this.value)" style="min-width:160px;"></select>
+            <button class="btn btn-sm" style="background:var(--surface-2,#f0f0f0);border:1px solid var(--border,#ccc);" onclick="openAccountModal()" title="管理交易账户">⚙ 管理账户</button>
         </div>
         <div id="portfolioGroupTabs" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;"></div>
         <div id="portfolioSummary" class="view-summary">
             <div class="view-summary-card">
                 <div class="label">账户总市值</div>
-                <div id="sumMarketValue" class="value" style="color:#333;">--</div>
+                <div id="sumMarketValue" class="value" style="color:var(--text,#333);">--</div>
             </div>
             <div class="view-summary-card">
-                <div class="label">总浮动盈亏 <span style="font-size:10px;color:#aaa;">（账面浮盈/浮亏）</span></div>
+                <div class="label">总持仓盈亏 <span style="font-size:10px;color:var(--text-3,#aaa);">（券商口径：现价 vs 摊薄成本）</span></div>
                 <div id="sumUnrealized" class="value">--</div>
             </div>
             <div class="view-summary-card">
-                <div class="label">总收益 <span style="font-size:10px;color:#aaa;">（已实现+浮动）</span></div>
+                <div class="label">累计已实现 <span style="font-size:10px;color:var(--text-3,#aaa);">（含分红与卖出差额）</span></div>
                 <div id="sumTotalPnl" class="value">--</div>
             </div>
         </div>
+        <!-- 021S：全账户视图下的分账户汇总 -->
+        <div id="accountsBreakdownBar" style="display:none;gap:8px;margin-bottom:12px;flex-wrap:wrap;"></div>
         <div id="holdingsList">
             <div class="btn-add-holding" onclick="openAddHoldingModal()">＋ 添加持仓</div>
         </div>
@@ -147,7 +172,7 @@
 <div class="card">
     <div class="card-title">
         自选股列表
-        <span style="font-size:13px; color:#888; font-weight:normal;">（上限50只）</span>
+        <span style="font-size:13px; color:var(--text-3,#888); font-weight:normal;">（上限50只）</span>
     </div>
     <div class="form-row" style="margin-bottom: 16px;">
         <input type="checkbox" id="selectAllStocks" onclick="toggleSelectAll()" style="margin-right:4px;">
@@ -157,7 +182,7 @@
     </div>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
         <div id="watchlistGroupTabs" style="display:flex;gap:8px;flex-wrap:wrap;"></div>
-        <button class="btn btn-sm" style="background:#f0f0f0;border:1px solid #ccc;" onclick="openGroupManager('watchlist')" title="管理分组">⚙ 管理分组</button>
+        <button class="btn btn-sm" style="background:var(--surface-2,#f0f0f0);border:1px solid var(--border,#ccc);" onclick="openGroupManager('watchlist')" title="管理分组">⚙ 管理分组</button>
     </div>
     <div id="stockList">
         <div class="empty">还没有添加自选股，请在上方添加</div>
@@ -184,19 +209,86 @@
 
 <!-- ========== 视图：市场行情（大盘指数 + 行业资金流向） ========== -->
 <div id="view-market" class="view">
+    <!-- ========== 021BI: 全市场选股扫描 ========== -->
+    <div class="card" id="marketScannerCard">
+        <div class="card-title">🔍 全市场选股扫描
+            <span style="font-size:13px;color:var(--text-3,#888);font-weight:normal;">（快照参考 · 非评级；数据源：新浪/腾讯，与东财断连无关）</span>
+            <span id="msSnapshotMeta" style="font-size:13px;color:var(--text-3,#888);font-weight:normal;float:right;"></span>
+        </div>
+        <!-- 第①步 快照粗筛 -->
+        <div style="display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;font-size:13px;margin-bottom:10px;">
+            <span style="font-weight:600;">第①步 快照粗筛</span>
+            <label><input type="checkbox" id="msExSt" checked> 剔ST</label>
+            <label>总市值≥<input type="number" id="msMktMin" value="100" min="0" style="width:68px;">亿</label>
+            <label>流通(亿)
+                <input type="number" id="msNmcMin" placeholder="≥" min="0" style="width:64px;"> ~
+                <input type="number" id="msNmcMax" placeholder="≤" min="0" style="width:64px;">
+            </label>
+            <label>换手%
+                <input type="number" id="msTurnMin" value="1" min="0" step="0.5" style="width:56px;"> ~
+                <input type="number" id="msTurnMax" placeholder="不限" min="0" step="0.5" style="width:56px;">
+            </label>
+            <label>量比
+                <input type="number" id="msVrMin" placeholder="≥" min="0" step="0.1" style="width:56px;"> ~
+                <input type="number" id="msVrMax" placeholder="≤" min="0" step="0.1" style="width:56px;">
+            </label>
+            <label>涨跌幅
+                <input type="number" id="msChgMin" placeholder="≥" style="width:60px;"> ~
+                <input type="number" id="msChgMax" placeholder="≤" style="width:60px;">%
+            </label>
+            <label>板块
+                <select id="msBoard" style="width:90px;">
+                    <option value="">全部</option>
+                    <option value="主板">主板</option>
+                    <option value="创业板">创业板</option>
+                    <option value="科创板">科创板</option>
+                </select>
+            </label>
+            <label>行业 <select id="msIndustry" style="width:120px;"><option value="">全部</option></select></label>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" id="msScanBtn" onclick="msRunCoarse()">🔍 扫描全市场（约1分钟）</button>
+            <span id="msCoarseStatus" style="font-size:13px;color:var(--text-3,#888);"></span>
+        </div>
+        <div id="msCoarseResult" style="margin-top:10px;"></div>
+
+        <!-- 第②步 技术信号精筛 -->
+        <div id="msSignalSection" style="display:none;margin-top:16px;border-top:1px solid var(--border-light,#eee);padding-top:12px;">
+            <div style="font-weight:600;font-size:13px;margin-bottom:8px;">第②步 技术信号精筛（对粗筛结果逐票拉K线，上限300只）</div>
+            <div id="msSignalChecks" style="display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;margin-bottom:8px;"></div>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                <label style="font-size:13px;">触发窗口：近
+                    <select id="msWindow" style="width:70px;">
+                        <option value="1">1</option>
+                        <option value="3" selected>3</option>
+                        <option value="5">5</option>
+                    </select> 个交易日
+                </label>
+                <button class="btn btn-primary btn-sm" id="msSignalBtn" onclick="msStartSignals()">⚡ 开始信号扫描</button>
+                <button class="btn btn-sm" id="msStopBtn" style="display:none;" onclick="msStopSignals()">⏹ 停止</button>
+                <label style="font-size:13px;"><input type="checkbox" id="msResOnly" checked> ⭐ 只看共振</label>
+                <span id="msSignalProgress" style="font-size:13px;color:var(--text-3,#888);"></span>
+            </div>
+            <div id="msSignalResult" style="margin-top:10px;"></div>
+            <div id="msAddBar" style="margin-top:10px;display:none;">
+                <button class="btn btn-success btn-sm" onclick="msAddSelected()">➕ 加入自选（已选 <span id="msSelCount">0</span>/20）</button>
+                <span style="font-size:12px;color:var(--text-3,#999);margin-left:8px;">加入后请到「自选股」页执行「批量分析+评级」获取真评级</span>
+            </div>
+        </div>
+    </div>
     <div class="card">
-        <div class="card-title">📊 大盘指数 <span style="font-size:13px;color:#888;font-weight:normal;">（主要指数行情与评级）</span></div>
-        <div id="marketIndexSection"><span style="color:#999;font-size:13px;">加载中...</span></div>
+        <div class="card-title">📊 大盘指数 <span style="font-size:13px;color:var(--text-3,#888);font-weight:normal;">（主要指数行情与评级）</span></div>
+        <div id="marketIndexSection"><span style="color:var(--text-3,#999);font-size:13px;">加载中...</span></div>
     </div>
     <div class="card">
         <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-            <span>💰 行业资金流向 <span style="font-size:13px;color:#888;font-weight:normal;">（主力/大单净流入排行，红流入·绿流出）</span></span>
+            <span>💰 行业资金流向 <span style="font-size:13px;color:var(--text-3,#888);font-weight:normal;">（主力/大单净流入排行，红流入·绿流出）</span></span>
             <span style="font-weight:normal;">
-                <span id="marketFlowMeta" style="font-size:13px;color:#888;margin-right:12px;"></span>
+                <span id="marketFlowMeta" style="font-size:13px;color:var(--text-3,#888);margin-right:12px;"></span>
                 <button class="btn btn-primary btn-sm" id="marketFlowRefreshBtn" onclick="refreshIndustryFlow()">🔄 刷新</button>
             </span>
         </div>
-        <div id="marketFlowList"><span style="color:#999;font-size:13px;">加载中...</span></div>
+        <div id="marketFlowList"><span style="color:var(--text-3,#999);font-size:13px;">加载中...</span></div>
     </div>
 </div>
 
@@ -210,7 +302,7 @@
     <div id="dashboardContent">
         <div class="report-empty">
             <p style="font-size:18px;margin-bottom:12px;">📈 总览看板</p>
-            <p style="color:#888;">加载中...</p>
+            <p style="color:var(--text-3,#888);">加载中...</p>
         </div>
     </div>
 </div><!-- /view-dashboard -->
@@ -236,15 +328,15 @@
         <!-- Tab1: 市场报告 -->
         <div id="btTabContent-market">
             <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">
-                <select id="btMarketSelect" onchange="loadBacktestMarketReport()" style="padding:6px 12px;border-radius:6px;border:1px solid #ddd;">
+                <select id="btMarketSelect" onchange="loadBacktestMarketReport()" style="padding:6px 12px;border-radius:6px;border:1px solid var(--border,#ddd);">
                     <option value="a_stock">A股</option>
                     <option value="hk_stock">港股</option>
                 </select>
                 <button class="btn btn-primary btn-sm" onclick="rerunBacktest()">🔄 手动重跑回测</button>
-                <span id="btRerunStatus" style="font-size:13px;color:#888;"></span>
+                <span id="btRerunStatus" style="font-size:13px;color:var(--text-3,#888);"></span>
             </div>
             <div id="btMarketReportContent">
-                <div class="report-empty"><p style="color:#888;">加载中...</p></div>
+                <div class="report-empty"><p style="color:var(--text-3,#888);">加载中...</p></div>
             </div>
             <div id="btPriceBacktestContent" style="margin-top:24px;"></div>
             <div id="btInterpretationContent" style="margin-top:16px;"></div>
@@ -253,12 +345,12 @@
         <!-- Tab2: 个股明细 -->
         <div id="btTabContent-stock" style="display:none;">
             <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">
-                <select id="btStockSelect" onchange="loadBacktestStockDetail()" style="padding:6px 12px;border-radius:6px;border:1px solid #ddd;min-width:200px;">
+                <select id="btStockSelect" onchange="loadBacktestStockDetail()" style="padding:6px 12px;border-radius:6px;border:1px solid var(--border,#ddd);min-width:200px;">
                     <option value="">选择股票...</option>
                 </select>
             </div>
             <div id="btStockDetailContent">
-                <div class="report-empty"><p style="color:#888;">请选择股票查看回测明细</p></div>
+                <div class="report-empty"><p style="color:var(--text-3,#888);">请选择股票查看回测明细</p></div>
             </div>
         </div>
 
@@ -266,11 +358,11 @@
         <div id="btTabContent-exp" style="display:none;">
             <!-- M9 自动优化状态区 -->
             <div id="btOptimizerContent" style="margin-bottom:20px;">
-                <div class="report-empty"><p style="color:#888;">加载优化状态...</p></div>
+                <div class="report-empty"><p style="color:var(--text-3,#888);">加载优化状态...</p></div>
             </div>
             <!-- 权重实验区 -->
             <div id="btExperimentsContent">
-                <div class="report-empty"><p style="color:#888;">加载中...</p></div>
+                <div class="report-empty"><p style="color:var(--text-3,#888);">加载中...</p></div>
             </div>
         </div>
     </div>
@@ -281,7 +373,7 @@
 <!-- ========== 视图：交易流水与成本修正（合并页） ========== -->
 <div id="view-trades" class="view">
     <div class="card">
-        <div class="card-title">📝 全部交易流水 <span style="font-size:13px;color:#888;font-weight:normal;">（买卖/分红记录，支持筛选）</span></div>
+        <div class="card-title">📝 全部交易流水 <span style="font-size:13px;color:var(--text-3,#888);font-weight:normal;">（买卖/分红记录，支持筛选）</span></div>
         <div class="form-row" style="margin-bottom:12px;">
             <label style="min-width:auto;font-size:13px;">类型</label>
             <select id="tradeFilterType" style="min-width:auto;" onchange="loadAllTrades()">
@@ -289,6 +381,7 @@
                 <option value="buy">买入</option>
                 <option value="sell">卖出</option>
                 <option value="dividend">分红</option>
+                <option value="dividend_tax">红利补税</option>
             </select>
             <button class="btn btn-success btn-sm" onclick="loadAllTrades()">刷新</button>
         </div>
@@ -299,7 +392,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">✎ 成本修正历史 <span style="font-size:13px;color:#888;font-weight:normal;">（审计追溯，所有修正留痕）</span></div>
+        <div class="card-title">✎ 成本修正历史 <span style="font-size:13px;color:var(--text-3,#888);font-weight:normal;">（审计追溯，所有修正留痕）</span></div>
         <div class="form-row" style="margin-bottom:12px;">
             <button class="btn btn-success btn-sm" onclick="loadAllAdjustments()">刷新</button>
         </div>
@@ -313,7 +406,7 @@
 
 <!-- 持仓编辑弹窗（新增/编辑双模式） -->
 <div id="holdingModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:999;">
-    <div style="background:white;border-radius:12px;padding:24px;max-width:500px;margin:60px auto;box-shadow:0 4px 20px rgba(0,0,0,0.15);">
+    <div style="background:var(--surface,#fff);border-radius:12px;padding:24px;max-width:500px;margin:60px auto;box-shadow:0 4px 20px rgba(0,0,0,0.15);">
         <h3 id="holdingModalTitle" style="margin-bottom:16px;">添加持仓</h3>
         <!-- 追加买入提示条（黄色） -->
         <div id="existingHoldingWarning" style="display:none;margin-bottom:12px;padding:8px 12px;background:#fff3cd;border:1px solid #ffc107;border-radius:6px;font-size:13px;color:#856404;">
@@ -326,7 +419,7 @@
             <label>股票</label>
             <div style="flex:1;position:relative;">
                 <input type="text" id="stockSearchInput" placeholder="输入代码或名称搜索（如 600276 / 恒瑞）" autocomplete="off" onkeyup="searchStockForHolding()" style="width:100%;">
-                <div id="stockSearchResults" style="display:none;position:absolute;top:100%;left:0;right:0;background:white;border:1px solid #ddd;border-radius:0 0 6px 6px;box-shadow:0 4px 12px rgba(0,0,0,0.1);max-height:240px;overflow-y:auto;z-index:1000;"></div>
+                <div id="stockSearchResults" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--surface,#fff);border:1px solid var(--border,#ddd);border-radius:0 0 6px 6px;box-shadow:0 4px 12px rgba(0,0,0,0.1);max-height:240px;overflow-y:auto;z-index:1000;"></div>
             </div>
             <span id="selectedStockDisplay" style="display:none;font-weight:600;color:#1a73e8;font-size:14px;"></span>
         </div>
@@ -351,6 +444,9 @@
             <input type="number" id="holdingQty" placeholder="如 1000" style="flex:1;">
             <span id="qtyTag" class="prefill-tag" style="display:none;">自动填充</span>
         </div>
+        <div class="form-row"><label>交易账户</label>
+            <select id="holdingAccountSelect" style="flex:1;min-width:auto;"></select>
+        </div>
         <div class="form-row"><label>所属分组</label>
             <select id="holdingGroupSelect" style="flex:1;min-width:auto;"></select>
             <input type="hidden" id="holdingGroupId">
@@ -368,18 +464,22 @@
 
 <!-- 交易流水弹窗 -->
 <div id="tradeModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:999;">
-    <div style="background:white;border-radius:12px;padding:24px;max-width:600px;margin:60px auto;max-height:80vh;overflow-y:auto;box-shadow:0 4px 20px rgba(0,0,0,0.15);">
+    <div style="background:var(--surface,#fff);border-radius:12px;padding:24px;max-width:600px;margin:60px auto;max-height:80vh;overflow-y:auto;box-shadow:0 4px 20px rgba(0,0,0,0.15);">
         <h3 style="margin-bottom:16px;">交易流水 — <span id="tradeStockName"></span></h3>
         <div id="tradeRecords" style="margin-bottom:16px;"></div>
         <h4 style="margin:16px 0 8px;">新增交易</h4>
         <div class="form-row">
+            <select id="tradeAccountSelect" style="min-width:120px;" title="归属账户"></select>
             <select id="tradeType" style="min-width:auto;">
                 <option value="buy">买入</option>
                 <option value="sell">卖出</option>
                 <option value="dividend">分红</option>
+                <option value="dividend_tax" title="股息红利差异扣税（A股按持股期限补扣）/ 港股通代扣红利税，日期按实际扣税日填写">红利补税</option>
             </select>
             <input type="number" id="tradePrice" step="0.01" placeholder="成交价" style="min-width:100px;">
             <input type="number" id="tradeQty" placeholder="数量" style="min-width:100px;">
+            <input type="number" id="tradeAmount" step="0.01" min="0" placeholder="金额(可选,分红/补税直填)" style="min-width:150px;" title="直接填写总金额（如派息到账额/补扣税款）；留空则按 成交价×数量 计算">
+            <input type="number" id="tradeCommission" step="0.01" min="0" placeholder="留空自动估算" style="min-width:110px;" title="留空=按你的券商费率自动估算（隔天可改实际值）；买入计入持仓成本，卖出扣减已实现盈亏">
             <input type="date" id="tradeDate">
         </div>
         <div class="form-row">
@@ -393,12 +493,15 @@
 
 <!-- 分组管理弹窗（通用：自选股分组 / 持仓分组） -->
 <div id="groupManagerModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:999;">
-    <div style="background:white;border-radius:12px;padding:24px;max-width:500px;margin:60px auto;box-shadow:0 4px 20px rgba(0,0,0,0.15);">
+    <div style="background:var(--surface,#fff);border-radius:12px;padding:24px;max-width:500px;margin:60px auto;box-shadow:0 4px 20px rgba(0,0,0,0.15);">
         <h3 id="gmTitle" style="margin-bottom:16px;">管理分组</h3>
         <input type="hidden" id="gmType" value="">
         <div id="gmList" style="max-height:360px;overflow-y:auto;"></div>
         <div class="gm-add-row">
             <input type="text" id="gmNewName" placeholder="输入新分组名称" onkeydown="if(event.key==='Enter') gmCreateGroup()">
+            <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-2,#666);white-space:nowrap;" title="勾选后同时在另一侧（自选股/持仓）创建同名空分组；不勾选则只建当前这一侧">
+                <input type="checkbox" id="gmSyncOther" style="margin:0;">两侧同步建
+            </label>
             <button class="btn btn-primary btn-sm" onclick="gmCreateGroup()">新增</button>
         </div>
         <div class="form-row" style="margin-top:8px;justify-content:flex-end;">
@@ -409,11 +512,11 @@
 
 <!-- 自选股编辑弹窗（修改分组） -->
 <div id="stockEditModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:999;">
-    <div style="background:white;border-radius:12px;padding:24px;max-width:420px;margin:80px auto;box-shadow:0 4px 20px rgba(0,0,0,0.15);">
+    <div style="background:var(--surface,#fff);border-radius:12px;padding:24px;max-width:420px;margin:80px auto;box-shadow:0 4px 20px rgba(0,0,0,0.15);">
         <h3 style="margin-bottom:16px;">编辑自选股</h3>
         <input type="hidden" id="editStockId">
         <div class="form-row"><label>代码</label><span id="editStockSymbol" style="font-weight:700;color:#1a73e8;"></span></div>
-        <div class="form-row"><label>名称</label><span id="editStockName" style="color:#333;"></span></div>
+        <div class="form-row"><label>名称</label><span id="editStockName" style="color:var(--text,#333);"></span></div>
         <div class="form-row"><label>所属分组</label>
             <select id="editStockGroupSelect" style="flex:1;min-width:auto;"></select>
         </div>
@@ -426,11 +529,11 @@
 
 <!-- 成本修正弹窗 -->
 <div id="costAdjustModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:999;">
-    <div style="background:white;border-radius:12px;padding:24px;max-width:460px;margin:80px auto;box-shadow:0 4px 20px rgba(0,0,0,0.15);">
+    <div style="background:var(--surface,#fff);border-radius:12px;padding:24px;max-width:460px;margin:80px auto;box-shadow:0 4px 20px rgba(0,0,0,0.15);">
         <h3 style="margin-bottom:16px;">✎ 修正持仓成本</h3>
         <input type="hidden" id="caHoldingId">
         <div class="form-row"><label>股票</label><span id="caStockName" style="font-weight:600;color:#1a73e8;"></span></div>
-        <div class="form-row"><label>当前成本</label><span id="caCurrentCost" style="color:#666;"></span></div>
+        <div class="form-row"><label>当前成本</label><span id="caCurrentCost" style="color:var(--text-2,#666);"></span></div>
         <div class="form-row"><label>修正后成本</label>
             <input type="number" id="caNewCost" step="0.001" min="0" placeholder="输入修正后的成本价" style="flex:1;">
         </div>
@@ -452,6 +555,31 @@
         <div class="form-row" style="margin-top:16px;">
             <button class="btn btn-primary" id="caSubmitBtn" onclick="submitCostAdjustment()">确认修正</button>
             <button class="btn" style="background:#ddd;" onclick="closeCostAdjustModal()">取消</button>
+        </div>
+    </div>
+</div>
+
+<!-- 021S 多账户：账户管理弹窗 -->
+<div id="accountModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:999;">
+    <div style="background:var(--surface,#fff);border-radius:12px;padding:24px;max-width:520px;margin:60px auto;max-height:80vh;overflow-y:auto;box-shadow:0 4px 20px rgba(0,0,0,0.15);">
+        <h3 style="margin-bottom:16px;">⚙ 管理交易账户</h3>
+        <div id="accountList" style="margin-bottom:16px;"></div>
+        <h4 style="margin:16px 0 8px;">新建账户</h4>
+        <div class="form-row">
+            <label>名称</label>
+            <input type="text" id="newAccountName" placeholder="如：华泰主账户" style="flex:1;" maxlength="50">
+        </div>
+        <div class="form-row">
+            <label>券商</label>
+            <input type="text" id="newAccountBroker" placeholder="可选，如：华泰证券" style="flex:1;">
+        </div>
+        <div class="form-row">
+            <label>备注</label>
+            <input type="text" id="newAccountNotes" placeholder="可选" style="flex:1;">
+        </div>
+        <div class="form-row" style="margin-top:16px;">
+            <button class="btn btn-primary" onclick="createAccountAction()">创建账户</button>
+            <button class="btn" style="background:#ddd;" onclick="closeAccountModal()">关闭</button>
         </div>
     </div>
 </div>

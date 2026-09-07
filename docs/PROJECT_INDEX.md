@@ -65,7 +65,8 @@
 | 四维评分引擎（v5） | `modules/scoring_engine.py`（子项定义、降级规则、归一化） |
 | 标准数据契约 | `modules/data_contract.py`（StockData / AnalysisResult） |
 | 采集与补采 | `modules/data_collector.py` / `modules/backfill_scheduler.py` |
-| 评级建议（红线） | `modules/advisor.py`（`generate_advice` 禁止修改） |
-| 权重与评级档位 | `config_weights.json`（热加载）/ `config.py`（代码级兜底） |
-| 引擎灰度切换 | `config_engine_switch.json` / `modules/engine_switcher.py` |
+| 评级建议（红线） | `modules/advisor.py`（`generate_advice` 受 B24 行为锁保护，见 RED_LINES.md） |
+| 权重与评级档位 | `config_weights.json`（热加载）/ `config.py`（代码级兜底）/ `modules/rating_config.py`（三处一致性自检） |
 | 数据库结构与迁移 | `database/db_manager.py` |
+
+> 021AE（2026-08-22）：经典引擎退役——`modules/analysis_engine.py`、`modules/engine_switcher.py`、`config_engine_switch.json` 已删除，v5 为唯一评分引擎（灰度 all_v5 稳定运行超一个月）。引擎灰度切换行目随之移除。

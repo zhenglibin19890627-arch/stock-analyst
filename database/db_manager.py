@@ -248,6 +248,8 @@ def init_database():
             north_holding_change REAL,       -- 北向资金/港股通持股变化
             margin_balance REAL,             -- 融资融券余额(万元)
             ths_net_inflow REAL,             -- 同花顺全资金净流入(万元)，辅助指标（018新增）
+            south_net_buy REAL,              -- 港股通(南下)当日净增持市值(万港元，021Q；腾讯 hkfund LgtCapChgDaily)
+            south_hold_ratio REAL,           -- 港股通(南下)持股占比(%，021Q；腾讯 hkfund LgtHoldRatio)
             UNIQUE(stock_id, trade_date),
             FOREIGN KEY (stock_id) REFERENCES stocks(id)
         )
@@ -288,6 +290,8 @@ def init_database():
             inst_shares REAL,                    -- 机构持股总数(股，六类汇总)
             inst_ratio REAL,                     -- 机构持仓比例(%)
             inst_report_date TEXT,               -- 机构持仓报告期(YYYYMMDD)
+            inst_count INTEGER,                  -- 机构股东数量(家，021Q；港股腾讯 shareholder 机构持仓统计)
+            inst_count_change_pct REAL,          -- 机构股东数量环比(%，021Q；正值=机构增加，方向语义与A股户数相反)
             fetched_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
             UNIQUE(stock_id, stat_date),
             FOREIGN KEY (stock_id) REFERENCES stocks(id)
@@ -504,6 +508,24 @@ def init_database():
     """)
 
     # ============================================================
+    # 15.5 交易账户表 —— 多账户支持（021S）
+    # 持仓域隔离维度：holdings/trade_records 经 account_id 归属账户；
+    # 自选股/分析/预警保持全局共享，不受账户影响。
+    # is_default=1 的账户为系统锚点（存量数据归属），禁止删除。
+    # ============================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,           -- 账户名称（如：华泰主账户）
+            broker TEXT DEFAULT '',              -- 券商（可选）
+            notes TEXT,                          -- 备注
+            is_default INTEGER DEFAULT 0,        -- 1=默认账户（禁止删除）
+            display_order INTEGER DEFAULT 0,     -- 排序权重
+            created_at TIMESTAMP DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+
+    # ============================================================
     # 16. 持仓分组表 —— 持仓管理专用分组（与自选股分组独立）
     # ============================================================
     cursor.execute("""
@@ -517,34 +539,48 @@ def init_database():
 
     # ============================================================
     # 17. 持仓表 —— 完整持仓记录（替代原 positions 表的扩展版）
+    # 021S 多账户：UNIQUE(stock_id) → UNIQUE(account_id, stock_id)，
+    # 同一股票可在不同账户各有一条持仓，成本独立计算。
+    # 旧库由 _migrate_holdings_multi_account 幂等重建（见文件尾部迁移区）。
     # ============================================================
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS holdings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL DEFAULT 1, -- 所属交易账户（021S）
             stock_id INTEGER NOT NULL,
             group_id INTEGER,                    -- 所属持仓分组
             cost_price REAL DEFAULT 0,           -- 成本价
             quantity INTEGER DEFAULT 0,          -- 持仓数量
+            realized_pnl REAL DEFAULT 0,         -- 已实现盈亏
+            status TEXT DEFAULT 'active',        -- active / cleared
+            latest_price REAL,                   -- 最新价格快照
+            price_updated_at TIMESTAMP,          -- 价格获取时间
+            is_cost_adjusted INTEGER DEFAULT 0,  -- 成本是否已人工修正
             notes TEXT,                          -- 备注
             created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
             updated_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
             FOREIGN KEY (stock_id) REFERENCES stocks(id),
-            UNIQUE(stock_id)                     -- 同一股票仅一条持仓
+            FOREIGN KEY (account_id) REFERENCES accounts(id),
+            UNIQUE(account_id, stock_id)         -- 同一账户同一股票仅一条持仓
         )
     """)
 
     # ============================================================
     # 18. 交易流水表 —— 仅作记录备查，不参与成本自动计算
+    # 021S 多账户：account_id 标记流水归属账户（与 holding_id 冗余，
+    # 持仓删除后流水仍保留账户归属；旧库由迁移回填）
     # ============================================================
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS trade_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             holding_id INTEGER,                  -- 关联持仓（删除持仓时置NULL）
+            account_id INTEGER,                  -- 所属交易账户（021S，冗余便于查询）
             stock_id INTEGER NOT NULL,           -- 股票（冗余字段，便于查询）
             trade_type TEXT NOT NULL,            -- buy / sell / dividend
             price REAL,                          -- 成交价
             quantity INTEGER,                    -- 成交数量
-            amount REAL,                         -- 成交金额
+            amount REAL,                         -- 成交金额（不含手续费）
+            commission REAL DEFAULT 0,           -- 手续费/佣金（021X：买入计入成本，卖出扣减盈亏）
             trade_date DATE,                     -- 成交日期
             notes TEXT,                          -- 备注
             created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
@@ -616,25 +652,10 @@ def init_database():
     """)
 
     # ============================================================
-    # 插入默认分组到统一 groups 表（如果还不存在）
-    # 自选股和持仓各创建同名默认分组，实现双向同步
+    # 021AN：分组完全自定义——不再自动创建任何默认分组
+    # （原'核心持仓/观察池/短线关注'每次启动 INSERT OR IGNORE 会在用户
+    #  删除后复活；新装环境零预置组，存量默认组由脚本归一为普通组）
     # ============================================================
-    default_group_names = ['核心持仓', '观察池', '短线关注']
-    for name in default_group_names:
-        cursor.execute(
-            """
-            INSERT OR IGNORE INTO groups (name, type, is_default)
-            VALUES (?, 'watchlist', 1)
-        """,
-            (name,),
-        )
-        cursor.execute(
-            """
-            INSERT OR IGNORE INTO groups (name, type, is_default)
-            VALUES (?, 'portfolio', 1)
-        """,
-            (name,),
-        )
 
     # ============================================================
     # 插入默认策略参数（如果还不存在）
@@ -785,6 +806,13 @@ def init_database():
     # 迁移到统一 groups 表（安全幂等，已迁移则跳过）
     # ============================================================
     _migrate_to_unified_groups(cursor)
+
+    # ============================================================
+    # 021S 多账户迁移：默认账户 + holdings 唯一约束重建 + 流水账户回填（幂等）
+    # 必须在 _migrate_columns / 分组迁移之后执行：
+    # 前者保证 trade_records.account_id 列已就位，后者保证 group_id 映射完成后再拷贝数据。
+    # ============================================================
+    _migrate_holdings_multi_account(cursor)
 
     # ============================================================
     # B12-T1: ratings_history 去重迁移（幂等）
@@ -997,6 +1025,28 @@ def init_database():
         )
     """)
 
+    # ============================================================
+    # 29. 历史估值表 —— 021W-2：百度股市通历史估值（A股）
+    # 数据源 akshare stock_zh_valuation_baidu（约每两周一个快照点，覆盖 2000 年至今）
+    # 用途：数据详情"基本面数据历史"表格，按财报期关联展示当时的真实 PE/PB
+    # （区别于 stock_valuation 的实时估值，本表存历史时点真实估值）
+    # ============================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS stock_valuation_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stock_id INTEGER NOT NULL,
+            trade_date DATE NOT NULL,        -- 估值快照交易日
+            pe_ttm REAL,                     -- 市盈率(TTM)
+            pe REAL,                         -- 市盈率(静态)
+            pb REAL,                         -- 市净率
+            ps_ttm REAL,                     -- 市销率(TTM)
+            source TEXT DEFAULT 'baidu',     -- 数据来源：'baidu'
+            fetched_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+            UNIQUE(stock_id, trade_date),
+            FOREIGN KEY (stock_id) REFERENCES stocks(id)
+        )
+    """)
+
     # 索引：未读预警列表（高频查询）
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_alert_history_unread
@@ -1011,6 +1061,46 @@ def init_database():
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_alert_history_date
         ON alert_history(trigger_date)
+    """)
+
+    # ============================================================
+    # 021BI: 全市场选股扫描 —— 快照表（每次扫描整表替换，仅存最新一轮）
+    # 注意：本表不关联 stocks 外键（扫描结果大多尚未入自选）
+    # ============================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS market_snapshot (
+            symbol TEXT PRIMARY KEY,          -- 腾讯/新浪通用代码：sh600519
+            code TEXT NOT NULL,               -- 纯数字代码：600519
+            name TEXT NOT NULL,
+            board TEXT,                       -- 板块：主板/创业板/科创板
+            price REAL,                       -- 现价
+            change_pct REAL,                  -- 当日涨跌幅(%)
+            turnover REAL,                    -- 换手率(%)
+            amount REAL,                      -- 成交额(万元，新浪原始口径)
+            mkt_cap REAL,                     -- 总市值(亿元，已换算)
+            nmc_cap REAL,                     -- 流通市值(亿元，已换算)
+            pe REAL,                          -- 市盈率
+            pb REAL,                          -- 市净率
+            volume_ratio REAL,                -- 量比（腾讯增强，可空）
+            industry TEXT,                    -- 行业（新浪行业映射，可空）
+            snapshot_at TEXT NOT NULL         -- 快照时间(本地)
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_market_snapshot_mktcap
+        ON market_snapshot(mkt_cap DESC)
+    """)
+
+    # ============================================================
+    # 021BI: 新浪行业映射缓存（7 天过期，重建成本低：~56 次请求）
+    # ============================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sina_industry_map (
+            symbol TEXT PRIMARY KEY,          -- sh600519
+            industry TEXT NOT NULL,           -- 行业名（如 玻璃行业）
+            node TEXT NOT NULL,               -- 新浪行业节点代码（如 new_blhy）
+            updated_at TEXT NOT NULL
+        )
     """)
 
     # ============================================================
@@ -1041,9 +1131,15 @@ def init_database():
     except Exception:
         cursor.execute('ALTER TABLE error_logs ADD COLUMN traceback TEXT')
 
+    # 021BK: trade_records 佣金估算标记（1=系统自动估算，用户改实际值后清 0）
+    try:
+        cursor.execute('SELECT commission_estimated FROM trade_records LIMIT 1')
+    except Exception:
+        cursor.execute('ALTER TABLE trade_records ADD COLUMN commission_estimated INTEGER DEFAULT 0')
+
     conn.commit()
     conn.close()
-    print('[数据库] 所有表创建完成，默认分组和初始策略参数已就绪。')
+    print('[数据库] 所有表创建完成，初始策略参数已就绪（021AN：分组完全自定义，无预置默认组）。')
 
 
 def _migrate_to_unified_groups(cursor):
@@ -1188,8 +1284,21 @@ def _migrate_columns(cursor):
         ('raw_capital_flow', 'total_net_inflow', 'REAL'),
         # 021I: 股东人数/机构持仓表新增数据来源标记列（'em'=A股东财口径；'westock'=港股腾讯 shareholder；NULL=存量）
         ('holder_structure', 'source', 'TEXT DEFAULT NULL'),
+        # 021Q: 港股资金面/股东数据补强——raw_capital_flow 新增南下两列
+        # （腾讯 hkfund _lgtHoldInfo：当日净增持市值万港元 + 持股占比%，
+        #   仅港股通标的有值，A股恒 NULL）
+        ('raw_capital_flow', 'south_net_buy', 'REAL'),
+        ('raw_capital_flow', 'south_hold_ratio', 'REAL'),
+        # 021Q: holder_structure 新增机构股东数量两列（腾讯 shareholder 机构持仓统计
+        # instCount 季度环比；注意方向语义与 A股股东户数相反：机构减少=利空）
+        ('holder_structure', 'inst_count', 'INTEGER'),
+        ('holder_structure', 'inst_count_change_pct', 'REAL'),
         # 020R-51: 评级历史表新增引擎版本列（回测报告按引擎分层统计；历史行保持 NULL）
         ('ratings_history', 'engine_version', 'TEXT'),
+        # 021S: 交易流水表新增账户归属列（多账户支持；旧库由迁移函数从持仓回填）
+        ('trade_records', 'account_id', 'INTEGER'),
+        # 021X: 交易流水表新增手续费列（买入计入成本、卖出/分红扣减已实现盈亏）
+        ('trade_records', 'commission', 'REAL DEFAULT 0'),
     ]
     for table, column, col_type in migrations:
         try:
@@ -1202,6 +1311,11 @@ def _migrate_columns(cursor):
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_trade_records_stock_date
         ON trade_records(stock_id, trade_date, created_at)
+    """)
+    # 021S: 流水按账户查询索引
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_trade_records_account
+        ON trade_records(account_id)
     """)
     # price_cache 索引：按 stock_id 快速查找
     cursor.execute("""
@@ -1271,6 +1385,121 @@ def _migrate_daily_reports_type(cursor):
     cursor.execute("""CREATE INDEX IF NOT EXISTS idx_daily_reports_date
         ON daily_reports(report_date)""")
     print('[013迁移] daily_reports 表重建完成')
+
+
+def _migrate_holdings_multi_account(cursor):
+    """021S 多账户支持迁移（幂等）。
+
+    步骤：
+    1. 确保 accounts 表存在默认账户（is_default=1，作为存量数据归属锚点，禁止删除）
+    2. 旧库 holdings 无 account_id 列时重建表：
+       UNIQUE(stock_id) → UNIQUE(account_id, stock_id)，存量持仓全部归入默认账户。
+       SQLite 无法 ALTER 唯一约束，采用标准表重建模式（同 _migrate_daily_reports_type）。
+    3. trade_records.account_id 回填：优先取关联持仓的账户；
+       持仓已删除的断链流水归入默认账户（保留流水不丢失）。
+
+    调用时机：init_database 中 _migrate_columns 与分组迁移之后，
+    保证可选列（realized_pnl 等）与 group_id 映射均已就位。
+    """
+    # ---- 1. 默认账户（幂等）----
+    cursor.execute('SELECT id FROM accounts WHERE is_default = 1 ORDER BY id LIMIT 1')
+    row = cursor.fetchone()
+    if not row:
+        cursor.execute(
+            """
+            INSERT INTO accounts (name, broker, notes, is_default)
+            SELECT '默认账户', '', '系统自动创建的首个账户（存量持仓/流水归属）', 1
+            WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE name = '默认账户')
+        """
+        )
+        cursor.execute("SELECT id FROM accounts WHERE name = '默认账户'")
+        row = cursor.fetchone()
+        if not row:
+            # 极端情况：已存在同名非默认账户 → 取最早账户兜底
+            cursor.execute('SELECT id FROM accounts ORDER BY id LIMIT 1')
+            row = cursor.fetchone()
+        if row:
+            cursor.execute('UPDATE accounts SET is_default = 1 WHERE id = ?', (row['id'],))
+    if not row:
+        raise RuntimeError('[多账户迁移] 无法确定默认账户，中止迁移')
+
+    default_account_id = row['id']
+    # 收敛异常的多默认标记（历史误操作防御）：仅保留最早一个
+    cursor.execute(
+        'UPDATE accounts SET is_default = 0 WHERE is_default = 1 AND id != ?',
+        (default_account_id,),
+    )
+
+    # ---- 2. holdings 表检查 / 重建 ----
+    cursor.execute('PRAGMA table_info(holdings)')
+    cols = [r[1] for r in cursor.fetchall()]
+    if 'account_id' not in cols:
+        print('[021S迁移] holdings 新增 account_id，重建唯一约束 UNIQUE(account_id, stock_id)...')
+        # 破坏性操作（DROP TABLE）前自动备份；备份失败必须中止（红线 R11）
+        if backup_database('holdings_multi_account_rebuild') is None:
+            raise RuntimeError(
+                '[021S迁移] 破坏性操作前备份失败，中止表重建以保护数据（红线 R11）'
+            )
+        cursor.execute("""
+            CREATE TABLE holdings_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL DEFAULT 1,
+                stock_id INTEGER NOT NULL,
+                group_id INTEGER,
+                cost_price REAL DEFAULT 0,
+                quantity INTEGER DEFAULT 0,
+                realized_pnl REAL DEFAULT 0,
+                status TEXT DEFAULT 'active',
+                latest_price REAL,
+                price_updated_at TIMESTAMP,
+                is_cost_adjusted INTEGER DEFAULT 0,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+                updated_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+                FOREIGN KEY (stock_id) REFERENCES stocks(id),
+                FOREIGN KEY (account_id) REFERENCES accounts(id),
+                UNIQUE(account_id, stock_id)
+            )
+        """)
+        cursor.execute(
+            """
+            INSERT INTO holdings_new
+                (id, account_id, stock_id, group_id, cost_price, quantity,
+                 realized_pnl, status, latest_price, price_updated_at,
+                 is_cost_adjusted, notes, created_at, updated_at)
+            SELECT id, ?, stock_id, group_id, cost_price, quantity,
+                   COALESCE(realized_pnl, 0), COALESCE(status, 'active'),
+                   latest_price, price_updated_at,
+                   COALESCE(is_cost_adjusted, 0), notes, created_at, updated_at
+            FROM holdings
+        """,
+            (default_account_id,),
+        )
+        migrated_count = cursor.execute('SELECT COUNT(*) FROM holdings_new').fetchone()[0]
+        cursor.execute('DROP TABLE holdings')
+        cursor.execute('ALTER TABLE holdings_new RENAME TO holdings')
+        print(f'[021S迁移] {migrated_count} 条存量持仓已归入默认账户(id={default_account_id})')
+    else:
+        # 已是新结构：兜底回填 NULL（理论上不应存在）
+        cursor.execute(
+            'UPDATE holdings SET account_id = ? WHERE account_id IS NULL',
+            (default_account_id,),
+        )
+
+    # ---- 3. trade_records.account_id 回填 ----
+    cursor.execute('PRAGMA table_info(trade_records)')
+    tcols = [r[1] for r in cursor.fetchall()]
+    if 'account_id' in tcols:
+        cursor.execute(
+            """
+            UPDATE trade_records SET account_id = COALESCE(
+                (SELECT h.account_id FROM holdings h WHERE h.id = trade_records.holding_id),
+                ?
+            )
+            WHERE account_id IS NULL
+        """,
+            (default_account_id,),
+        )
 
 
 def _ensure_price_backtest_columns(cursor=None):

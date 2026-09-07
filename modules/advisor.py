@@ -19,8 +19,6 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db_manager import get_connection
 from modules import scoring_engine
-from modules.analysis_engine import analyze_stock
-from modules.engine_switcher import record_v5_failure, record_v5_success, should_use_v5
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -67,9 +65,12 @@ def _read_position(stock_id):
     cursor = conn.cursor()
 
     # 优先查 holdings 表（新表，持仓管理页面写入）
+    # 021S 多账户：同一股票可能有多条分账户持仓，取持仓数量最大的一条
     try:
         cursor.execute(
-            "SELECT cost_price, quantity FROM holdings WHERE stock_id = ? AND status = 'active'",
+            "SELECT cost_price, quantity FROM holdings "
+            "WHERE stock_id = ? AND status = 'active' "
+            'ORDER BY quantity DESC LIMIT 1',
             (stock_id,),
         )
         row = cursor.fetchone()
@@ -148,11 +149,11 @@ def _determine_action(rating, has_position, is_profitable):
         '持有观望': {
             (False, False): '关注',
             (True, True): '持有',
-            (True, False): '持有观望',
+            (True, False): '持有',  # 021BH：动作词统一为"持有"词根，"持有观望"仅保留为评级档位名
         },
         '建议减仓': {
             (False, False): '观望',
-            (True, True): '持有观望',
+            (True, True): '持有',  # 021BH：同上（真正的减仓指导由价格建议卡的减仓区间/网格给出）
             (True, False): '考虑减仓',
         },
         '强烈建议卖出': {
@@ -325,10 +326,10 @@ def _build_position_advice(position, latest_close_info, rating):
         if is_profitable:
             parts.append('评级中等，建议持有，关注后续资金面变化。')
         else:
-            parts.append('评级中等且浮亏，建议持有观望，设好止损位。')
+            parts.append('评级中等且浮亏，建议持有，设好止损位。')
     elif rating == '建议减仓':
         if is_profitable:
-            parts.append('评级偏低，建议持有观望，考虑适当减仓锁定利润。')
+            parts.append('评级偏低，建议持有，考虑适当减仓锁定利润。')
         else:
             parts.append('评级偏低且浮亏，建议考虑减仓控制风险。')
     elif rating == '强烈建议卖出':
@@ -533,13 +534,13 @@ def _build_markdown_single(advice_result, prev_score):
     """构建单只股票的 Markdown 报告片段（019A 收敛至 advisor，单一来源）"""
     code = advice_result.get('stock_code', '')
     name = advice_result.get('stock_name', '')
-    engine = advice_result.get('engine_version', 'legacy')
+    engine = advice_result.get('engine_version', 'v5')
     total = advice_result.get('total_score', 0)
     rating = advice_result.get('rating', '?')
     rating_label = advice_result.get('rating_label', '')
     action = advice_result.get('action_advice', '')
 
-    engine_tag = '🚀 v5引擎' if engine == 'v5' else '⚙️ 经典引擎（简化版）'
+    engine_tag = '🚀 v5引擎' if engine == 'v5' else f'⚙️ 历史引擎({engine})'
 
     md = f'### {name} ({code}) — {engine_tag}\n\n'
 
@@ -549,8 +550,19 @@ def _build_markdown_single(advice_result, prev_score):
         change = total - prev_score
         arrow = '↑' if change > 0 else ('↓' if change < 0 else '→')
         score_change_str = f'（较昨日 {arrow} {abs(change):.1f}）'
-    md += f'- **综合评分**：{total:.1f}（{rating}级 · {rating_label}）{score_change_str}\n'
-    md += f'- **操作建议**：{action}\n'
+    # 021AR：v5 中文5档 key=label 恒等，标签与评级相同时不再重复拼接
+    label_suffix = f' · {rating_label}' if rating_label and rating_label != rating else ''
+    md += f'- **综合评分**：{total:.1f}（{rating}级{label_suffix}）{score_change_str}\n'
+    # 021AR：操作建议与评级同词时不重复单列（如"持有观望级"+"持有观望"）
+    if action and action != rating:
+        md += f'- **操作建议**：{action}\n'
+
+    # 021AG：评级迟滞说明（触发时）
+    hyst = advice_result.get('rating_hysteresis')
+    if hyst:
+        from modules.rating_hysteresis import hysteresis_note
+
+        md += f'- **{hysteresis_note(hyst)}**\n'
 
     # 四维评分
     dims = advice_result.get('dimensions', {})
@@ -751,9 +763,9 @@ def _save_rating(stock_id, analysis, action_advice, is_changed, latest_close):
     row = cursor.fetchone()
     price = float(row['close']) if row and row['close'] is not None else None
 
-    # 020R-51：记录产生该评级的引擎版本（v5 路径经 _convert_v5_to_legacy 显式携带；
-    # legacy 路径无此键 → 标记 legacy；v5 降级回 legacy 时同样正确标记为 legacy）
-    engine_version = analysis.get('engine_version') or 'legacy'
+    # 020R-51：记录产生该评级的引擎版本（021AE 起 v5 单引擎，恒为 'v5'；
+    # 历史行含 NULL/'legacy' 标记，仅供追溯）
+    engine_version = analysis.get('engine_version') or 'v5'
 
     cursor.execute(
         """
@@ -885,9 +897,9 @@ def _save_change_log(stock_id, prev_rating, new_rating, prev_score, new_score):
 
 
 def _convert_v5_to_legacy(stock_id: int, v5_result) -> dict:
-    """将 v5 AnalysisResult 转换为旧引擎兼容的分析结果格式
+    """将 v5 AnalysisResult 转换为 advisor 内部的分析结果格式
 
-    确保前端报告页面无需修改即可同时展示新旧引擎结果。
+    （命名沿用迁移期叫法；021AE 起经典引擎已删除，此格式即唯一格式。）
     """
     # 读取股票信息
     conn = get_connection()
@@ -1413,46 +1425,29 @@ def _build_news_factors(factors, stock_data, stock_id):
 
 def generate_advice(stock_id, report_date=None):
     """
-    主入口：调用分析引擎 + 生成完整建议。
-    支持灰度切换：根据 engine_switcher 配置决定使用 v5 或旧引擎。
-    v5引擎异常时自动降级到旧引擎。
+    主入口：调用 v5 评分引擎 + 生成完整建议。
+
+    021AE：经典引擎（analysis_engine）与灰度切换（engine_switcher）已删除——
+    灰度早已完成（all_v5 运行超一个月，期间 v5 降级仅 1 次且次日批次自愈），
+    本函数现为 v5 单引擎：评分失败直接返回失败（不再回退经典引擎）。
 
     返回包含评级、建议、风险提示的完整JSON结构。
     """
     logger.info(f'开始生成建议 stock_id={stock_id}')
 
-    # 0. 灰度切换：判断使用哪个引擎
-    use_v5 = should_use_v5(stock_id)
+    # 1. v5 引擎评分（唯一引擎）
     analysis = None
-    engine_used = 'legacy'
-
-    if use_v5:
-        try:
-            v5_result = scoring_engine.analyze_from_db(stock_id)
-            if v5_result is not None:
-                analysis = _convert_v5_to_legacy(stock_id, v5_result)
-                engine_used = 'v5'
-                logger.info(f'[stock_id={stock_id}] 使用 v5 引擎评分成功')
-                # P3-A: 记录 v5 成功（重置熔断计数）
-                record_v5_success(stock_id)
-                # P3-A 引擎对齐修复：v5路径同步写入 analysis_results 表
-                # 确保 analysis_results 与每日报告数据源一致（原 /api/ratings 已随 021D 删除）
-                _save_analysis_results_for_v5(stock_id, analysis, '', report_date=report_date)
-            else:
-                logger.warning(f'[stock_id={stock_id}] v5引擎返回None，降级到旧引擎')
-                # P3-A: 记录 v5 失败（递增熔断计数）
-                record_v5_failure(stock_id)
-        except Exception as e:
-            logger.warning(f'[stock_id={stock_id}] v5引擎异常({e})，降级到旧引擎')
-            # P3-A: 记录 v5 失败（递增熔断计数）
-            record_v5_failure(stock_id)
-
-    # v5不可用时使用旧引擎
-    if analysis is None:
-        analysis = analyze_stock(stock_id)
-        engine_used = 'legacy'
-        if not analysis.get('success'):
-            return {'success': False, 'message': analysis.get('message', '分析失败')}
+    try:
+        v5_result = scoring_engine.analyze_from_db(stock_id)
+        if v5_result is not None:
+            analysis = _convert_v5_to_legacy(stock_id, v5_result)
+            logger.info(f'[stock_id={stock_id}] 使用 v5 引擎评分成功')
+        else:
+            logger.warning(f'[stock_id={stock_id}] v5引擎返回None（数据缺失）')
+            return {'success': False, 'message': 'v5评分失败：数据缺失（请先采集数据）'}
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f'[stock_id={stock_id}] v5引擎异常({e})')
+        return {'success': False, 'message': f'v5评分失败: {e!s}'}
 
     # 2. 读取持仓 + 最新收盘价 + 历史评级
     position = _read_position(stock_id)
@@ -1461,6 +1456,28 @@ def generate_advice(stock_id, report_date=None):
 
     prev_rating = prev_rating_info['rating'] if prev_rating_info else None
     prev_score = prev_rating_info['total_score'] if prev_rating_info else None
+
+    # 2b. 评级变更迟滞（021AG）：分数越过边界但未达 ±MARGIN 迟滞带时维持原档。
+    # 在步骤 3 之前生效——操作建议/风险提示/is_change/写库/日报全链路使用同一最终评级。
+    # 多档跳变天然满足条件立即换挡；首次评级（无前值）不受迟滞影响。
+    from modules.rating_hysteresis import apply_hysteresis
+
+    prev_rating_norm_for_hyst = (
+        scoring_engine.normalize_rating(prev_rating, prev_score) if prev_rating else None
+    )
+    analysis['rating'], hyst_info = apply_hysteresis(
+        analysis['total_score'],
+        analysis['rating'],
+        prev_rating_norm_for_hyst,
+        market=analysis.get('market') or 'a_stock',
+    )
+    if hyst_info:
+        # 中文5档 key=label 同步；迟滞说明随结果返回并写入报告 markdown
+        analysis['rating_label'] = analysis['rating']
+
+    # v5路径同步写入 analysis_results 表，确保与每日报告数据源一致
+    # （021AG：移至迟滞之后——analysis_results 与 ratings_history 必须同档，否则口径分裂）
+    _save_analysis_results_for_v5(stock_id, analysis, '', report_date=report_date)
 
     # 3. 计算仓位状态
     has_position = position is not None
@@ -1511,7 +1528,8 @@ def generate_advice(stock_id, report_date=None):
 
     # 019A: 统一回写 daily_reports，确保三表/三处展示一致
     # 每日报告/批量分析/手动刷新/一键分析任一入口触发后，daily_reports 同步更新
-    _save_daily_report_for_advice(stock_id, analysis, prev_score, engine_used, report_date)
+    # 021AE：v5 单引擎，engine_version 恒为 'v5'
+    _save_daily_report_for_advice(stock_id, analysis, prev_score, 'v5', report_date)
 
     if is_changed or (prev_score is not None and abs(analysis['total_score'] - prev_score) >= 5):
         # RATING-ALIGN-004：change_log 统一用归一化后的评级，避免新旧档位字符串不同导致误记
@@ -1554,19 +1572,20 @@ def generate_advice(stock_id, report_date=None):
         'rating_changed': is_changed,
         'previous_rating': prev_rating_norm,  # RATING-ALIGN-004：返回归一化评级供前端一致展示
         'previous_score': prev_score,
+        'rating_hysteresis': hyst_info,  # 021AG：迟滞生效时的决策信息（未触发为 None）
         'has_position': has_position,
         'latest_close': latest_close_info['close'] if latest_close_info else None,
         'latest_close_date': latest_close_info['date'] if latest_close_info else None,
         'dimensions': analysis['dimensions'],
         'data_cutoff': analysis.get('data_cutoff', {}),
         'news_summary': analysis.get('news_summary', ''),
-        'engine_version': engine_used,
+        'engine_version': 'v5',
         'data_warnings': analysis.get('data_warnings', []),
         'data_quality': analysis.get('data_quality'),
     }
 
     logger.info(
-        f'[{analysis["stock_code"]}] 建议生成完成: engine={engine_used}, action={action}, risks={len(risks)}条'
+        f'[{analysis["stock_code"]}] 建议生成完成: engine=v5, action={action}, risks={len(risks)}条'
     )
 
     return result

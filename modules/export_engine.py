@@ -251,7 +251,10 @@ def export_watchlist() -> io.BytesIO:
                    h.cost_price, h.quantity,
                    pc.latest_price, pc.pct_change
             FROM stocks s
-            LEFT JOIN holdings h ON s.id = h.stock_id
+            LEFT JOIN holdings h ON h.id = (
+                SELECT h2.id FROM holdings h2 WHERE h2.stock_id = s.id
+                ORDER BY h2.quantity DESC LIMIT 1
+            )
             LEFT JOIN price_cache pc ON s.id = pc.stock_id
             LEFT JOIN daily_reports dr ON s.id = dr.stock_id AND dr.report_date = ?
             WHERE s.status != 'delisted'
@@ -266,7 +269,10 @@ def export_watchlist() -> io.BytesIO:
                    h.cost_price, h.quantity,
                    pc.latest_price, pc.pct_change
             FROM stocks s
-            LEFT JOIN holdings h ON s.id = h.stock_id
+            LEFT JOIN holdings h ON h.id = (
+                SELECT h2.id FROM holdings h2 WHERE h2.stock_id = s.id
+                ORDER BY h2.quantity DESC LIMIT 1
+            )
             LEFT JOIN price_cache pc ON s.id = pc.stock_id
             WHERE s.status != 'delisted'
             ORDER BY s.added_at DESC

@@ -53,11 +53,32 @@ _capital_retry_timer = None  # 019Q: 资金面延迟补采一次性 Timer（30�
 _atexit_registered = False  # 标记 atexit 钩子是否已注册（供测试验证）
 _generate_lock = threading.Lock()  # 修正项2：防抖保护
 
-# 019X T2：资金流采集三窗调度（错峰拆分，降低单窗口东财请求密度）
-# 窗1(16:10)/窗2(16:40)/窗3(17:10)，每窗采集资金流东财清单的 1/3（按代码排序固定切分）；
+# 019X T2：资金流采集三窗调度（错峰拆分，降低单窗口请求密度；021L 起主源为腾讯 westock）
+# 窗1(15:30)/窗2(15:42)/窗3(15:54)，每窗采集资金面补采清单的 1/3（按代码排序固定切分；
+# 021L 起 westock 行计为"已完成"，清单仅含真实数据缺失股，日常窗内近乎空转）；
 # 窗1/窗2 只采集不生成报告；窗3 采集完成后执行一次完整日报流程。
+# 021Y：三窗整体前移（16:10/16:40/17:10 → 15:30/15:42/15:54）——
+# 021L 后主源为腾讯系批量接口、单窗实测仅需数秒，旧 30 分钟间距是东财限频时代的历史包袱；
+# 15:30 起步为资金面定稿保留 30 分钟收盘缓冲（A股 15:00 收盘），
+# 报告约 15:57 完成（原 ~17:12），提前约 75 分钟。
+# 提前代价：个别股票资金面若未定稿，当日分数按当时数据计算，由次日批次纠正。
 _CAPITAL_WINDOW_COUNT = 3
-_CAPITAL_WINDOW_TIMES = ((16, 10), (16, 40), (17, 10))  # 窗1/窗2/窗3 固定钟点
+_CAPITAL_WINDOW_TIMES = ((15, 30), (15, 42), (15, 54))  # 窗1/窗2/窗3 固定钟点
+
+# 021Z：港股报告独立批次时间——港股 16:00 收盘，晚于 A股主批次(15:54)，
+# 主批次时港股尚未收盘、数据非定稿。港股报告延至此时刻单独重算
+# （force=True，交易日），保证港股分数基于收盘数据。
+_HK_REPORT_TIME = (16, 10)
+_hk_report_timer = None
+
+# 021AY：启动补跑——电脑睡眠会整体错过 15:54/16:10 两个批次钟点
+# （计划任务睡眠期间不运行，唤醒后 Watchdog 拉起服务只排明天任务；
+# 实测 2026-08-26 15:39 入睡 → 20:46 唤醒，当日 31 只仅 8 只有报告）。
+# 服务启动 _CATCHUP_DELAY 秒后自查：交易日 && 已过港股批次+缓冲 &&
+# 当日报告不齐 → 补跑一次完整批次（force=True，A股+港股一起）。
+_CATCHUP_AFTER = (16, 15)      # 补跑门槛：港股批次 16:10 + 5 分钟缓冲
+_CATCHUP_DELAY_SECONDS = 90    # 启动后延迟（等网络/采集器就绪）
+_catchup_timer = None
 
 
 def _scheduler_tick(window_idx=0):
@@ -75,7 +96,7 @@ def _scheduler_tick(window_idx=0):
     except Exception as e:
         logger.error(f'定时调度器执行异常: {e}', exc_info=True)
     finally:
-        # 窗3 结束后注册次日窗1（16:10）
+        # 窗3 结束后注册次日窗1（15:30）
         if window_idx >= _CAPITAL_WINDOW_COUNT - 1:
             _schedule_next()
 
@@ -163,12 +184,13 @@ def _run_full_report_flow():
     # 当日早盘/盘中已生成报告时，B11 复用会把早盘分数一路沿用至收盘后
     # （2026-08-17 实测：29 只全天停留在 09:56 早盘分数）。
     # 收盘数据更新后必须重算；非交易日保持默认复用，避免周末脏写与无效重算。
+    # 021Z：主批次仅生成 A股——港股 16:00 收盘晚于本批次，由 _hk_report_tick 独立批次生成。
     _trading_day = datetime.now(_CN_TZ).weekday() < 5
     logger.info(
         '定时调度器触发每日报告生成%s',
         '（交易日：force=True 强制重算）' if _trading_day else '（非交易日：默认复用）',
     )
-    generate_daily_report(force=_trading_day)
+    generate_daily_report(force=_trading_day, market_filter='a_stock')
 
     # P3-B: 日报生成后挂载预警扫描（异常隔离，不阻塞日报）
     # 架构师 D1 评审：双层异常隔离，预警扫描失败仅记日志
@@ -215,16 +237,179 @@ def _run_full_report_flow():
         logger.error(f'行业资金流向每日快照异常（不阻塞调度）: {e}', exc_info=True)
 
 
+def _register_hk_report(next_day=False):
+    """021Z：注册港股报告批次（一次性 daemon Timer，固定钟点 _HK_REPORT_TIME）
+
+    与资金流采集窗同型；next_day=True 时注册次日（批次完成后链式续注册，
+    或启动时今日钟点已过）。
+    """
+    global _hk_report_timer
+    hk_h, hk_m = _HK_REPORT_TIME
+    now = datetime.now(_CN_TZ)
+    target = now.replace(hour=hk_h, minute=hk_m, second=0, microsecond=0)
+    if next_day:
+        target += timedelta(days=1)
+    delay = (target - now).total_seconds()
+    if delay <= 0:
+        delay = 1  # 已过固定钟点，尽快补触发
+    _hk_report_timer = threading.Timer(delay, _hk_report_tick)
+    _hk_report_timer.daemon = True
+    _hk_report_timer.start()
+    logger.info(f'下次港股报告批次: {target.strftime("%Y-%m-%d %H:%M")} ({delay:.0f}秒后)')
+
+
+def _hk_report_tick():
+    """021Z：港股收盘批次回调——港股 16:00 收盘后单独重算全部港股当日报告。
+
+    - 交易日 force=True 强制重算（与 021F 收盘批次口径一致）；非交易日默认复用；
+    - 仅生成港股（market_filter='hk_stock'），预警扫描/指数刷新等挂载项仍只在
+      A股主批次执行一次，不在此重复；
+    - 完成后链式注册次日批次（finally 保证异常也不断链）。
+    """
+    try:
+        _trading_day = datetime.now(_CN_TZ).weekday() < 5
+        logger.info(
+            '[港股批次] 触发港股报告生成%s',
+            '（交易日：force=True 强制重算）' if _trading_day else '（非交易日：默认复用）',
+        )
+        try:
+            result = generate_daily_report(force=_trading_day, market_filter='hk_stock')
+            logger.info(f'[港股批次] 港股报告生成完成: {result}')
+        except Exception as e:
+            logger.error(f'[港股批次] 港股报告生成异常（不阻塞调度）: {e}', exc_info=True)
+
+        # 021AW：港股批次完成后追加一次指数刷新——15:54 主批次的指数刷新
+        # 发生在 15:56，东财指数接口当天 bar 有时尚未发布（实测 8/25 返回
+        # 最新只到 8/24，且此后无任何调度补采指数，缺口永久滞留）。
+        # 16:10 时 A股(15:00收盘)与港股(16:00收盘)当天 bar 均已发布，
+        # INSERT OR REPLACE 幂等覆盖；残余滞后由 backfill_scheduler 指数
+        # 自愈检查兜底。异常隔离，不阻塞次日批次注册。
+        try:
+            from modules.index_collector import refresh_all
+
+            refresh_all()
+            logger.info('[港股批次] 指数二次刷新完成（021AW）')
+        except Exception as e:
+            logger.error(f'[港股批次] 指数二次刷新异常（不阻塞调度）: {e}', exc_info=True)
+
+        # 021AX：行业资金流二次刷新——每日唯一落库时机在 15:56 日报批次后，
+        # 8/25 该时点东财 5 域名全挂且失败后无重试路径 → 8/25 快照整天缺失
+        # （市场行情页无 8/25 数据）。此处 16:10 二次尝试，并尊重 10 分钟
+        # 冷却（冷却中说明刚失败过，硬闯会加重东财熔断）；残余缺口由
+        # backfill_scheduler 行业资金流自愈兜底。
+        try:
+            from modules.market_overview import refresh_in_cooldown, refresh_industry_fund_flow
+
+            remain = refresh_in_cooldown()
+            if remain:
+                logger.info('[港股批次] 行业资金流冷却中（剩 %d 秒），跳过二次刷新', remain)
+            else:
+                refresh_industry_fund_flow()
+                logger.info('[港股批次] 行业资金流二次刷新完成（021AX）')
+        except Exception as e:
+            logger.error(f'[港股批次] 行业资金流二次刷新异常（不阻塞调度）: {e}', exc_info=True)
+    finally:
+        _register_hk_report(next_day=True)
+
+
 def _schedule_next():
-    """019X T2：窗3 结束后注册次日窗1（16:10）"""
+    """019X T2：窗3 结束后注册次日窗1（021Y 起 15:30）"""
     global _scheduler_timer
     now = datetime.now(_CN_TZ)
-    tomorrow = now.replace(hour=16, minute=10, second=0, microsecond=0) + timedelta(days=1)
+    _h, _m = _CAPITAL_WINDOW_TIMES[0]
+    tomorrow = now.replace(hour=_h, minute=_m, second=0, microsecond=0) + timedelta(days=1)
     delay = (tomorrow - now).total_seconds()
     _scheduler_timer = threading.Timer(delay, _scheduler_tick, args=(0,))
     _scheduler_timer.daemon = True
     _scheduler_timer.start()
     logger.info(f'下次定时报告: {tomorrow.strftime("%Y-%m-%d %H:%M")} ({delay:.0f}秒后)')
+
+
+def _today_report_coverage():
+    """021AY：当日日报覆盖 → (已有股票数, 总股票数)。"""
+    conn = get_connection()
+    try:
+        today = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
+        n_total = conn.execute('SELECT COUNT(*) AS n FROM stocks').fetchone()['n']
+        n_done = conn.execute(
+            'SELECT COUNT(DISTINCT stock_id) AS n FROM daily_reports WHERE report_date = ?',
+            (today,),
+        ).fetchone()['n']
+        return n_done, n_total
+    finally:
+        conn.close()
+
+
+def _catchup_tick(now=None):
+    """021AY：启动补跑回调——错过当日全部批次钟点且报告不齐时补跑一次。
+
+    触发条件（全部满足才跑）：
+    - 交易日（weekday<5，与 _hk_report_tick 同约定）；
+    - 已过 _CATCHUP_AFTER（16:15：A股 15:54 / 港股 16:10 批次均已过点）；
+    - 当日报告覆盖不齐（有股票还没有今日报告）。
+    正常运行日批次已完成 → 覆盖齐 → 跳过；睡眠错过日 → 覆盖缺 → 补跑。
+    补跑 = 完整批次（force=True，A股+港股）+ 指数刷新 + 行业资金流快照，
+    与 _hk_report_tick 的挂载项一致，保证市场行情数据同日补齐。
+    一次性：不链式续注册（次日由常规批次负责）。
+    """
+    if now is None:
+        now = datetime.now(_CN_TZ)
+    try:
+        if now.weekday() >= 5:
+            return False
+        if (now.hour, now.minute) < _CATCHUP_AFTER:
+            return False
+        n_done, n_total = _today_report_coverage()
+        if not n_total or n_done >= n_total:
+            logger.info(
+                '[启动补跑] 当日报告已齐（%d/%d），无需补跑', n_done, n_total
+            )
+            return False
+
+        logger.warning(
+            '[启动补跑] 当日批次钟点已过但报告不齐（%d/%d），补跑完整批次',
+            n_done, n_total,
+        )
+        try:
+            result = generate_daily_report(force=True)
+            logger.info(f'[启动补跑] 批次完成: {result}')
+        except Exception as e:
+            logger.error(f'[启动补跑] 批次生成异常: {e}', exc_info=True)
+            return False
+
+        # 批次挂载项（与 _hk_report_tick 同型）：指数 + 行业资金流
+        try:
+            from modules.index_collector import refresh_all
+
+            refresh_all()
+        except Exception as e:
+            logger.error(f'[启动补跑] 指数刷新异常（不阻塞）: {e}', exc_info=True)
+        try:
+            from modules.market_overview import (
+                refresh_in_cooldown,
+                refresh_industry_fund_flow,
+            )
+
+            if not refresh_in_cooldown():
+                refresh_industry_fund_flow()
+        except Exception as e:
+            logger.error(f'[启动补跑] 行业资金流刷新异常（不阻塞）: {e}', exc_info=True)
+        return True
+    except Exception as e:
+        logger.error(f'[启动补跑] 检查异常（放弃本轮）: {e}', exc_info=True)
+        return False
+
+
+def _register_catchup():
+    """021AY：注册一次性启动补跑 Timer（start_scheduler 尾部调用）。"""
+    global _catchup_timer
+    _catchup_timer = threading.Timer(_CATCHUP_DELAY_SECONDS, _catchup_tick)
+    _catchup_timer.daemon = True
+    _catchup_timer.start()
+    logger.info(
+        f'[启动补跑] 已注册（{_CATCHUP_DELAY_SECONDS}秒后自查，'
+        f'交易日 {_CATCHUP_AFTER[0]:02d}:{_CATCHUP_AFTER[1]:02d} 后且报告不齐时补跑）'
+    )
 
 
 def start_scheduler():
@@ -262,20 +447,38 @@ def start_scheduler():
     _atexit_registered = True
 
     now = datetime.now(_CN_TZ)
-    last_window_time = now.replace(hour=17, minute=10, second=0, microsecond=0)
+    # 021Y：以窗3钟点为"今日三窗已结束"的判断线（原硬编码 17:10）
+    _lh, _lm = _CAPITAL_WINDOW_TIMES[-1]
+    last_window_time = now.replace(hour=_lh, minute=_lm, second=0, microsecond=0)
     if now >= last_window_time:
-        # 019Z: 今天三窗已全部结束（17:10之后启动），排到明天
+        # 019Z: 今天三窗已全部结束（窗3之后启动），排到明天
         _schedule_next()
     else:
         # 019Z: 今天还有窗未到，注册今天的窗1（已过钟点由1秒补触发兜底）
         _register_capital_window(0)
+
+    # 021Z：港股报告批次（16:10）——今天未到点注册今天，已过则排明天
+    hk_target = now.replace(
+        hour=_HK_REPORT_TIME[0], minute=_HK_REPORT_TIME[1], second=0, microsecond=0
+    )
+    _register_hk_report(next_day=(now >= hk_target))
+
+    # 021AY：启动补跑（覆盖睡眠错过批次钟点的场景）
+    _register_catchup()
+
     _schedule_optimizer_next()  # M9: 启动每周优化定时器
-    logger.info('✅ 每日报告定时调度器已启动（默认每日16:10，每周日20:00自动优化）')
+    logger.info(
+        '✅ 每日报告定时调度器已启动'
+        f'（每日{_CAPITAL_WINDOW_TIMES[0][0]:02d}:{_CAPITAL_WINDOW_TIMES[0][1]:02d}起三窗采集、'
+        f'{_CAPITAL_WINDOW_TIMES[-1][0]:02d}:{_CAPITAL_WINDOW_TIMES[-1][1]:02d}后生成A股报告，'
+        f'{_HK_REPORT_TIME[0]:02d}:{_HK_REPORT_TIME[1]:02d}生成港股报告，每周日20:00自动优化）'
+    )
 
 
 def stop_scheduler():
     """停止定时调度器（进程退出时调用）"""
     global _scheduler_timer, _optimizer_timer, _scheduler_started, _capital_retry_timer
+    global _hk_report_timer
     if _scheduler_timer is not None:
         _scheduler_timer.cancel()
         _scheduler_timer = None
@@ -287,6 +490,15 @@ def stop_scheduler():
         # （daemon 线程进程退出即亡，此处为防御性收尾）
         _capital_retry_timer.cancel()
         _capital_retry_timer = None
+    if _hk_report_timer is not None:
+        # 021Z：取消未触发的港股报告批次 Timer（同防御性收尾）
+        _hk_report_timer.cancel()
+        _hk_report_timer = None
+    global _catchup_timer
+    if _catchup_timer is not None:
+        # 021AY：取消未触发的启动补跑 Timer（同防御性收尾）
+        _catchup_timer.cancel()
+        _catchup_timer = None
     _scheduler_started = False
     logger.info('定时调度器已停止')
 
@@ -305,12 +517,11 @@ def _capital_retry_once(a_symbols):
 
     先 _generate_lock.acquire(timeout=5) 防与手动批次并发写库（R-6），拿不到即放弃
     本轮（手动批次本身含资金面采集，放弃无害）；拿到后调用
-    fetch_capital_flow_batch(a_symbols)——复用 019E 补采清单入口：只有东财真数据
-    （capital_source IS NULL 且非估算）才算"已完成"；sina_main / ths_total 行仍
-    进入补采清单 —— 东财 30 分钟内恢复时可覆盖回补（"东财恢复后自动回补"的实现），
-    新浪重采不降级已有数据（019Q QA F9 实证）。019S：主力净流入链路为东财三层 →
-    新浪 lscjfb 主力口径(sina_main) → 估算兜底（仅展示不参评），ths_total 仅为
-    历史存量（处置后清零），字面量保留仅为防御。异常隔离仅记日志。
+    fetch_capital_flow_batch(a_symbols)——复用补采清单入口：主源真实数据
+    （capital_source IS NULL 或 ='westock'，且非估算）才算"已完成"（021L 起 westock
+    为主源）；sina_main / ths_total 行仍进入补采清单 —— 主源链恢复时可覆盖升级。
+    021L：主力净流入链路为腾讯 westock（主源）→ 东财三层（兜底）→ 新浪 lscjfb
+    主力口径(sina_main) → 估算兜底（仅展示不参评）。异常隔离仅记日志。
     """
     if not _generate_lock.acquire(timeout=5):
         logger.warning('[资金面补采] 获取生成锁超时（可能与手动批次并发），放弃本轮延迟补采')
@@ -328,11 +539,14 @@ def _capital_retry_once(a_symbols):
 def _schedule_capital_retry(a_symbols):
     """019Q Task 5：延迟自动补采注册（模块级，仅由 _scheduler_tick 调用）
 
-    缺口判定（M-6，必须带 is_estimated 条件）：
+    缺口判定（M-6，必须带 is_estimated 条件；021L 扩展 westock 同计为真实）：
     len(a_symbols) - COUNT(当日 raw_capital_flow WHERE stock_id IN a_symbols
-      AND capital_source IS NULL AND (is_estimated=0 OR is_estimated IS NULL)) > 0
+      AND (capital_source IS NULL OR capital_source='westock')
+      AND (is_estimated=0 OR is_estimated IS NULL)) > 0
     估算兜底行 capital_source=NULL（DB 实证）——若缺口 SQL 只判 capital_source IS NULL
     会把估算行误计为"EM 成功"→ 延迟补采永不触发；必须附加 is_estimated 条件（M-6）。
+    021L：westock 行（capital_source='westock'，主源真实数据）计为无缺口，
+    不再为覆盖 westock 而注册延迟补采。
     """
     global _capital_retry_timer
     now = datetime.now(_CN_TZ)
@@ -356,7 +570,7 @@ def _schedule_capital_retry(a_symbols):
             f'SELECT COUNT(DISTINCT rc.stock_id) FROM raw_capital_flow rc '
             f'JOIN stocks s ON s.id = rc.stock_id '
             f'WHERE s.symbol IN ({placeholders}) AND s.market = ? AND rc.trade_date = ? '
-            f'AND rc.capital_source IS NULL '
+            f"AND (rc.capital_source IS NULL OR rc.capital_source = 'westock') "
             f'AND (rc.is_estimated = 0 OR rc.is_estimated IS NULL)',
             (*a_symbols, 'a_stock', today_str),
         )
@@ -376,7 +590,7 @@ def _schedule_capital_retry(a_symbols):
     _capital_retry_timer.start()
     logger.info(
         f'[资金面补采] 检测到 {gap}/{len(a_symbols)} 只缺口，30分钟后自动补采'
-        f'（一次性，不再重试；与次日16:10批次无冲突）'
+        f'（一次性，不再重试；与次日15:30批次无冲突）'
     )
 
 
@@ -680,15 +894,45 @@ def _build_data_freshness(stock_id):
     # 020R-57：区分「采集滞后」与「无新消息」——情绪表覆盖最新交易日=采集系统正常，
     # 此时原文无更新只做中性提示（不标 ⚠️，如顺丰个股新闻稀疏属正常现象）；
     # 只有情绪表本身停更（真·采集故障）才标 ⚠️。
-    sent_row = conn.execute(
-        'SELECT MAX(news_date) d FROM news_sentiment WHERE stock_id=?', (stock_id,)
+    # 021M：增加对空标记记录的检查——如果最新聚合记录是空标记（total_count=0），说明是"正常无数据"，
+    # 不显示滞后警告。如果最新聚合记录有数据（total_count>0），即使新闻日期是昨天，也不算滞后。
+    sent_row_latest = conn.execute(
+        'SELECT news_date, total_count FROM news_sentiment WHERE stock_id=? ORDER BY news_date DESC LIMIT 1',
+        (stock_id,),
     ).fetchone()
     news_row = conn.execute(
         "SELECT MAX(info_date) d FROM raw_sentiment WHERE stock_id=? AND info_type='news'",
         (stock_id,),
     ).fetchone()
-    sent_fresh = bool(sent_row and sent_row['d'] and str(sent_row['d']) >= str(latest_td))
-    if news_row and news_row['d']:
+    sent_fresh = bool(sent_row_latest and sent_row_latest['news_date'] and str(sent_row_latest['news_date']) >= str(latest_td))
+
+    # 检查最新聚合记录的状态
+    latest_has_data = bool(sent_row_latest and sent_row_latest['total_count'] > 0)
+    latest_empty = bool(sent_row_latest and sent_row_latest['total_count'] == 0)
+
+    if latest_empty:
+        # 最新聚合记录是空标记，说明是"正常无数据"，不显示滞后警告
+        lines.append("消息面：今日无新增新闻（采集正常）")
+    elif latest_has_data:
+        # 最新聚合记录有数据，即使新闻日期是昨天，也不算滞后
+        if news_row and news_row['d']:
+            lag = _days_between(news_row['d'], today)
+            if lag is not None and lag > 7:
+                # 021N：恢复 020R-57 核心语义——原文长期无更新时，
+                # 仍需检查情绪表是否覆盖最新交易日（sent_fresh）：
+                # 情绪新鲜 = 采集系统正常（新闻稀疏股如顺丰）→ 中性提示；
+                # 情绪停更 = 真采集故障 → ⚠️（test_news_collection_stall_flag 锁定）。
+                if sent_fresh:
+                    lines.append(f"消息面：最近个股新闻 {news_row['d']}（近{lag}日无新消息，情绪每日更新）")
+                else:
+                    has_issue = True
+                    lines.append(f"消息面：最新新闻 {news_row['d']}（滞后{lag}天 ⚠️）")
+            else:
+                lines.append(f"消息面：最新新闻 {news_row['d']}（采集正常）")
+        else:
+            lines.append(f"消息面：情绪至 {sent_row_latest['news_date']}（无新闻原文，情绪每日更新）")
+    elif news_row and news_row['d']:
+        # 没有聚合记录，检查历史新闻数据
         lag = _days_between(news_row['d'], today)
         if lag is not None and lag > 7:
             if sent_fresh:
@@ -698,12 +942,6 @@ def _build_data_freshness(stock_id):
                 lines.append(f"消息面：最新新闻 {news_row['d']}（滞后{lag}天 ⚠️）")
         else:
             lines.append(f"消息面：最新新闻 {news_row['d']}（滞后{lag}天）")
-    elif sent_row and sent_row['d']:
-        if sent_fresh:
-            lines.append(f"消息面：情绪至 {sent_row['d']}（无新闻原文，情绪每日更新）")
-        else:
-            has_issue = True
-            lines.append(f"消息面：情绪至 {sent_row['d']}（无新闻原文）⚠️")
     else:
         lines.append('消息面：缺失 ⚠️')
         has_issue = True
@@ -840,7 +1078,7 @@ def _process_single_stock(stock, target_date, force, report_type='daily', skip_c
     # 检查结果随报告输出（data_warnings + markdown），让报告说明数据完整度情况
     freshness = _build_data_freshness(stock_id)
     _update_progress_stage(symbol, '分析评分中')
-    # 统一调用 advisor.generate_advice()，由 engine_switcher 自动分流
+    # 统一调用 advisor.generate_advice()（021AE 起 v5 单引擎）
     advice = generate_advice(stock_id, report_date=target_date)
 
     if not advice.get('success'):
@@ -854,18 +1092,10 @@ def _process_single_stock(stock, target_date, force, report_type='daily', skip_c
 
     price_advice = generate_price_advice(stock_id, advice) if advice.get('success') else None
 
-    engine = advice.get('engine_version', 'legacy')
+    engine = advice.get('engine_version', 'v5')
     total_score = advice.get('total_score', 0)
     rating = advice.get('rating', '')
     rating_label = advice.get('rating_label', '')
-
-    # 检测 fallback
-    from modules.engine_switcher import should_use_v5
-
-    expected_v5 = should_use_v5(stock_id)
-    is_fallback = expected_v5 and engine != 'v5'
-    if is_fallback:
-        logger.warning(f'[{symbol}] v5引擎fallback触发，实际使用{engine}')
 
     # 获取前日分数
     prev_score = _get_prev_score(stock_id, target_date)
@@ -913,20 +1143,21 @@ def _process_single_stock(stock, target_date, force, report_type='daily', skip_c
         'rating': rating,
         'score_change': score_change,
         'reused': False,
-        'is_fallback': is_fallback,
         'freshness': freshness,
     }
 
 
-def generate_daily_report(target_date=None, force=False, report_type='daily', skip_collect=False):
+def generate_daily_report(target_date=None, force=False, report_type='daily', skip_collect=False, market_filter=None):
     """生成每日分析报告
 
     Args:
         target_date: 报告日期(YYYY-MM-DD)，默认今天
         force: 强制全量刷新，忽略已有结果
         report_type: 报告类型 'daily'(盘后日报) / 'intraday'(盘中快报)
-        skip_collect: 020J：跳过全部采集（同花顺预取 + 逐只采集），纯用库内已有数据重新分析。
-            用于数据回填后的历史报告重生成（数据已采集完毕，避免重复打外部接口）。
+        skip_collect: 020J：跳过全部采集（同花顺预取 + 逐只采集），纯用库内已有数据重新分析，
+            用于数据回填后的历史报告重生成（数据已采集完毕，避免重复打外部接口）
+        market_filter: 021Z：市场过滤（None=全部 / 'a_stock' / 'hk_stock'）。
+            港股 16:00 收盘晚于 A股主批次(15:54)，港股报告由独立批次按此过滤生成。
     Returns:
         dict: 生成结果汇总
     """
@@ -939,11 +1170,13 @@ def generate_daily_report(target_date=None, force=False, report_type='daily', sk
         if target_date is None:
             target_date = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
 
-        logger.info(f'开始生成每日报告 date={target_date}')
+        logger.info(f'开始生成每日报告 date={target_date}' + (f'（市场={market_filter}）' if market_filter else ''))
 
         stocks = _get_all_stocks()
+        if market_filter:
+            stocks = [s for s in stocks if s.get('market') == market_filter]
         if not stocks:
-            return {'success': False, 'message': '没有自选股'}
+            return {'success': False, 'message': '没有自选股' + (f'（市场={market_filter}）' if market_filter else '')}
 
         results = []
         success_count = 0

@@ -47,10 +47,10 @@ class TestDetermineAction:
             # 持有观望
             ('持有观望', False, False, '关注'),
             ('持有观望', True, True, '持有'),
-            ('持有观望', True, False, '持有观望'),
+            ('持有观望', True, False, '持有'),  # 021BH：动作词统一为"持有"，"持有观望"仅保留为评级名
             # 建议减仓
             ('建议减仓', False, False, '观望'),
-            ('建议减仓', True, True, '持有观望'),
+            ('建议减仓', True, True, '持有'),  # 021BH：同上
             ('建议减仓', True, False, '考虑减仓'),
             # 强烈建议卖出
             ('强烈建议卖出', False, False, '回避'),
@@ -74,7 +74,7 @@ class TestDetermineAction:
 
     def test_unknown_rating_with_position_loss(self):
         result = _determine_action('未知评级', True, False)
-        assert result == '持有观望'
+        assert result == '持有'  # 021BH：动作词统一
 
     def test_missing_key_returns_default(self):
         """矩阵中缺失的 key 应返回默认值 '观望'"""

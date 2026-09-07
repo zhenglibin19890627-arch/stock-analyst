@@ -64,10 +64,6 @@ def test_db_stats(client):
     _assert_ok(client.get('/api/db-stats'))
 
 
-def test_engine_status(client):
-    _assert_ok(client.get('/api/engine/status'))
-
-
 # ---- watchlist 蓝图 ----
 
 def test_groups_list(client):
@@ -104,6 +100,75 @@ def test_stock_detail_endpoints(client_with_stock):
         _assert_ok(client.get(path))
 
 
+def test_fundamental_history_valuation_lookup(client_with_stock):
+    """021W-2：基本面历史行 PE/PB 关联"当时真实估值"（百度历史估值表）。
+
+    背景：PE/PB 为实时估值，raw_fundamental 历史期行为 NULL。修复后按财报期
+    report_date 关联 stock_valuation_history 中 trade_date <= report_date 的
+    最近一个快照点，输出 hist_pe_ttm/hist_pb/hist_valuation_date；未采集历史
+    估值时 valuation_history_ready=false。
+    """
+    client, stock_id = client_with_stock
+    conn = db_manager.get_connection()
+    # 基本面多期财报（PE/PB 列本身为空，历史期估值来自独立历史估值表）
+    for i, report_date in enumerate(['2026-06-30', '2026-03-31', '2025-12-31']):
+        conn.execute(
+            'INSERT INTO raw_fundamental (stock_id, report_date, roe, data_source) VALUES (?, ?, ?, ?)',
+            (stock_id, report_date, 10.0 + i, 'sina_abstract'),
+        )
+    # 历史估值快照（百度，约每两周一点）
+    for trade_date, pe, pb in [
+        ('2025-12-20', 48.5, 6.2),
+        ('2026-01-06', 56.04, 7.0),
+        ('2026-03-25', 52.0, 6.5),
+        ('2026-06-23', 50.2, 6.0),
+    ]:
+        conn.execute(
+            'INSERT INTO stock_valuation_history (stock_id, trade_date, pe_ttm, pb, source) VALUES (?, ?, ?, ?, ?)',
+            (stock_id, trade_date, pe, pb, 'baidu'),
+        )
+    conn.commit()
+    conn.close()
+
+    resp = client.get(f'/api/stocks/{stock_id}/fundamental')
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body['valuation_history_ready'] is True
+    data = body['data']
+    assert len(data) == 3
+    # 每行取 ≤ 财报期末的最近快照点作为"当时估值"
+    expected = {
+        '2026-06-30': (50.2, 6.0, '2026-06-23'),
+        '2026-03-31': (52.0, 6.5, '2026-03-25'),
+        '2025-12-31': (48.5, 6.2, '2025-12-20'),
+    }
+    for row in data:
+        rp = row['report_date']
+        exp_pe, exp_pb, exp_date = expected[rp]
+        assert row['hist_pe_ttm'] == exp_pe, rp
+        assert row['hist_pb'] == exp_pb, rp
+        assert row['hist_valuation_date'] == exp_date, rp
+
+
+def test_fundamental_no_valuation_history_flag(client_with_stock):
+    """021W-2：未采集历史估值时 valuation_history_ready=false 且行内无 hist 字段"""
+    client, stock_id = client_with_stock
+    conn = db_manager.get_connection()
+    conn.execute(
+        'INSERT INTO raw_fundamental (stock_id, report_date, roe, data_source) VALUES (?, ?, ?, ?)',
+        (stock_id, '2026-06-30', 10.0, 'sina_abstract'),
+    )
+    conn.commit()
+    conn.close()
+
+    resp = client.get(f'/api/stocks/{stock_id}/fundamental')
+    body = resp.get_json()
+    assert body['valuation_history_ready'] is False
+    assert 'hist_valuation_date' not in body['data'][0]
+    assert 'hist_pe_ttm' not in body['data'][0]
+    assert 'hist_pb' not in body['data'][0]
+
+
 # ---- portfolio 蓝图 ----
 
 def test_portfolio_endpoints(client):
@@ -117,6 +182,53 @@ def test_portfolio_endpoints(client):
     ]
     for path in paths:
         _assert_ok(client.get(path))
+
+
+class _TencentQuoteResp:
+    """腾讯行情接口 mock 响应（只需 .text）"""
+
+    def __init__(self, text):
+        self.text = text
+
+
+def _tencent_line(code, name, price, prev, pct):
+    """构造一行 v_hk03690="100~名称~03690~价格~昨收~…~涨跌幅[32]~…" 响应"""
+    fields = ['100', name, code[-5:], str(price), str(prev), '0.00'] + ['0'] * 26
+    fields.append(str(pct))  # [32] 涨跌幅
+    while len(fields) < 40:
+        fields.append('0')
+    return f'v_{code}="' + '~'.join(fields) + '";'
+
+
+def test_realtime_price_batch_hk_prefix_resolved(monkeypatch):
+    """021M：港股库内 HK3690 形态必须解析为 hk03600 命中实时价。
+
+    回归背景：原 symbol.zfill(5) 对 'HK3690'（已6字符）无效 → 请求 hkHK3690
+    错误代码 → 腾讯返回空 → 港股全部降级写入昨收（盘中显示旧价+旧涨跌幅）。
+    修复后经 _normalize_hk_symbol 剥离前缀+左补零。
+    """
+    import requests
+
+    from blueprints.portfolio import _fetch_realtime_price_batch
+
+    text = (
+        _tencent_line('sh600276', '恒瑞医药', 46.88, 46.50, 0.82)
+        + _tencent_line('hk03690', '美团-W', 84.95, 87.65, -3.08)
+    )
+
+    def _fake_get(url, timeout=8, **kw):
+        assert 'hk03690' in url, f'港股代码应归一化为 hk03690，实际请求: {url}'
+        assert 'hkHK3690' not in url, 'hkHK3690 是错误代码（021M bug），不应出现'
+        return _TencentQuoteResp(text)
+
+    monkeypatch.setattr(requests, 'get', _fake_get)
+
+    result = _fetch_realtime_price_batch(
+        [(1, '600276', 'a_stock'), (2, 'HK3690', 'hk_stock')]
+    )
+    assert result[1] == {'price': 46.88, 'pct_change': 0.82}
+    # 港股命中实时价（修复前此 key 缺失 → 调用方降级写入昨收）
+    assert result[2] == {'price': 84.95, 'pct_change': -3.08}
 
 
 def test_watchlist_scores_etag_semantics(client):

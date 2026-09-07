@@ -28,6 +28,7 @@
 import atexit
 import logging
 import threading
+from datetime import datetime, timedelta, timezone
 
 from database.db_manager import get_connection
 
@@ -41,7 +42,15 @@ MAX_INTERVAL_MIN = 120   # 退避间隔上限（分钟）
 IDLE_INTERVAL_MIN = 240  # 全部完整后的低频巡检间隔（分钟）
 MAX_PER_ROUND = 5        # 每轮最多补采股票数
 FAIL_RATE_TO_BACKOFF = 0.8  # 本轮失败率 >= 此值时触发退避
+# 021BA：行业分类自愈——每轮最多补取的"未分类"A股数（随机抽样防单只卡队首，
+# 走 fetch_stock_industry 三级源，控制东财请求压力）
+INDUSTRY_FIX_PER_ROUND = 3
 GAP_WINDOW_TRADING_DAYS = 10  # 020H：完整性校验窗口（近 N 个交易日）
+# 021AW：指数滞后自愈检查起始时刻——A股 15:00/港股 16:00 收盘后，
+# 东财指数接口当日 bar 均已发布（盘中个股当日行存在而指数 bar 未发布，
+# 不做检查避免盘中空转重试）
+INDEX_STALE_CHECK_AFTER = (16, 15)
+_CN_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
 
 # ============================================================
 # 调度器状态
@@ -187,10 +196,212 @@ def _collect_one(stock_id, symbol, market, missing_cap_dates=None):
         _generate_lock.release()
 
 
+def _index_kline_stale():
+    """021AW：index_kline 是否落后于个股 K 线最新交易日（指数缺最新 bar 判定）。
+
+    背景：8/25 指数刷新发生在 15:56，东财指数接口当天 bar 尚未发布（返回止于
+    8/24），此后无任何调度补采指数，缺口永久滞留。本判定以"全市场个股 K 线
+    并集最新日"为基准——落后即说明指数接口当时未拿到当日 bar。
+
+    Returns:
+        bool: True=指数滞后需补刷；空库/异常时 False（不阻塞补采主链路）
+    """
+    conn = get_connection()
+    try:
+        raw_max = conn.execute('SELECT MAX(trade_date) AS d FROM raw_kline').fetchone()
+        idx_max = conn.execute('SELECT MAX(trade_date) AS d FROM index_kline').fetchone()
+        raw_d = raw_max['d'] if raw_max else None
+        idx_d = idx_max['d'] if idx_max else None
+        if not raw_d:
+            return False  # 无个股 K 线可比（空库/新库）
+        return (idx_d or '') < raw_d
+    except Exception as e:
+        logger.warning(f'[补采][021AW] 指数滞后检查异常（跳过本轮）: {e}')
+        return False
+    finally:
+        conn.close()
+
+
+def _maybe_refresh_stale_indexes(now=None):
+    """021AW：收盘后检测指数 K 线滞后 → 触发指数刷新兜底。
+
+    - 正常路径：15:54 主批次与 16:10 港股批次各刷一次指数；
+    - 本兜底：>= 16:15 且 index_kline 落后于个股 K 线时由补采调度器补刷
+      （覆盖批次刷新失败、或刷新时 EM 当日 bar 尚未发布两种残余情形），
+      INSERT OR REPLACE 幂等，随 30 分钟~4 小时巡检节奏重试。
+    - 盘中（< 16:15）不检查：个股当日行盘中即存在而指数当日 bar 收盘后
+      才发布，盘中比较必然"假滞后"。
+
+    Args:
+        now: 注入时刻（测试用）；缺省取北京时间
+    Returns:
+        bool: True=本轮触发了刷新
+    """
+    if now is None:
+        now = datetime.now(_CN_TZ)
+    if (now.hour, now.minute) < INDEX_STALE_CHECK_AFTER:
+        return False
+    if not _index_kline_stale():
+        return False
+    try:
+        from modules.index_collector import refresh_all
+
+        logger.warning('[补采][021AW] 指数K线滞后于个股K线最新日，触发指数刷新兜底')
+        refresh_all()
+        return True
+    except Exception as e:
+        logger.warning(f'[补采][021AW] 指数刷新兜底失败（等待下轮巡检重试）: {e}')
+        return False
+
+
+def _industry_flow_stale():
+    """021AX：行业资金流快照是否缺失/未定稿。
+
+    判定（以个股 K 线并集最新交易日 raw_max 为基准）：
+    - 无任何快照，或最新快照日 < raw_max → 缺当日快照；
+    - 最新快照日 == raw_max 但保存时刻在 15:00 前 → 盘中未定稿数据
+      （今日 15:56 落库失败时，可能残留午间打开页面产生的盘中快照）。
+
+    Returns:
+        bool: True=需要刷新；空库/异常 False（不阻塞补采主链路）
+    """
+    conn = get_connection()
+    try:
+        raw = conn.execute('SELECT MAX(trade_date) AS d FROM raw_kline').fetchone()
+        raw_max = raw['d'] if raw else None
+        if not raw_max:
+            return False
+        ff = conn.execute(
+            'SELECT MAX(trade_date) AS d FROM industry_fund_flow'
+        ).fetchone()
+        ff_max = ff['d'] if ff else None
+        if not ff_max or ff_max < raw_max:
+            return True
+        row = conn.execute(
+            'SELECT created_at FROM industry_fund_flow WHERE trade_date=? '
+            'ORDER BY created_at DESC LIMIT 1',
+            (ff_max,),
+        ).fetchone()
+        if row and row['created_at']:
+            try:
+                saved = datetime.strptime(str(row['created_at']), '%Y-%m-%d %H:%M:%S')
+                if saved.date().isoformat() == ff_max and (saved.hour, saved.minute) < (15, 0):
+                    return True  # 当日快照保存于收盘前 → 盘中数据
+            except ValueError:
+                pass
+        return False
+    except Exception as e:
+        logger.warning(f'[补采][021AX] 行业资金流滞后检查异常（跳过本轮）: {e}')
+        return False
+    finally:
+        conn.close()
+
+
+def _maybe_backfill_industry_flow(now=None):
+    """021AX：收盘后检测行业资金流快照缺失/未定稿 → 刷新兜底。
+
+    正常路径：15:56 日报批次后落库（唯一每日定时时机）+ 16:10 港股批次
+    二次刷新；本兜底覆盖两者都失败（东财全挂）或仅剩盘中快照的情形，
+    随 30 分钟~4 小时巡检节奏重试，尊重 market_overview 10 分钟冷却。
+    盘中（< 16:15）不触发：实时数据由页面打开时刷新，无需调度硬闯。
+
+    Args:
+        now: 注入时刻（测试用）；缺省北京时间
+    Returns:
+        bool: True=本轮触发了刷新
+    """
+    if now is None:
+        now = datetime.now(_CN_TZ)
+    if (now.hour, now.minute) < INDEX_STALE_CHECK_AFTER:
+        return False
+    if not _industry_flow_stale():
+        return False
+    try:
+        from modules.market_overview import refresh_in_cooldown, refresh_industry_fund_flow
+
+        remain = refresh_in_cooldown()
+        if remain:
+            logger.info('[补采][021AX] 行业资金流冷却中（剩 %d 秒），本轮跳过', remain)
+            return False
+        logger.warning('[补采][021AX] 行业资金流快照缺失/未定稿，触发刷新兜底')
+        refresh_industry_fund_flow()
+        return True
+    except Exception as e:
+        logger.warning(f'[补采][021AX] 行业资金流刷新兜底失败（等待下轮巡检重试）: {e}')
+        return False
+
+
+def _maybe_backfill_industry():
+    """021BA：行业分类自愈——补取 industry 为空/'未分类' 的 A股。
+
+    背景：加自选股时行业识别遇东财瞬时断连会把 '未分类' 永久写库，
+    原先仅在批量分析时补取；本自愈纳入补采调度器节奏（30 分钟~4 小时巡检），
+    直到分类齐全。
+    设计：
+    - 随机抽样防"单只永远排最前反复撞失败"卡死队列；
+    - 每轮限量 INDUSTRY_FIX_PER_ROUND 只，走 fetch_stock_industry(patient=True)
+      （EM 直连→akshare→本地映射三级，命名体系与行业资金流/权重覆盖一致）；
+    - 取回仍是 '未分类' 或异常 → 不写库，留给下轮巡检；
+    - 港股不走此路径（fetch 对港股恒返 '港股'，不会未分类）。
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, symbol FROM stocks "
+            "WHERE market = 'a_stock' AND status != 'delisted' "
+            "AND (industry IS NULL OR TRIM(industry) = '' OR industry = '未分类') "
+            "ORDER BY RANDOM() LIMIT ?",
+            (INDUSTRY_FIX_PER_ROUND,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return
+    from modules.data_collector import fetch_stock_industry
+
+    ok = 0
+    for r in rows:
+        try:
+            industry = fetch_stock_industry(r['symbol'], 'a_stock', patient=True)
+        except Exception as e:
+            logger.warning(f'[补采][021BA] {r["symbol"]} 行业补取异常: {e}')
+            continue
+        if industry and industry != '未分类':
+            conn_up = get_connection()
+            try:
+                conn_up.execute(
+                    'UPDATE stocks SET industry = ? WHERE id = ?', (industry, r['id'])
+                )
+                conn_up.commit()
+            finally:
+                conn_up.close()
+            ok += 1
+            logger.info('[补采][021BA] %s 行业补取成功: %s', r['symbol'], industry)
+    logger.info('[补采][021BA] 行业分类自愈: 本轮检出 %d 只，成功 %d 只', len(rows), ok)
+
+
 def _tick():
     """补采调度器 tick：检测缺口 → 补采 → 按结果调整间隔并注册下轮"""
     global _backoff_min
     try:
+        # 021AW：指数滞后自愈（独立于个股缺口，空转巡检时也持续兜底）
+        try:
+            _maybe_refresh_stale_indexes()
+        except Exception as e:
+            logger.warning(f'[补采][021AW] 指数自愈检查异常（不影响补采）: {e}')
+
+        # 021AX：行业资金流快照自愈（同上，独立于个股缺口）
+        try:
+            _maybe_backfill_industry_flow()
+        except Exception as e:
+            logger.warning(f'[补采][021AX] 行业资金流自愈检查异常（不影响补采）: {e}')
+
+        # 021BA：行业分类自愈（独立于个股缺口，空转巡检时也持续兜底）
+        try:
+            _maybe_backfill_industry()
+        except Exception as e:
+            logger.warning(f'[补采][021BA] 行业分类自愈检查异常（不影响补采）: {e}')
+
         gaps = _get_stocks_with_gaps()
         if not gaps:
             logger.info('[补采] 数据完整，降为低频巡检（%d 分钟）', IDLE_INTERVAL_MIN)

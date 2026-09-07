@@ -11,6 +11,7 @@
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -208,6 +209,243 @@ def refresh_industry_fund_flow():
     trade_date = updated_at[:10] if updated_at else datetime.now(_CN_TZ).strftime('%Y-%m-%d')
     save_industry_fund_flow(items, trade_date)
     return items, trade_date, updated_at
+
+
+# ============================================================
+# 021BJ: 缺口回补 —— 东财 push2his 行业资金流"历史日K"接口
+# 背景：实时快照接口错过采集日（如东财断连日）数据即丢失，
+#       历史接口可按行业代码回补指定交易日的每日主力净流入。
+# ============================================================
+
+_EM_FFLOW_HIST_URL = 'https://{host}/api/qt/stock/fflow/daykline/get'
+_FFLOW_HIST_PARAMS = {
+    'lmt': '0', 'klt': '101',
+    'fields1': 'f1,f2,f3,f7',
+    'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65',
+    'ut': 'b2884a393a59ad64002292a3e90d46a5',
+}
+_BACKFILL_CONSECUTIVE_FAIL_LIMIT = 5
+_backfill_thread_lock = threading.Lock()
+_backfill_running = {'flag': False}
+# 021BJ：历史接口成功主机粘性——EM 丢包率高的时段，死主机组合的整轮重试代价极高，
+# 一旦某 (host, proxy) 组合成功则优先重试该组合，大幅提速。
+_fflow_hist_preferred = {'host': None, 'use_proxy': None}
+
+
+def _parse_fflow_hist_row(row, trade_date, code, name):
+    """历史日K行 'date,main,small,mid,big,super,pcts...,close,pct,...' → item dict。
+
+    不匹配目标日期 / 非法行返回 None。（纯函数，离线可测）
+    字段映射：f52主力 f53小单 f54中单 f55大单 f56超大单 f57主力占比 f63涨跌幅。
+    """
+    try:
+        parts = row.split(',')
+        if len(parts) < 13 or parts[0] != trade_date:
+            return None
+        return {
+            'code': code,
+            'name': name,
+            'pct_change': _num(parts[12]),
+            'main_net': _num(parts[1]),
+            'main_pct': _num(parts[6]),
+            'super_net': _num(parts[5]),
+            'big_net': _num(parts[4]),
+            'mid_net': _num(parts[3]),
+            'small_net': _num(parts[2]),
+            'lead_stock': None,   # 历史接口无领涨股字段
+        }
+    except (IndexError, ValueError):
+        return None
+
+
+def _request_fflow_hist_robust(code):
+    """历史日K请求：优先上次成功组合，否则主机轮换 × (直连 2 次 → 系统代理 2 次)。"""
+    last_err = None
+    base = dict(_FFLOW_HIST_PARAMS)
+    base['secid'] = f'90.{code}'
+
+    def _attempt(host, use_proxy):
+        p = dict(base)
+        p['_'] = str(int(time.time() * 1000))
+        kwargs = {}
+        if not use_proxy:
+            kwargs['proxies'] = {'http': None, 'https': None}
+        resp = requests.get(_EM_FFLOW_HIST_URL.format(host=host), params=p,
+                            timeout=(4, 12), **kwargs)
+        resp.raise_for_status()
+        data = resp.json()
+        klines = (data.get('data') or {}).get('klines')
+        if klines is None:
+            raise RuntimeError('东财返回空 data')
+        return klines
+
+    pref_host = _fflow_hist_preferred['host']
+    if pref_host:
+        for _ in range(4):
+            try:
+                return _attempt(pref_host, _fflow_hist_preferred['use_proxy'])
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                time.sleep(0.6)
+
+    for host in EM_HOSTS:
+        for use_proxy in (False, True):
+            for attempt in range(2):
+                try:
+                    klines = _attempt(host, use_proxy)
+                    _fflow_hist_preferred['host'] = host
+                    _fflow_hist_preferred['use_proxy'] = use_proxy
+                    return klines
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+                    time.sleep(0.6)
+    raise last_err if last_err else RuntimeError('历史资金流请求失败')
+
+
+def backfill_industry_fund_flow(trade_date):
+    """回补指定交易日的行业资金流快照（历史接口逐行业）。
+
+    探针先行：第 1 个行业的历史中无该日（休市日）则跳过全部，避免 496 次空跑。
+    连续失败超限即中止（东财整体不可达时快速放弃，冷却由调用方处理）。
+    Returns: {'ok', 'count'/'skipped'/'error', 'trade_date'}
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT code, name FROM industry_fund_flow WHERE trade_date = '
+            '(SELECT MAX(trade_date) FROM industry_fund_flow) GROUP BY code, name')
+        codes = [(r['code'], r['name']) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+    if not codes:
+        return {'ok': False, 'error': '无行业代码基准（先成功刷新一次）', 'trade_date': trade_date}
+
+    def _flush(rows):
+        """分块落库（回补开始时已清空该日，纯 INSERT 即幂等）。"""
+        if not rows:
+            return
+        conn = get_connection()
+        try:
+            conn.executemany(
+                'INSERT INTO industry_fund_flow '
+                '(trade_date, code, name, pct_change, main_net, main_pct, super_net, '
+                'big_net, mid_net, small_net, lead_stock) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                [(trade_date, it['code'], it['name'], it['pct_change'], it['main_net'],
+                  it['main_pct'], it['super_net'], it['big_net'], it['mid_net'],
+                  it['small_net'], it['lead_stock']) for it in rows],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    # 开局清空该日（幂等重跑），之后分块提交——中止/崩溃最多损失当前未满块
+    conn = get_connection()
+    try:
+        conn.execute('DELETE FROM industry_fund_flow WHERE trade_date = ?', (trade_date,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    items = []
+    flushed = 0
+    consecutive_fails = 0
+    for i, (code, name) in enumerate(codes):
+        try:
+            klines = _request_fflow_hist_robust(code)
+        except Exception as e:  # noqa: BLE001
+            consecutive_fails += 1
+            logger.warning('[行业资金流] 回补%s 第%d/%d个行业(%s)失败: %s',
+                           trade_date, i + 1, len(codes), code, e)
+            if consecutive_fails >= _BACKFILL_CONSECUTIVE_FAIL_LIMIT:
+                _flush(items[flushed:])
+                return {'ok': False, 'error': f'连续{consecutive_fails}个行业失败，中止回补',
+                        'trade_date': trade_date, 'fetched': len(items)}
+            continue
+        consecutive_fails = 0
+        row = next((r for r in klines if r.split(',')[0] == trade_date), None)
+        if i == 0 and row is None:
+            return {'ok': False, 'skipped': '探针行业历史中无该日（休市或超回看范围）',
+                    'trade_date': trade_date}
+        item = _parse_fflow_hist_row(row, trade_date, code, name) if row else None
+        if item:
+            items.append(item)
+        if len(items) - flushed >= 100:
+            _flush(items[flushed:])
+            flushed = len(items)
+        if (i + 1) % 50 == 0:
+            logger.info('[行业资金流] 回补%s 进度: %d/%d（已取 %d）', trade_date, i + 1, len(codes), len(items))
+        time.sleep(0.2)
+
+    if not items:
+        return {'ok': False, 'error': '回补结果为空', 'trade_date': trade_date}
+    _flush(items[flushed:])   # 收尾提交剩余
+    return {'ok': True, 'count': len(items), 'trade_date': trade_date}
+
+
+def _previous_weekday(date_str):
+    """date_str 的上一个工作日（周一回退到周五）。"""
+    d = datetime.strptime(date_str, '%Y-%m-%d').date()
+    d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.strftime('%Y-%m-%d')
+
+
+def maybe_backfill_gap_async():
+    """刷新成功后检测近期工作日缺口（最多回看 10 个日历日），后台线程回补。
+
+    多日断连会留下多个缺口：按时间正序逐日回补，缺几天补几天。
+    休市/节假日由回补内探针自动跳过；进行中不重复触发。
+    Returns: 启动回补时的缺口日期列表（无缺口/已在进行中返回 None）。
+    """
+    if not _backfill_thread_lock.acquire(blocking=False):
+        return None
+    try:
+        if _backfill_running['flag']:
+            return None
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT MAX(trade_date) FROM industry_fund_flow')
+            row = cursor.fetchone()
+            latest = row[0] if row else None
+            gap_dates = []
+            if latest:
+                cursor.execute(
+                    'SELECT DISTINCT trade_date FROM industry_fund_flow '
+                    'WHERE trade_date >= ?',
+                    ((datetime.strptime(str(latest)[:10], '%Y-%m-%d')
+                      - timedelta(days=10)).strftime('%Y-%m-%d'),))
+                have = {str(r['trade_date'])[:10] for r in cursor.fetchall()}
+                probe = str(latest)[:10]
+                for _ in range(10):
+                    probe = _previous_weekday(probe)
+                    if probe in have:
+                        break           # 从最新日向前连续无缺口即止
+                    gap_dates.append(probe)
+                gap_dates.reverse()     # 时间正序逐日补
+        finally:
+            conn.close()
+        if not gap_dates:
+            return None
+        _backfill_running['flag'] = True
+
+        def _worker():
+            try:
+                for gd in gap_dates:
+                    result = backfill_industry_fund_flow(gd)
+                    logger.info('[行业资金流] 缺口回补 %s: %s', gd, result)
+            except Exception as e:  # noqa: BLE001
+                logger.warning('[行业资金流] 缺口回补异常: %s', e)
+            finally:
+                _backfill_running['flag'] = False
+
+        t = threading.Thread(target=_worker, name='fflow-gap-backfill', daemon=True)
+        t.start()
+        return gap_dates
+    finally:
+        _backfill_thread_lock.release()
 
 
 def get_latest_industry_fund_flow():

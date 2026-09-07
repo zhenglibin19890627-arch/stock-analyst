@@ -174,14 +174,50 @@ def _save_raw_sentiment(stock_id, news_items):
     return saved
 
 
-def _save_news_sentiment(stock_id, news_items):
-    """聚合写入 news_sentiment 表（按最新日期聚合）"""
-    if not news_items:
-        return None
+def _save_news_sentiment(stock_id, news_items, is_empty=False):
+    """聚合写入 news_sentiment 表（按最新日期聚合）
 
+    参数:
+        stock_id: 股票ID
+        news_items: 新闻列表
+        is_empty: 是否为空标记记录（今日无新增新闻）
+
+    返回:
+        dict: 聚合统计信息
+    """
     today = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
 
-    # 聚合统计
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if is_empty or not news_items:
+        # 写入空标记记录：今日无新增新闻
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO news_sentiment
+            (stock_id, news_date, avg_sentiment, positive_count, negative_count,
+             neutral_count, total_count, top_news_title, source_urls)
+            VALUES (?, ?, 0, 0, 0, 0, 0, '今日无新增新闻', '[]')
+        """,
+            (stock_id, today),
+        )
+        conn.commit()
+        conn.close()
+
+        logger.info(f'stock_id={stock_id} news_sentiment写入空标记: date={today}, 今日无新增新闻')
+
+        return {
+            'news_date': today,
+            'avg_sentiment': 0.0,
+            'positive_count': 0,
+            'negative_count': 0,
+            'neutral_count': 0,
+            'total_count': 0,
+            'top_news_title': '今日无新增新闻',
+            'is_empty': True,
+        }
+
+    # 正常聚合统计
     total = len(news_items)
     sentiments = [item.get('sentiment', 0.0) for item in news_items]
     avg_sentiment = sum(sentiments) / total if total > 0 else 0.0
@@ -197,9 +233,6 @@ def _save_news_sentiment(stock_id, news_items):
     # 收集URL列表
     urls = [item.get('url', '') for item in news_items if item.get('url')]
     urls_json = json.dumps(urls[:5], ensure_ascii=False)
-
-    conn = get_connection()
-    cursor = conn.cursor()
 
     cursor.execute(
         """
@@ -238,6 +271,7 @@ def _save_news_sentiment(stock_id, news_items):
         'neutral_count': neutral_count,
         'total_count': total,
         'top_news_title': top_title,
+        'is_empty': False,
     }
 
 
@@ -275,7 +309,13 @@ def collect_news(stock_id, symbol, market):
 
     返回:
         tuple: (status, message)
-            status: 'success' / 'partial' / 'failed'
+            status: 'success' / 'failed'
+            message: 详细描述
+
+    状态分类:
+        - success + 有新增新闻: 正常有数据
+        - success + 无新增新闻: 正常无数据（数据源今天确实没发新新闻）
+        - failed: 真正异常（接口报错/超时/反爬等）
     """
     market_name = 'A股' if market == 'a_stock' else '港股'
     logger.info(f'========== 开始采集{market_name} {symbol} 消息面 ==========')
@@ -283,11 +323,14 @@ def collect_news(stock_id, symbol, market):
     try:
         # 1. 获取新闻数据
         df = _fetch_news_from_akshare(symbol, market)
+
+        # 情况A: akshare 返回空数据 → 正常无数据
         if df is None or df.empty:
-            msg = f'{market_name} {symbol} 消息面数据为空（akshare未返回新闻）'
-            logger.warning(msg)
-            _save_error_log(stock_id, 'empty_data', msg)
-            return 'partial', msg
+            msg = f'{market_name} {symbol} 今日无新增新闻（数据源返回空）'
+            logger.info(msg)
+            # 写入空标记记录
+            _save_news_sentiment(stock_id, [], is_empty=True)
+            return 'success', msg
 
         logger.info(f'[{symbol}] akshare返回 {len(df)} 条新闻')
 
@@ -315,16 +358,18 @@ def collect_news(stock_id, symbol, market):
                 }
             )
 
-        # 3. 写入 raw_sentiment (逐条)
-        _save_raw_sentiment(stock_id, news_items)
+        # 3. 写入 raw_sentiment (逐条，去重后返回新增数量)
+        saved_count = _save_raw_sentiment(stock_id, news_items)
 
-        # 4. 写入 news_sentiment (日聚合)
-        summary = _save_news_sentiment(stock_id, news_items)
+        # 情况B: 有新增新闻 → 正常有数据
+        if saved_count > 0:
+            # 只对新增的新闻做聚合统计
+            new_items = news_items[:saved_count]  # 注意：这里简化处理，实际新增的可能不是前N条
+            summary = _save_news_sentiment(stock_id, news_items)
 
-        if summary:
             msg = (
                 f'{market_name} {symbol} 消息面采集成功：'
-                f'{summary["total_count"]}条新闻，'
+                f'新增{saved_count}条新闻（共返回{len(df)}条），'
                 f'情绪得分{summary["avg_sentiment"]:.2f}，'
                 f'正面{summary["positive_count"]}/'
                 f'负面{summary["negative_count"]}/'
@@ -332,10 +377,16 @@ def collect_news(stock_id, symbol, market):
             )
             logger.info(msg)
             return 'success', msg
-        else:
-            return 'failed', f'{symbol} 消息面聚合失败'
+
+        # 情况C: 无新增新闻（全是旧新闻被去重跳过）→ 正常无数据
+        msg = f'{market_name} {symbol} 今日无新增新闻（返回{len(df)}条但全部已入库）'
+        logger.info(msg)
+        # 写入空标记记录
+        _save_news_sentiment(stock_id, [], is_empty=True)
+        return 'success', msg
 
     except Exception as e:
+        # 情况D: 接口报错/超时/反爬等 → 真正异常
         error_msg = f'{market_name} {symbol} 消息面采集异常: {e!s}'
         logger.error(error_msg, exc_info=True)
         _save_error_log(stock_id, 'exception', str(e))

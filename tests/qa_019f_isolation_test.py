@@ -1,6 +1,9 @@
 """
 QA 019F 独立验收测试脚本 — 评分纯净隔离 + inspect.stack 保护块
 独立于开发自验，不导入开发测试逻辑。
+
+021AE：经典引擎（analysis_engine）删除后，隔离验收对象收敛为现役读取路径
+data_adapter（v5 评分链路唯一 DB 读取入口）+ advisor + data_collector（补采）。
 """
 import os
 import sqlite3
@@ -12,7 +15,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from modules import analysis_engine, data_adapter  # noqa: E402  # sys.path 注入后再导入
+from modules import data_adapter  # noqa: E402  # sys.path 注入后再导入
 
 
 def _make_test_db(rows):
@@ -61,7 +64,7 @@ def _make_conn_factory(db_path):
 
 
 class TestScorePurityIsolation(unittest.TestCase):
-    """验收标准 3：评分纯净隔离验证"""
+    """验收标准 3：评分纯净隔离验证（021AE：对象为 data_adapter 唯一读取路径）"""
 
     def setUp(self):
         self.db_path = None
@@ -73,38 +76,8 @@ class TestScorePurityIsolation(unittest.TestCase):
             except PermissionError:
                 pass
 
-    def test_01_analysis_engine_filters_estimated(self):
-        """T1: analysis_engine._read_capital_data 过滤估算行"""
-        # 真实数据 3 天 + 估算数据 2 天（不同日期，避免 UNIQUE 冲突）
-        rows = [
-            (100, '2026-08-01', 1000.0, 0),
-            (100, '2026-08-02', 2000.0, 0),
-            (100, '2026-08-03', 3000.0, 0),
-            (100, '2026-08-04', 9999.0, 1),
-            (100, '2026-08-05', 8888.0, 1),
-        ]
-        self.db_path = _make_test_db(rows)
-        with unittest.mock.patch.object(
-            analysis_engine, 'get_connection', _make_conn_factory(self.db_path)
-        ):
-            result = analysis_engine._read_capital_data(100, limit=20)
-        self.assertEqual(len(result), 3, f"期望3行真实, 实际{len(result)}行")
-        for r in result:
-            self.assertNotEqual(r['is_estimated'], 1,
-                                f"估算行泄漏: {r['trade_date']}")
-        print("[PASS] T1: analysis_engine 估算行已过滤 (3行真实, 0行估算)")
-
-    def test_02_analysis_engine_signature_unchanged(self):
-        """T2: 签名 _read_capital_data(stock_id, limit=20) 不变"""
-        import inspect as _inspect
-        sig = _inspect.signature(analysis_engine._read_capital_data)
-        params = list(sig.parameters.keys())
-        self.assertEqual(params, ['stock_id', 'limit'], f"签名变更: {params}")
-        self.assertEqual(sig.parameters['limit'].default, 20)
-        print("[PASS] T2: _read_capital_data 签名不变 (stock_id, limit=20)")
-
-    def test_03_data_adapter_filters_estimated_regression(self):
-        """T3: data_adapter._read_capital_data 过滤估算行（019E 回归）"""
+    def test_01_data_adapter_filters_estimated(self):
+        """T1: data_adapter._read_capital_data 过滤估算行（真实3行+估算2行→仅3行）"""
         rows = [
             (100, '2026-08-01', 1000.0, 0),
             (100, '2026-08-02', 2000.0, 0),
@@ -121,7 +94,16 @@ class TestScorePurityIsolation(unittest.TestCase):
         for r in result:
             self.assertNotEqual(r['is_estimated'], 1,
                                 f"估算行泄漏: {r['trade_date']}")
-        print("[PASS] T3: data_adapter 回归验证通过 (019E 过滤未破坏)")
+        print("[PASS] T1: data_adapter 估算行已过滤 (3行真实, 0行估算)")
+
+    def test_02_data_adapter_signature_unchanged(self):
+        """T2: 签名 _read_capital_data(stock_id, limit=10) 不变（现役 v5 适配层口径）"""
+        import inspect as _inspect
+        sig = _inspect.signature(data_adapter._read_capital_data)
+        params = list(sig.parameters.keys())
+        self.assertEqual(params, ['stock_id', 'limit'], f"签名变更: {params}")
+        self.assertEqual(sig.parameters['limit'].default, 10)
+        print("[PASS] T2: data_adapter._read_capital_data 签名不变 (stock_id, limit=10)")
 
     def test_04_only_estimated_rows_returns_empty(self):
         """T4: 仅估算行时返回空集（不崩溃，架构评审 R-3）"""
@@ -131,9 +113,9 @@ class TestScorePurityIsolation(unittest.TestCase):
         ]
         self.db_path = _make_test_db(rows)
         with unittest.mock.patch.object(
-            analysis_engine, 'get_connection', _make_conn_factory(self.db_path)
+            data_adapter, 'get_connection', _make_conn_factory(self.db_path)
         ):
-            result = analysis_engine._read_capital_data(100, limit=20)
+            result = data_adapter._read_capital_data(100, limit=20)
         self.assertEqual(len(result), 0, "仅有估算行时应返回空集")
         print("[PASS] T4: 仅估算行时返回空集, 无崩溃")
 
@@ -190,13 +172,12 @@ class TestInspectStackProtection(unittest.TestCase):
 
 
 class TestFilterExpressionConsistency(unittest.TestCase):
-    """验收标准 1/3/5：过滤表达式逐字符一致性"""
+    """验收标准 1/3/5：过滤表达式逐字符一致性（021AE：经典引擎删除后为现役两处）"""
 
     def test_08_expression_identical_across_score_points(self):
-        """T8: 评分链路过滤表达式逐字符一致"""
+        """T8: 评分链路过滤表达式逐字符一致（data_adapter + advisor）"""
         canonical = "AND (is_estimated = 0 OR is_estimated IS NULL)"
         files_to_check = {
-            'analysis_engine': PROJECT_ROOT / 'modules' / 'analysis_engine.py',
             'data_adapter': PROJECT_ROOT / 'modules' / 'data_adapter.py',
             'advisor': PROJECT_ROOT / 'modules' / 'advisor.py',
         }
@@ -205,7 +186,7 @@ class TestFilterExpressionConsistency(unittest.TestCase):
             count = source.count(canonical)
             self.assertGreaterEqual(count, 1,
                 f"{name}: 未找到标准表达式")
-        print("[PASS] T8: 3 处评分入口表达式逐字符一致")
+        print("[PASS] T8: 现役评分入口表达式逐字符一致 (data_adapter + advisor)")
 
     def test_09_data_collector_supplement_check(self):
         """T9: data_collector 补采清单过滤（间接评分链路）"""

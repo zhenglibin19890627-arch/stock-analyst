@@ -30,14 +30,15 @@
 |---|---|---|
 | `app.py` | 入口 | Flask 主应用，路由 + 启动入口 |
 | `config.py` | 配置 | 全局常量（端口 / 路径 / 开关） |
-| `config_engine_switch.json` | 配置 | v5 引擎灰度切换白名单 |
 | `config_weights.json` | 配置 | 四维权重 + 评级映射 + 行业覆盖 |
 | `requirements.txt` | 依赖 | pip 依赖清单 |
 | `start.bat` / `start.sh` | 启动脚本 | Windows / Linux+Mac 一键启动 |
 | `stock_analyst.db` | **主库** | SQLite 数据库（**主库，与 `database/` 副本同步**） |
 | `CHANGELOG.md` | 变更日志 | 按日期记录所有批次变更（**根目录为唯一副本**） |
 | `用户使用说明.md` | 用户手册 | 面向零代码用户的操作手册（B25 更新，587 行） |
-| `test_engine_compare.py` | 测试 | v5 / legacy 引擎对比测试 |
+| `test_us11_consistency.py` | 测试 | US11 一致性验证脚本 |
+
+> 021AE（2026-08-22）：`config_engine_switch.json` 与 `test_engine_compare.py` 已随经典引擎退役删除。
 | `test_us11_consistency.py` | 测试 | US-11 列表与报告一致性测试 |
 | `_p0_ths_stress_result.json` | 历史数据 | 同花顺接口压力测试结果（P0 阶段，存档） |
 | `$null` | ⚠️ 垃圾文件 | PowerShell 重定向误操作产物，**待清理** |
@@ -108,7 +109,7 @@
 | 数据适配器 | `<名称>_adapter.py` | `data_adapter.py` |
 | Mock 数据 | `mock_<名称>_provider.py` | `mock_data_provider.py` |
 | 引擎验证 | `<引擎名>_validation.py` | `scoring_engine_validation.py` |
-| 引擎切换 | `<功能>_switcher.py` | `engine_switcher.py` |
+| 配置自检 | `<域>_config.py` | `rating_config.py` |
 
 ---
 

@@ -67,11 +67,30 @@ MIN_TARGET_GAIN = {
     '强烈建议卖出': 0.02,
 }
 
+# 021AJ/021AL：目标/止损距离市场校准（依据 price_backtest 真实样本重放模拟）
+# A股（021AJ，125 条）：空仓目标中位 +9.8~12.1% vs 20日高点 P75 +7.7% → 命中 15~20%；
+#      持仓止损分档 3~8%（建议减仓 -4%）vs 20日低点中位 -5.7% → 触发 66%。
+#      校准：目标封顶 +7.5% → 命中 40%；持仓止损 -11% → 触发 16%；RR 0.83 → 2.47+。
+# 港股（021AL，28 条）：波幅约 A股 1.5 倍（20日高点 P75 21.4% vs A股 7.7%，与 021P
+#      观望带波幅比 1.75 同量级）。空仓目标距中位 +25%（布林上轨/60日线在大波动下
+#      推得过远）→ 命中 17%；持仓止损 -5%（持有观望档）→ 触发 40%。
+#      校准：目标封顶 +11% → 命中 52%；持仓止损 -16% → 触发 11%；RR 0.97 → 4.87。
+# 代价：单次止盈赚得更少、真破位亏得更多——换取目标可达、止损不被日常波动洗出。
+TARGET_CAP = {'a_stock': 0.075, 'hk_stock': 0.11}        # 无持仓目标价距现价上限
+POSITION_STOP_PCT = {'a_stock': 0.11, 'hk_stock': 0.16}  # 有持仓止损距离（覆盖评级分档）
+# 样本提醒：港股真实样本仅 28 条（持仓侧 5 条）——常数为波动率推算初值，
+# 样本积累后（≥100 条）应复核（A股 125 条标定同样需随数据滚动复核）。
+
+
+def _norm_market(market):
+    """市场标识归一化：('hk_stock', 'HK') → 'hk_stock'，其余 → 'a_stock'（021AJ）。"""
+    return 'hk_stock' if market in ('hk_stock', 'HK') else 'a_stock'
+
 # 有持仓：评级 -> 操作建议文本（005基线，009状态机优先使用）
 RATING_ACTION_SUGGESTION = {
     '强烈推荐买入': '加仓20%',
     '推荐买入': '加仓20%',
-    '持有观望': '持有观望',
+    '持有观望': '持有',  # 021BH：动作词统一，"持有观望"仅保留为评级档位名
     '建议减仓': '减仓50%',
     '强烈建议卖出': '清仓',
 }
@@ -96,13 +115,13 @@ ACTION_MATRIX = {
     '推荐买入': {
         'S1': '已达目标，建议止盈',
         'S2': '持有，等待止盈',
-        'S3': '浮亏中，持有观望',
+        'S3': '浮亏中，持有',
         'S4': '已破止损，建议止损',
     },
     '持有观望': {
         'S1': '已达目标，建议止盈',
-        'S2': '持有观望',
-        'S3': '浮亏中，持有观望',
+        'S2': '持有',
+        'S3': '浮亏中，持有',
         'S4': '已破止损，建议止损',
     },
     '建议减仓': {
@@ -120,6 +139,99 @@ ACTION_MATRIX = {
 }
 
 _DISCLAIMER = '以上价格建议仅供参考，不构成投资建议'
+
+# 021AS：减仓/清仓评级的建议减仓比例（展示与区间推导共用）
+REDUCE_RATING_PCT = {
+    '建议减仓': 50,
+    '强烈建议卖出': 100,
+}
+
+# 021BF：买入侧评级（无持仓时区间呈现为"买入区间"并给买入网格）；
+# 观望档为"参考区间"；减仓/卖出档为"支撑参考区间"且不给买入话术/网格
+BUY_SIDE_RATINGS = ('强烈推荐买入', '推荐买入')
+
+
+def _recent_lows(stock_id):
+    """021BG：近期真实低点（20日/60日最低 low），支撑观察梯队的优先锚点。
+
+    Returns:
+        tuple: (low20, low60)，数据不足的周期返回 None。
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT low FROM raw_kline WHERE stock_id = ? ORDER BY trade_date DESC LIMIT 60',
+            (stock_id,),
+        )
+        lows = [r['low'] for r in cursor.fetchall() if r['low'] is not None]
+        conn.close()
+        low20 = min(lows[:20]) if len(lows) >= 5 else None
+        low60 = min(lows) if len(lows) >= 20 else None
+        return low20, low60
+    except Exception as e:
+        logger.debug(f'近期低点读取失败 stock_id={stock_id}: {e}')
+        return None, None
+
+
+def _build_support_watch_grid(close, buy_low, atr, low20=None, low60=None):
+    """021BG：减仓/卖出评级的支撑观察梯队（观察预案，非买入建议）。
+
+    设计：
+    - 真实技术位优先（仅取现价下方）：区间下沿 buy_low（未跌破时）、20日最低、60日最低；
+    - ATR 外推补足至 3 档（步长 0.8ATR / 1.2ATR，无 ATR 回退现价百分比）；
+    - 严格自上而下递减、去重（间隔 ≥0.01），最多 3 档；
+    - pct=None（无仓位语义），type='watch'——前端渲染为灰色"观察"行。
+    """
+    step1 = atr * 0.8 if (atr and atr > 0) else close * 0.02
+    step2 = atr * 1.2 if (atr and atr > 0) else close * 0.035
+    levels = []
+
+    def _push(p):
+        p = round(p, 2)
+        if p > 0 and p < close and (not levels or p <= levels[-1] - 0.01):
+            levels.append(p)
+            return True
+        return False
+
+    for cand in (buy_low, low20, low60):
+        if cand and cand > 0:
+            _push(cand)
+    guard = 0
+    while len(levels) < 3 and guard < 6:
+        guard += 1
+        nxt = (levels[-1] if levels else close) - (step1 if not levels else step2)
+        if not _push(nxt):
+            break
+
+    labels = ('支撑观察一', '支撑观察二', '支撑观察三')
+    return [
+        {'level': i + 1, 'price': p, 'pct': None, 'type': 'watch', 'label': labels[i]}
+        for i, p in enumerate(levels)
+    ]
+
+
+def _build_reduce_range(close, rating, atr, cost_price):
+    """021AS：减仓/清仓评级的建议减仓价格区间。
+
+    设计（价格优先、不追求卖在最高）：
+    - 建议减仓：下限=现价（立即执行），上限=现价+0.6ATR（最近反弹位，
+      与网格第一止盈位同间距；无 ATR 回退 现价×1.03）；上限再被
+      min(成本价, ...) 封顶——浮亏时不诱导"等回本再减"，回本减仓
+      属于浮亏网格的档位语义，不混入减仓评级区间。
+    - 强烈建议卖出：区间退化 [现价, 现价]（尽快离场，不等反弹）。
+    - 其他评级返回 None（不属于减仓语义）。
+    """
+    pct = REDUCE_RATING_PCT.get(rating)
+    if pct is None:
+        return None
+    if pct >= 100:
+        return {'low': round(close, 2), 'high': round(close, 2), 'pct': 100}
+    upper = close + atr * 0.6 if (atr and atr > 0) else close * 1.03
+    # 浮亏时不给"等回本"的上限（减仓控制风险优先于回本执念）
+    if cost_price and cost_price > close:
+        upper = min(upper, max(close, cost_price))
+    return {'low': round(close, 2), 'high': round(upper, 2), 'pct': pct}
 
 
 # ================================================================
@@ -180,7 +292,8 @@ def _read_cost_price(stock_id):
         try:
             cursor.execute(
                 'SELECT cost_price, quantity FROM holdings '
-                "WHERE stock_id = ? AND status = 'active'",
+                "WHERE stock_id = ? AND status = 'active' "
+                'ORDER BY quantity DESC LIMIT 1',
                 (stock_id,),
             )
             row = cursor.fetchone()
@@ -265,7 +378,7 @@ def _determine_action_by_state(close, cost_price, take_profit, stop_loss, rating
 
     state_name = STATE_NAMES.get(state, '')
     rating_actions = ACTION_MATRIX.get(rating, ACTION_MATRIX.get('持有观望', {}))
-    action = rating_actions.get(state, '持有观望')
+    action = rating_actions.get(state, '持有')  # 021BH：动作词统一
 
     return state, state_name, action
 
@@ -290,12 +403,17 @@ def _build_grid(
     """构建网格价位计划
 
     无持仓：3档买入网格（ATR*0.8间距）
-    有持仓（020P）：
-      - 补仓位（add 10%）：现价下方 max(止损+0.5ATR, 现价-1ATR)，S4已破止损时跳过
-      - 浮亏且止盈目标 < 回本价：回本清仓位（100%）
+    有持仓（020P 锚定现价；021AQ 浮亏重构）：
+      - 两级止损：止损清仓位（100%，止损价-1ATR）→ 破位减仓位（50% @止损价）
+        ——跌破止损先减半控损，减半后仍下行则清仓离场，不再"没到回本价就躺平"
+      - 分批补仓：补仓一档（10%，max(止损+0.5ATR, 现价-1ATR)——回测口径锚点，
+        公式勿改）→ 补仓二档（15%，现价-2.2ATR，与一档拉开间距，合计≤25%）
+      - 浮亏且止盈目标 < 回本价：回本减仓位（50% @回本价）→ 回本清仓位
+        （100%，回本价+0.6ATR）——先落袋一半，剩余略上方清掉，不一把梭
       - 浮亏且止盈目标 ≥ 回本价：回本减仓位（30%）→ 第一止盈位（50%）→ 最终止盈位（100%）
       - 浮盈：第一止盈位（50%，现价+0.6ATR）→ 最终止盈位（100%）
-    全部卖出档位严格自下而上递增，锚定现价与成本孰高，不与止盈/止损档位倒挂。
+      - S4已破止损（防御分支）：只给离场档不给补仓档
+    全部档位严格自下而上递增，锚定现价与成本孰高，不与止盈/止损档位倒挂。
     """
     grid = []
 
@@ -336,22 +454,90 @@ def _build_grid(
         )
 
     else:
-        # ---- 有持仓：补仓 + 减仓网格（020P：分档与止盈/止损同源，锚定现价）----
+        # ---- 有持仓：021AQ 浮亏网格重构（两级止损 + 分批补仓 + 分批回本）----
         level = 1
 
-        # 补仓位（S4已破止损时跳过，避免"破止损仍加仓"矛盾）
-        if state != 'S4':
+        if state == 'S4':
+            # 已破止损（防御分支，现价锚定止损下常态不可达）：只给离场档
             if atr and atr > 0:
-                add_price = max(stop_loss + atr * 0.5, close - atr * 1.0)
+                exit_price = max(close - atr * 1.0, close * 0.95)
             else:
-                add_price = close * 0.97
+                exit_price = close * 0.95
             grid.append(
                 {
                     'level': level,
-                    'price': round(add_price, 2),
+                    'price': round(exit_price, 2),
+                    'pct': 100,
+                    'type': 'reduce',
+                    'label': '止损清仓位',
+                }
+            )
+            level += 1
+            # 反抽减仓：反弹离场位（止损线在现价上方时用止损线，否则现价略上方）
+            rebound = max(stop_loss, close * 1.02)
+            grid.append(
+                {
+                    'level': level,
+                    'price': round(rebound, 2),
+                    'pct': 50,
+                    'type': 'reduce',
+                    'label': '反抽减仓位',
+                }
+            )
+            level += 1
+        else:
+            # 两级止损（自下而上）：先减半控损，减半后仍下行则清仓
+            if atr and atr > 0:
+                hard_exit = max(stop_loss - atr * 1.0, stop_loss * 0.96)
+            else:
+                hard_exit = stop_loss * 0.96
+            grid.append(
+                {
+                    'level': level,
+                    'price': round(hard_exit, 2),
+                    'pct': 100,
+                    'type': 'reduce',
+                    'label': '止损清仓位',
+                }
+            )
+            level += 1
+            grid.append(
+                {
+                    'level': level,
+                    'price': round(stop_loss, 2),
+                    'pct': 50,
+                    'type': 'reduce',
+                    'label': '破位减仓位',
+                }
+            )
+            level += 1
+
+            # 分批补仓：一档公式为回测补仓区间口径锚点（勿改），二档拉开间距；
+            # 列表按价格自下而上（二档更深在前、一档在后），执行顺序按价格从高到低
+            if atr and atr > 0:
+                add1 = max(stop_loss + atr * 0.5, close - atr * 1.0)
+            else:
+                add1 = close * 0.97
+            if atr and atr > 0:
+                add2 = max(stop_loss + atr * 0.5, close - atr * 2.2)
+                if add2 <= add1 - atr * 0.3:
+                    grid.append(
+                        {
+                            'level': level,
+                            'price': round(add2, 2),
+                            'pct': 15,
+                            'type': 'add',
+                            'label': '补仓二档',
+                        }
+                    )
+                    level += 1
+            grid.append(
+                {
+                    'level': level,
+                    'price': round(add1, 2),
                     'pct': 10,
                     'type': 'add',
-                    'label': '补仓位',
+                    'label': '补仓一档',
                 }
             )
             level += 1
@@ -359,11 +545,27 @@ def _build_grid(
         _underwater = cost_price is not None and close < cost_price
 
         if _underwater and take_profit < cost_price:
-            # 浮亏且评级止盈目标低于回本价：回本即清仓（不设中间档，避免档位倒挂）
+            # 浮亏且止盈目标低于回本价：回本先落袋一半，剩余略上方清掉
+            # （021AQ：替代原"回本清仓100%"一把梭——死等回本可能等不到，
+            #   分批离场兼顾解套与反弹两头）
             grid.append(
                 {
                     'level': level,
                     'price': round(cost_price, 2),
+                    'pct': 50,
+                    'type': 'reduce',
+                    'label': '回本减仓位',
+                }
+            )
+            level += 1
+            if atr and atr > 0:
+                recover_exit = max(cost_price + atr * 0.6, cost_price * 1.02)
+            else:
+                recover_exit = cost_price * 1.03
+            grid.append(
+                {
+                    'level': level,
+                    'price': round(recover_exit, 2),
                     'pct': 100,
                     'type': 'reduce',
                     'label': '回本清仓位',
@@ -742,7 +944,8 @@ def _analyze_trade_records(stock_id):
 # ================================================================
 
 
-def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr, capital_signal=None):
+def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr, capital_signal=None,
+                     market='a_stock', low20=None, low60=None):
     """无持仓：买入区间 / 目标价 / 止损价 / 建议仓位 / 网格 / 操作建议"""
 
     position_pct = RATING_POSITION_PCT.get(rating, 0)
@@ -781,6 +984,12 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr, cap
     min_target = close * 1.05
     target_price = max(target_price, min_target)
 
+    # 021AJ：目标价封顶（市场校准）——目标定在 20 日波幅可达高度（实测 P75≈+7.7%），
+    # 避免 max(boll_upper, ma60) 在宽幅期把目标推到摸不到的位置（命中仅 15~20% → 40%）
+    cap_gain = TARGET_CAP.get(_norm_market(market))
+    if cap_gain:
+        target_price = min(target_price, close * (1 + cap_gain))
+
     # ---- 止损价 ----
     if atr and atr > 0:
         stop_loss = buy_low - atr * 1.5
@@ -791,18 +1000,27 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr, cap
     expected_gain_pct = round((target_price - close) / close * 100, 1)
     max_loss_pct = round((stop_loss - close) / close * 100, 1)
 
-    # ---- 009新增：操作建议（感知价位）----
-    if close < buy_low:
-        action_suggestion = '当前价低于买入区间，可逢低买入'
-    elif close <= buy_high:
-        action_suggestion = '当前价在买入区间内，可按计划买入'
+    # ---- 021BF：区间语义随评级（修复"评级建议减仓却说可逢低买入"的矛盾）----
+    # 买入档：买入区间 + 逢低买入话术 + 买入网格；
+    # 观望档：参考区间 + 同结构话术（与建议仓位20%一致）；
+    # 减仓/卖出档：区间退化为技术支撑参考，不给买入话术、不给买入网格（与仓位0%一致）
+    if rating in REDUCE_RATING_PCT:
+        zone_label = '支撑参考区间'
+        action_suggestion = f'评级为{rating}（建议仓位0%），下方价格仅为技术支撑参考，不建议买入'
+        # 021BG：支撑观察梯队（观察预案，非买入建议）——真实低点优先，ATR 外推补足
+        grid = _build_support_watch_grid(close, buy_low, atr, low20=low20, low60=low60)
     else:
-        action_suggestion = '当前价高于买入区间，建议等待回调'
+        zone_label = '买入区间' if rating in BUY_SIDE_RATINGS else '参考区间'
+        if close < buy_low:
+            action_suggestion = f'当前价低于{zone_label}，可逢低买入'
+        elif close <= buy_high:
+            action_suggestion = f'当前价在{zone_label}内，可按计划买入'
+        else:
+            action_suggestion = f'当前价高于{zone_label}，建议等待回调'
+        # ---- 009新增：网格买入计划 ----
+        grid = _build_grid(close, buy_low, buy_high, atr, None, None, None, rating, has_position=False)
 
     action_suggestion = _apply_capital_modifier(action_suggestion, capital_signal)
-
-    # ---- 009新增：网格买入计划 ----
-    grid = _build_grid(close, buy_low, buy_high, atr, None, None, None, rating, has_position=False)
 
     return {
         'available': True,
@@ -810,6 +1028,7 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr, cap
         'position_pct': position_pct,
         'buy_range_low': round(buy_low, 2),
         'buy_range_high': round(buy_high, 2),
+        'zone_label': zone_label,  # 021BF：区间语义标签（买入区间/参考区间/支撑参考区间）
         'target_price': round(target_price, 2),
         'stop_loss': round(stop_loss, 2),
         'current_close': round(close, 2),
@@ -827,7 +1046,8 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr, cap
 # ================================================================
 
 
-def _gen_with_position(close, cost_price, rating, ma60, boll_upper, atr, capital_signal=None):
+def _gen_with_position(close, cost_price, rating, ma60, boll_upper, atr, capital_signal=None,
+                       market='a_stock'):
     """有持仓：状态机 / 动态止盈 / 网格 / 操作建议 / 浮盈
 
     020P：止盈/止损锚定现价（与成本解耦）——市场不看个人成本，
@@ -838,6 +1058,13 @@ def _gen_with_position(close, cost_price, rating, ma60, boll_upper, atr, capital
     target_gain = RATING_TARGET_GAIN.get(rating, 0.12)
     stop_loss_pct = RATING_STOP_LOSS.get(rating, 0.05)
     min_target_gain = MIN_TARGET_GAIN.get(rating, 0.04)
+
+    # 021AJ/021AL：止损距离市场校准——A股评级分档 3~8%（建议减仓 -4%）实测 T+20 触发
+    # 66%（20 日低点中位 -5.7%，日常波动即砸穿）→ 统一 -11%；港股 -5%（持有观望档）
+    # 触发 40% → -16%（波幅约 A股 1.5 倍，20日低点 P25 -13%）。
+    calibrated_stop = POSITION_STOP_PCT.get(_norm_market(market))
+    if calibrated_stop is not None:
+        stop_loss_pct = calibrated_stop
 
     # ---- 020P：止盈价锚定现价（双约束公式）----
     # 固定止盈价 = close * (1 + target_gain)
@@ -876,6 +1103,9 @@ def _gen_with_position(close, cost_price, rating, ma60, boll_upper, atr, capital
         state=state,
     )
 
+    # 021AS：减仓/清仓评级给出建议减仓价格区间
+    reduce_range = _build_reduce_range(close, rating, atr, cost_price)
+
     return {
         'available': True,
         'has_position': True,
@@ -888,6 +1118,7 @@ def _gen_with_position(close, cost_price, rating, ma60, boll_upper, atr, capital
         'state_name': state_name,
         'action_suggestion': action_suggestion,
         'grid': grid,
+        'reduce_range': reduce_range,  # 021AS：减仓/清仓评级的建议减仓区间
         'capital_signal': capital_signal,
         'disclaimer': _DISCLAIMER,
     }
@@ -939,6 +1170,9 @@ def generate_price_advice(stock_id, advice_result):
         # 4. 计算 ATR
         atr = _calc_atr(stock_id)
 
+        # 4b. 021BG：近期真实低点（支撑观察梯队锚点，无持仓减仓分支使用）
+        low20, low60 = _recent_lows(stock_id)
+
         # 5. 009新增：解析资金面因子
         capital_factors = {}
         try:
@@ -951,17 +1185,20 @@ def generate_price_advice(stock_id, advice_result):
         parsed_capital = _parse_capital_factors(capital_factors)
         capital_signal = _classify_capital_signal(parsed_capital)
 
-        # 6. 生成建议
+        # 6. 生成建议（021AJ：传市场——A股目标封顶/止损校准，港股暂沿用旧逻辑）
+        advice_market = advice_result.get('market') or 'a_stock'
         if has_position and cost_price and cost_price > 0:
             result = _gen_with_position(
-                close, cost_price, rating, ma60, boll_upper, atr, capital_signal
+                close, cost_price, rating, ma60, boll_upper, atr, capital_signal,
+                market=advice_market
             )
             # 009新增：交易流水分析
             result['trade_analysis'] = _analyze_trade_records(stock_id)
             return result
 
         return _gen_no_position(
-            close, rating, ma20, ma60, boll_upper, boll_lower, atr, capital_signal
+            close, rating, ma20, ma60, boll_upper, boll_lower, atr, capital_signal,
+            market=advice_market, low20=low20, low60=low60
         )
 
     except Exception as e:

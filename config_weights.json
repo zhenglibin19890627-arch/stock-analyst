@@ -1,23 +1,33 @@
 {
   "_说明": "四维分析引擎权重配置文件 — 修改后无需重启服务，下次分析自动生效",
-  "_更新时间": "2026-07-27 (O2-E回滚)",
+  "_更新时间": "2026-08-28 22:30",
   "a_stock": {
     "weights": {
-      "kline": 0.2507,
-      "fundamental": 0.2005,
-      "capital_flow": 0.3985,
-      "news": 0.1504
+      "kline": 0.2715,
+      "fundamental": 0.2171,
+      "capital_flow": 0.4314,
+      "news": 0.08
     },
-    "_备注": "07-27 O2-E回滚：PM裁定权重调整与股票池数据特征反向，恢复07-22原值；O2-A+/O2-B子项分提升保留"
+    "_备注": "021BC：消息面 0.1504→0.08（699条v5回测维度归因：消息面唯一负相关 -0.098），腾出权重按 k/f/c 现值比例回填；配套引擎侧情绪映射非对称化（正面减半封顶）。07-27 O2-E回滚：PM裁定权重调整与股票池数据特征反向，恢复07-22原值；O2-A+/O2-B子项分提升保留"
   },
   "hk_stock": {
     "weights": {
-      "kline": 0.2945,
-      "fundamental": 0.36,
-      "capital_flow": 0.249,
-      "news": 0.0965
+      "kline": 0.3281,
+      "fundamental": 0.3429,
+      "capital_flow": 0.2371,
+      "news": 0.0919
     },
-    "_备注": "港股四维均衡配置，消息面10%；港股数据源不稳定时归一化自动重分配"
+    "rating_overrides": {
+      "推荐买入": {
+        "min": 70,
+        "max": 79
+      },
+      "持有观望": {
+        "min": 50,
+        "max": 69
+      }
+    },
+    "_备注": "港股四维均衡配置，消息面10%；港股数据源不稳定时归一化自动重分配。021R：rating_overrides 为港股差异化评级门槛（推荐买入 65→70），仅 market='HK' 评分路径消费；全局 rating_mapping 受红线锁定不动。依据：港股推荐买入占比 39%（A股 16%）系统性偏多，矫正至 A股水平"
   },
   "rating_mapping": {
     "强烈推荐买入": {
@@ -46,48 +56,49 @@
       "label": "强烈建议卖出"
     }
   },
+  "_行业备注": "021BC：7 个行业覆盖的 news 等比降至 0.08（腾出权重按各行业 k/f/c 现值比例回填），与 a_stock 主权重同口径",
   "industry_overrides": {
     "半导体": {
-      "kline": 0.2,
-      "fundamental": 0.3,
-      "capital_flow": 0.35,
-      "news": 0.15
+      "kline": 0.2165,
+      "fundamental": 0.3247,
+      "capital_flow": 0.3788,
+      "news": 0.08
     },
     "计算机设备": {
-      "kline": 0.2,
-      "fundamental": 0.25,
-      "capital_flow": 0.35,
-      "news": 0.2
+      "kline": 0.23,
+      "fundamental": 0.2875,
+      "capital_flow": 0.4025,
+      "news": 0.08
     },
     "通信设备": {
-      "kline": 0.22,
-      "fundamental": 0.23,
-      "capital_flow": 0.35,
-      "news": 0.2
+      "kline": 0.253,
+      "fundamental": 0.2645,
+      "capital_flow": 0.4025,
+      "news": 0.08
     },
     "酿酒行业": {
-      "kline": 0.25,
-      "fundamental": 0.3,
-      "capital_flow": 0.3,
-      "news": 0.15
+      "kline": 0.2706,
+      "fundamental": 0.3247,
+      "capital_flow": 0.3247,
+      "news": 0.08
     },
     "家电行业": {
-      "kline": 0.25,
-      "fundamental": 0.3,
-      "capital_flow": 0.3,
-      "news": 0.15
+      "kline": 0.2706,
+      "fundamental": 0.3247,
+      "capital_flow": 0.3247,
+      "news": 0.08
     },
     "医药制造": {
-      "kline": 0.25,
-      "fundamental": 0.28,
-      "capital_flow": 0.3,
-      "news": 0.17
+      "kline": 0.2771,
+      "fundamental": 0.3104,
+      "capital_flow": 0.3325,
+      "news": 0.08
     },
     "医疗服务": {
-      "kline": 0.25,
-      "fundamental": 0.28,
-      "capital_flow": 0.3,
-      "news": 0.17
+      "kline": 0.2771,
+      "fundamental": 0.3104,
+      "capital_flow": 0.3325,
+      "news": 0.08
     }
   }
 }

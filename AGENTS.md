@@ -37,10 +37,9 @@
 | 入口 | 路径 | 说明 |
 |------|------|------|
 | **Flask 主应用** | `app.py` | 应用入口（约 130 行）：环境初始化、蓝图注册、首页路由、启动逻辑。启动后监听 `127.0.0.1:5000`。 |
-| **路由蓝图** | `blueprints/` | API 路由按业务域拆分（自 2026-08-13）：`watchlist`（自选股/分组/采集）、`analysis`（分析/评级/v5）、`portfolio`（持仓/流水/成本）、`report`（日报）、`system`（健康/引擎）、`backtest`（回测/优化）、`export`（导出）、`index_ratings`（指数）、`alerts`（预警）；共享展示层工具在 `_utils.py`。 |
+| **路由蓝图** | `blueprints/` | API 路由按业务域拆分（自 2026-08-13）：`watchlist`（自选股/分组/采集）、`analysis`（分析/评级/v5）、`portfolio`（持仓/流水/成本）、`report`（日报）、`system`（健康/统计）、`backtest`（回测/优化）、`export`（导出）、`index_ratings`（指数）、`alerts`（预警）；共享展示层工具在 `_utils.py`。 |
 | **全局配置** | `config.py` | 路径、采集参数、评分权重、评级档位、风控阈值、Flask 配置。 |
 | **权重热加载** | `config_weights.json` | 评分权重，运行时可修改无需重启。 |
-| **引擎切换** | `config_engine_switch.json` | 新旧引擎灰度切换控制。 |
 | **数据库管理** | `database/db_manager.py` | 建表、连接、WAL/锁配置。 |
 | **业务模块** | `modules/` | 采集、评分、建议、报告、回测、预警等。 |
 
@@ -58,6 +57,14 @@
 - `GET|POST /api/backtest/*` — 评级回测
 
 > 021D 起已删除的旧端点：`/api/stocks/<id>/refresh-full`、`/api/stocks/<id>/analysis`、`/api/stocks/<id>/ratings`、`/api/ratings`、`/api/backtest/simulate`、`/api/backtest/status`、`/api/daily-report/<date>`、`/api/daily-report/history`、`/api/watchlist/groups`、`/api/portfolio/groups/<id>`（PUT/DELETE）、`/api/positions/<id>/cost-adjustments`、`/api/portfolio/realized-pnl`、`/api/alerts/rules/<id>`（PUT）、`/api/alerts/scan`——详见 CHANGELOG 021D。
+
+### 多交易账户（021W，2026-08-21）
+
+- **隔离范围**：仅持仓域——`holdings`/`trade_records` 经 `account_id` 归属账户；自选股/分析/预警全局共享。
+- **关键约束**：`holdings` 唯一键为 `UNIQUE(account_id, stock_id)`（同股可多账户分仓）；默认账户（is_default=1）禁止删除；账户删除需 `force_confirm` 且流水保留归入默认账户。
+- **端点**：`GET|POST /api/accounts`、`PUT|DELETE /api/accounts/<id>`；持仓/流水/summary 端点均支持 `?account_id=` 过滤（缺省/'all'=全部聚合）。
+- **重算口径**：`_recalculate_holding(cursor, stock_id, account_id)` 按（股票, 账户）维度隔离，改流水逻辑时必须保持该口径。
+- **多行兼容约定**：任何 `JOIN holdings ON stock_id` 的新代码必须处理同股多仓（用「最大持仓子查询」或按账户过滤），否则会产生重复行。
 
 ---
 
@@ -104,12 +111,12 @@ mypy app.py config.py modules
 > - `tests/conftest.py` — pytest 公共配置，通过 MockDataProvider 生成纯内存数据隔离数据库与网络，并自动把项目根目录注入 sys.path
 >
 > 补充验证脚本（位于项目根目录，自带 sys.path 注入，需在项目根执行）：
-> - `test_engine_compare.py` — 新旧评分引擎并行对比验收脚本
 > - `test_us11_consistency.py` — US11 一致性验证脚本
 > ```bash
-> python test_engine_compare.py
 > python test_us11_consistency.py
 > ```
+>
+> 021AE 起已删除：`test_engine_compare.py` / `tests/test_engine_compare.py`（新旧引擎对比脚本，随经典引擎一并退役）。
 
 服务运行时，健康检查：
 ```bash
@@ -123,19 +130,21 @@ curl http://127.0.0.1:5000/api/health
 | 模块 | 职责 |
 |------|------|
 | `data_collector.py` | **核心采集**：获取 A股/港股基本面、技术面、消息面、资金面数据（akshare）。 |
-| `backfill_scheduler.py` | 数据完整性驱动的持续补采调度器（缺口检测 + 周期重试 + 自动退避，app.py 启动时注册）。 |
+| `backfill_scheduler.py` | 数据完整性驱动的持续补采调度器（缺口检测 + 周期重试 + 自动退避，app.py 启动时注册；021BA 起含行业分类自愈——每轮限量补取"未分类"A股行业）。 |
 | `data_contract.py` | v5.0 标准数据契约（StockData），业务逻辑仅依赖此契约，禁耦合具体数据源。 |
 | `data_adapter.py` | SQLite 真实数据 ↔ StockData 契约的适配层。 |
-| `analysis_engine.py` | 模块2：旧版四维分析引擎（量化因子打分，输出 0-100）。 |
-| `scoring_engine.py` | v5.0 四维评分引擎（新版，基于标准数据契约）。 |
-| `engine_switcher.py` | 引擎灰度切换控制器（新旧引擎选择与熔断记录）。 |
+| `scoring_engine.py` | v5.0 四维评分引擎（唯一引擎，基于标准数据契约；经典引擎已于 021AE 删除）。 |
+| `rating_config.py` | 评级档位三处一致性自检（启动自检 + 红线 R6 核验复用）。 |
 | `advisor.py` | 评级与建议生成（⚠️ 见风险边界 B24 红线）。 |
+| `rating_hysteresis.py` | 评级变更迟滞（021AG）：分数跨线 ±3 分才换挡，抗边界抖动；`config.RATING_HYSTERESIS_ENABLED=False` 可回退。 |
 | `price_advisor.py` | 价格建议增强（后处理集成，不改 generate_advice）。 |
 | `price_backtest.py` | 价格建议回测验证（T+5/T+20 双周期命中率）。 |
 | `alert_engine.py` | P3-B 智能预警（G1-G3 规则）。 |
 | `backtest_engine.py` | M8 评级有效性监测（回测）引擎。 |
-| `optimizer_engine.py` | M9 自动优化引擎（规则化方案）。 |
+| `optimizer_engine.py` | M9 自动优化引擎（规则化方案；以 T+1 日准确率为代理，安全阀已知空转，021AI 起动态目标走 dynamic_optimizer）。 |
+| `dynamic_optimizer.py` | 021AI 动态窗口权重优化器：维度分重放+网格+前向验证+数据门槛（v5 纯净样本不足不改权）；入口 `scripts/run_dynamic_optimizer.py`。 |
 | `daily_report.py` | 每日报告生成（ThreadPoolExecutor 超时控制）。 |
+| `market_screener.py` | 021BI 全市场选股扫描器：两段漏斗（新浪快照粗筛 ~5553 只 → 腾讯K线 8 类技术信号精筛）。数据源新浪/腾讯，与东财断连解耦；只产候选不自动入库，加自选 ≤20。端点 `POST /api/market/scan`、`/api/market/scan-signals`。 |
 | `index_collector.py` | 指数数据采集与评级。 |
 | `export_engine.py` | 报告导出（Excel .xlsx）。 |
 | `news_collector.py` | 新闻/消息面采集。 |
@@ -187,7 +196,6 @@ stock_analyst/
 ├── app.py                  # Flask 主应用（入口）
 ├── config.py               # 全局配置
 ├── config_weights.json     # 评分权重（热加载）
-├── config_engine_switch.json
 ├── requirements.txt
 ├── start.bat / start.sh    # 一键启动脚本
 ├── stock_analyst.db        # SQLite 数据库（运行产物）
@@ -215,3 +223,4 @@ stock_analyst/
 3. **数据库变更**：涉及表结构/清数据，先备份 `stock_analyst.db`，并同步应用层级联逻辑。
 4. **零代码用户优先**：所有方案须保证用户能 `python app.py` 一键启动并浏览器访问，避免引入额外运维负担。
 5. **中文交付**：项目文档、报告、注释以中文为准。
+6. **UI/UX 反向校验契约层**（2026-08-17，021E/F/G 三连修教训）：为支撑 UI/UX 而设计的契约层——数据建模、接口口径、缓存策略、前端状态管理——**不是开工前不可动摇的终点，必须接受真实 UI/UX 端到端验收的反向校验**。必要时优先实现最小可用 UI/UX 用于真实使用验证，并接受反馈随时调整契约层。反例：P3-A"报告页读快照与列表同源"、看板 ETag 304、路由 `_viewLoaded` 每会话仅首次加载，三项契约各自"正确"，叠加结果却是用户看到的全是旧数据、须按特定顺序手动刷新两处才生效（021E/021F/021G 修复）。契约层自洽 ≠ 用户体验正确；判定标准是用户真实操作路径下的端到端表现。

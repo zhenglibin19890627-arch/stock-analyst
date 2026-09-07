@@ -83,6 +83,29 @@ def compute_capital_detail(cap_rows, holder_structure=None, south_flow=None):
             else:
                 d['margin_state'] = '融资余额大幅减少'
 
+        # 3.5) 港股通(南下)个股资金（021Q，仅港股通标的有值，展示暂不参评）
+        # 当日净增持市值（万港元）取最新行；持股占比向后搜索最近非空（与 adapter 口径一致）
+        _sb = latest.get('south_net_buy')
+        if _sb is not None:
+            d['south_stock_net'] = round(_sb, 2)
+            if _sb >= 2000:
+                d['south_stock_state'] = '南下大幅增持'
+            elif _sb >= 500:
+                d['south_stock_state'] = '南下温和增持'
+            elif _sb >= 0:
+                d['south_stock_state'] = '南下小幅增持'
+            elif _sb >= -500:
+                d['south_stock_state'] = '南下小幅减持'
+            elif _sb >= -2000:
+                d['south_stock_state'] = '南下温和减持'
+            else:
+                d['south_stock_state'] = '南下大幅减持'
+        for r in reversed(cap_rows):
+            v = r.get('south_hold_ratio')
+            if v is not None:
+                d['south_hold_ratio'] = round(v, 2)
+                break
+
     # 4) 机构持仓（020R-45，权重 0.20）
     if holder_structure:
         d['holder_stat_date'] = holder_structure.get('stat_date')
@@ -116,6 +139,23 @@ def compute_capital_detail(cap_rows, holder_structure=None, south_flow=None):
             else:
                 d['inst_state'] = '机构极少关注'
         d['inst_report_date'] = holder_structure.get('inst_report_date')
+        # 021Q：机构股东数量（港股 westock 季度口径；注意与 A股户数方向语义相反）
+        ic = holder_structure.get('inst_count')
+        if ic is not None:
+            d['inst_count'] = int(ic)
+            ic_chg = holder_structure.get('inst_count_change_pct')
+            if ic_chg is not None:
+                d['inst_count_change_pct'] = round(ic_chg, 2)
+                if ic_chg >= 10:
+                    d['inst_count_state'] = '机构数量大增'
+                elif ic_chg >= 3:
+                    d['inst_count_state'] = '机构数量增加'
+                elif ic_chg >= -3:
+                    d['inst_count_state'] = '机构数量持平'
+                elif ic_chg >= -10:
+                    d['inst_count_state'] = '机构数量减少'
+                else:
+                    d['inst_count_state'] = '机构数量大减'
 
     # 5) 南向资金参考（020R-47，仅港股展示，不参评）
     if south_flow:
