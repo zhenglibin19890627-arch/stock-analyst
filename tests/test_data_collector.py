@@ -26,6 +26,16 @@ import pytest
 
 from database import db_manager
 from modules import data_collector as dc
+
+# OPT-3（2026-09-07）：data_collector 拆分为 modules/collector/ 包后，monkeypatch 须指向实现/消费方子模块
+# （facade 再导出与实现是不同模块命名空间，补丁打在 facade 对包内调用不可见）
+from modules.collector import capital_flow as _cf  # noqa: E402
+from modules.collector import capital_westock as _cw  # noqa: E402
+from modules.collector import forecast_express as _fx  # noqa: E402
+from modules.collector import holder_structure as _hs  # noqa: E402
+from modules.collector import kline as _kl  # noqa: E402
+from modules.collector import mootdx as _md  # noqa: E402
+from modules.collector import valuation as _val  # noqa: E402
 from modules.data_contract import StockData
 from modules.mock_data_provider import MockDataProvider
 
@@ -498,7 +508,7 @@ class TestForecastCollection:
             }
         )
         monkeypatch.setattr(
-            dc, '_get_forecast_df_for_period', lambda p: df if p == '20260630' else None
+            _fx, '_get_forecast_df_for_period', lambda p: df if p == '20260630' else None
         )
 
         status, msg = dc.collect_forecast(1, '002458', 'a_stock')
@@ -570,7 +580,7 @@ class TestExpressCollection:
             }
         )
         monkeypatch.setattr(
-            dc, '_get_express_df_for_period', lambda p: df if p == '20260630' else None
+            _fx, '_get_express_df_for_period', lambda p: df if p == '20260630' else None
         )
 
         status, msg = dc.collect_express(1, '601888', 'a_stock')
@@ -616,11 +626,13 @@ class TestEmBatchProgressCallback:
         """THS 失败回退 EM 时，每只股票开始前回调一次（顺序正确）"""
         calls = []
         # 021A：固定为交易日，规避 019G 周末守卫（真实周末会直接 skipped 不走 EM 回退）
-        monkeypatch.setattr(dc, 'datetime', _TradingDayDateTime)
-        monkeypatch.setattr(dc, '_fetch_capital_flow_ths_batch', lambda: None)
-        monkeypatch.setattr(dc, 'fetch_capital_flow', lambda sym, m: ('success', 'mock'))
-        monkeypatch.setattr(dc, '_EM_INTER_DELAY_RANGE', (0.001, 0.002))
-        monkeypatch.setattr(dc, '_EM_BATCH_GAP_RANGE', (0.001, 0.002))
+        monkeypatch.setattr(_cf, 'datetime', _TradingDayDateTime)
+        # OPT-3：_is_intraday_session 在 kline 内也消费 datetime，须同步固定（单体时代同模块可见补丁）
+        monkeypatch.setattr(_kl, 'datetime', _TradingDayDateTime)
+        monkeypatch.setattr(_cf, '_fetch_capital_flow_ths_batch', lambda: None)
+        monkeypatch.setattr(_cf, 'fetch_capital_flow', lambda sym, m: ('success', 'mock'))
+        monkeypatch.setattr(_cf, '_EM_INTER_DELAY_RANGE', (0.001, 0.002))
+        monkeypatch.setattr(_cf, '_EM_BATCH_GAP_RANGE', (0.001, 0.002))
 
         result = dc.fetch_capital_flow_batch(
             ['600276', '300146', '000333'],
@@ -632,11 +644,13 @@ class TestEmBatchProgressCallback:
     def test_no_progress_cb_ok(self, monkeypatch):
         """不传回调时照常工作（向后兼容）"""
         # 021A：固定为交易日，规避 019G 周末守卫
-        monkeypatch.setattr(dc, 'datetime', _TradingDayDateTime)
-        monkeypatch.setattr(dc, '_fetch_capital_flow_ths_batch', lambda: None)
-        monkeypatch.setattr(dc, 'fetch_capital_flow', lambda sym, m: ('success', 'mock'))
-        monkeypatch.setattr(dc, '_EM_INTER_DELAY_RANGE', (0.001, 0.002))
-        monkeypatch.setattr(dc, '_EM_BATCH_GAP_RANGE', (0.001, 0.002))
+        monkeypatch.setattr(_cf, 'datetime', _TradingDayDateTime)
+        # OPT-3：_is_intraday_session 在 kline 内也消费 datetime，须同步固定（单体时代同模块可见补丁）
+        monkeypatch.setattr(_kl, 'datetime', _TradingDayDateTime)
+        monkeypatch.setattr(_cf, '_fetch_capital_flow_ths_batch', lambda: None)
+        monkeypatch.setattr(_cf, 'fetch_capital_flow', lambda sym, m: ('success', 'mock'))
+        monkeypatch.setattr(_cf, '_EM_INTER_DELAY_RANGE', (0.001, 0.002))
+        monkeypatch.setattr(_cf, '_EM_BATCH_GAP_RANGE', (0.001, 0.002))
 
         result = dc.fetch_capital_flow_batch(['600276'])
         assert result['success_count'] == 1
@@ -662,12 +676,12 @@ class TestOrderbookWeekendGuard:
 
     def test_weekend_skips(self, tmp_path, monkeypatch):
         self._make_db(tmp_path, monkeypatch)
-        monkeypatch.setattr(dc, 'datetime', _WeekendDateTime)
+        monkeypatch.setattr(_md, 'datetime', _WeekendDateTime)
 
         def _boom(*args, **kwargs):
             raise AssertionError('周末守卫未生效：不应调用 mootdx 实时行情')
 
-        monkeypatch.setattr(dc, '_fetch_realtime_quote_mootdx', _boom)
+        monkeypatch.setattr(_md, '_fetch_realtime_quote_mootdx', _boom)
 
         status, msg = dc.fetch_orderbook('600276', 'a_stock')
         assert status == 'skipped'
@@ -675,7 +689,7 @@ class TestOrderbookWeekendGuard:
 
     def test_trading_day_still_runs(self, tmp_path, monkeypatch):
         self._make_db(tmp_path, monkeypatch)
-        monkeypatch.setattr(dc, 'datetime', _TradingDayDateTime)
+        monkeypatch.setattr(_md, 'datetime', _TradingDayDateTime)
 
         def _fake_quote(code):
             return {
@@ -687,7 +701,7 @@ class TestOrderbookWeekendGuard:
                 'ask4_price': None, 'ask4_vol': None, 'ask5_price': None, 'ask5_vol': None,
             }
 
-        monkeypatch.setattr(dc, '_fetch_realtime_quote_mootdx', _fake_quote)
+        monkeypatch.setattr(_md, '_fetch_realtime_quote_mootdx', _fake_quote)
 
         status, msg = dc.fetch_orderbook('600276', 'a_stock')
         assert status == 'success'
@@ -712,9 +726,9 @@ class TestValuationTencentFallback:
         conn.commit()
         conn.close()
 
-        monkeypatch.setattr(dc, '_fetch_valuation_akshare', lambda s, m: None)
-        monkeypatch.setattr(dc, '_fetch_valuation_baostock', lambda s, m: None)
-        monkeypatch.setattr(dc, '_fetch_valuation_tencent', lambda s, m: (12.3, 1.5, 1.2e11))
+        monkeypatch.setattr(_val, '_fetch_valuation_akshare', lambda s, m: None)
+        monkeypatch.setattr(_val, '_fetch_valuation_baostock', lambda s, m: None)
+        monkeypatch.setattr(_val, '_fetch_valuation_tencent', lambda s, m: (12.3, 1.5, 1.2e11))
 
         status, msg = dc.fetch_valuation('HK3690', 'hk_stock', force_full=True)
         assert status == 'success'
@@ -773,7 +787,7 @@ class TestHkShareholder:
     """021I：westock shareholder 解析 + 港股机构持仓/股东行为三态"""
 
     def _reset_cache(self, monkeypatch):
-        monkeypatch.setattr(dc, '_HK_SHAREHOLDER_CACHE', {})
+        monkeypatch.setattr(_hs, '_HK_SHAREHOLDER_CACHE', {})
 
     def test_parse_shareholder(self):
         parsed = dc._parse_westock_shareholder(_SHAREHOLDER_MD)
@@ -797,7 +811,7 @@ class TestHkShareholder:
             captured['code'] = code
             return _SHAREHOLDER_MD
 
-        monkeypatch.setattr(dc, '_westock_cli_query', fake_cli)
+        monkeypatch.setattr(_hs, '_westock_cli_query', fake_cli)
         data = dc._fetch_holder_structure_hk('HK3690')
         assert captured['code'] == 'hk03690', '4位库内代码须左补零为5位'
         assert data['inst_ratio'] == 31.61
@@ -810,15 +824,15 @@ class TestHkShareholder:
     def test_holder_increase_hk_three_states(self, monkeypatch):
         # True：机构净增持（changeShares>0 且增持机构数>0）
         self._reset_cache(monkeypatch)
-        monkeypatch.setattr(dc, '_westock_cli_query', lambda cmd, code, date_str='': _SHAREHOLDER_MD_INCREASE)
+        monkeypatch.setattr(_hs, '_westock_cli_query', lambda cmd, code, date_str='': _SHAREHOLDER_MD_INCREASE)
         assert dc._fetch_holder_increase_hk('HK3690') is True
         # False：机构净减持（changeShares<0）
         self._reset_cache(monkeypatch)
-        monkeypatch.setattr(dc, '_westock_cli_query', lambda cmd, code, date_str='': _SHAREHOLDER_MD)
+        monkeypatch.setattr(_hs, '_westock_cli_query', lambda cmd, code, date_str='': _SHAREHOLDER_MD)
         assert dc._fetch_holder_increase_hk('HK3690') is False
         # None：接口失败
         self._reset_cache(monkeypatch)
-        monkeypatch.setattr(dc, '_westock_cli_query', lambda cmd, code, date_str='': None)
+        monkeypatch.setattr(_hs, '_westock_cli_query', lambda cmd, code, date_str='': None)
         assert dc._fetch_holder_increase_hk('HK3690') is None
 
     def test_save_holder_structure_hk(self, tmp_path, monkeypatch):
@@ -912,17 +926,19 @@ class TestCapitalWestockPrimary:
 
     def _patch_downstream(self, monkeypatch):
         """屏蔽 westock/EM 之后的降级层（新浪/估算），测试不应触达"""
-        monkeypatch.setattr(dc, '_fetch_capital_flow_sina_main', lambda *a, **k: None)
-        monkeypatch.setattr(dc, '_fetch_capital_flow_sina', lambda *a, **k: [])
-        monkeypatch.setattr(dc, '_fetch_capital_flow_netease', lambda *a, **k: [])
+        monkeypatch.setattr(_cf, '_fetch_capital_flow_sina_main', lambda *a, **k: None)
+        monkeypatch.setattr(_cf, '_fetch_capital_flow_sina', lambda *a, **k: [])
+        monkeypatch.setattr(_cf, '_fetch_capital_flow_netease', lambda *a, **k: [])
 
     def test_westock_primary_short_circuits_em(self, tmp_path, monkeypatch):
         """westock 成功 → 东财三层不被调用，行写为 capital_source='westock'"""
         self._make_db(tmp_path, monkeypatch)
-        monkeypatch.setattr(dc, 'datetime', _AfterCloseDateTime)
+        monkeypatch.setattr(_cf, 'datetime', _AfterCloseDateTime)
+        # OPT-3：_is_intraday_session 在 kline 内也消费 datetime，须同步固定（单体时代同模块可见补丁）
+        monkeypatch.setattr(_kl, 'datetime', _AfterCloseDateTime)
         self._patch_downstream(monkeypatch)
-        monkeypatch.setattr(dc, '_westock_cooldown_active', lambda: False)
-        monkeypatch.setattr(dc, '_fetch_capital_flow_westock', lambda *a, **k: _westock_row())
+        monkeypatch.setattr(_cw, '_westock_cooldown_active', lambda: False)
+        monkeypatch.setattr(_cf, '_fetch_capital_flow_westock', lambda *a, **k: _westock_row())
 
         em_calls = []
 
@@ -930,8 +946,8 @@ class TestCapitalWestockPrimary:
             em_calls.append(1)
             raise AssertionError('021L：westock 成功后东财 push2his 不应被调用')
 
-        monkeypatch.setattr(dc, '_fetch_capital_flow_em_individual', _em_spy)
-        monkeypatch.setattr(dc, '_em_banned', lambda: True)  # akshare 层直接跳过
+        monkeypatch.setattr(_cf, '_fetch_capital_flow_em_individual', _em_spy)
+        monkeypatch.setattr(_cf, '_em_banned', lambda: True)  # akshare 层直接跳过
 
         status, msg = dc.fetch_capital_flow('600276', 'a_stock')
         assert status == 'success'
@@ -953,12 +969,14 @@ class TestCapitalWestockPrimary:
     def test_westock_fail_falls_back_to_em(self, tmp_path, monkeypatch):
         """westock 失败 → 东财 push2his 兜底写入（capital_source=NULL）"""
         self._make_db(tmp_path, monkeypatch, name='cap_em_fb.db')
-        monkeypatch.setattr(dc, 'datetime', _AfterCloseDateTime)
+        monkeypatch.setattr(_cf, 'datetime', _AfterCloseDateTime)
+        # OPT-3：_is_intraday_session 在 kline 内也消费 datetime，须同步固定（单体时代同模块可见补丁）
+        monkeypatch.setattr(_kl, 'datetime', _AfterCloseDateTime)
         self._patch_downstream(monkeypatch)
-        monkeypatch.setattr(dc, '_fetch_capital_flow_westock', lambda *a, **k: None)
-        monkeypatch.setattr(dc, '_fetch_capital_flow_em_individual', lambda *a, **k: _em_history_rows())
-        monkeypatch.setattr(dc, '_fetch_capital_flow_em', lambda *a, **k: [])
-        monkeypatch.setattr(dc, '_em_banned', lambda: True)
+        monkeypatch.setattr(_cf, '_fetch_capital_flow_westock', lambda *a, **k: None)
+        monkeypatch.setattr(_cf, '_fetch_capital_flow_em_individual', lambda *a, **k: _em_history_rows())
+        monkeypatch.setattr(_cf, '_fetch_capital_flow_em', lambda *a, **k: [])
+        monkeypatch.setattr(_cf, '_em_banned', lambda: True)
 
         status, msg = dc.fetch_capital_flow('600276', 'a_stock')
         assert status == 'success'
@@ -979,7 +997,9 @@ class TestCapitalWestockPrimary:
     def test_existing_westock_row_skips_all_sources(self, tmp_path, monkeypatch):
         """当日已有 westock 行 → 前置校验直接跳过，任何网络层都不触达（021L 防覆盖语义）"""
         self._make_db(tmp_path, monkeypatch, name='cap_skip.db')
-        monkeypatch.setattr(dc, 'datetime', _AfterCloseDateTime)
+        monkeypatch.setattr(_cf, 'datetime', _AfterCloseDateTime)
+        # OPT-3：_is_intraday_session 在 kline 内也消费 datetime，须同步固定（单体时代同模块可见补丁）
+        monkeypatch.setattr(_kl, 'datetime', _AfterCloseDateTime)
         conn = db_manager.get_connection()
         conn.execute(
             "INSERT INTO raw_capital_flow (stock_id, trade_date, main_net_inflow, is_estimated, capital_source) "
@@ -1001,8 +1021,8 @@ class TestCapitalWestockPrimary:
             '_fetch_capital_flow_em',
             '_fetch_capital_flow_sina_main',
         ):
-            monkeypatch.setattr(dc, fn, _boom(fn))
-        monkeypatch.setattr(dc, '_em_banned', lambda: True)
+            monkeypatch.setattr(_cf, fn, _boom(fn))
+        monkeypatch.setattr(_cf, '_em_banned', lambda: True)
 
         status, msg = dc.fetch_capital_flow('600276', 'a_stock')
         assert status == 'success'
@@ -1011,7 +1031,9 @@ class TestCapitalWestockPrimary:
     def test_sina_row_still_retried(self, tmp_path, monkeypatch):
         """当日仅新浪顶替行（sina_main）→ 不跳过，westock 主源可覆盖升级"""
         self._make_db(tmp_path, monkeypatch, name='cap_sina.db')
-        monkeypatch.setattr(dc, 'datetime', _AfterCloseDateTime)
+        monkeypatch.setattr(_cf, 'datetime', _AfterCloseDateTime)
+        # OPT-3：_is_intraday_session 在 kline 内也消费 datetime，须同步固定（单体时代同模块可见补丁）
+        monkeypatch.setattr(_kl, 'datetime', _AfterCloseDateTime)
         self._patch_downstream(monkeypatch)
         conn = db_manager.get_connection()
         conn.execute(
@@ -1022,13 +1044,13 @@ class TestCapitalWestockPrimary:
         conn.commit()
         conn.close()
 
-        monkeypatch.setattr(dc, '_fetch_capital_flow_westock', lambda *a, **k: _westock_row())
+        monkeypatch.setattr(_cf, '_fetch_capital_flow_westock', lambda *a, **k: _westock_row())
 
         def _em_spy(*a, **k):
             raise AssertionError('sina 行应被 westock 主源覆盖，无需东财')
 
-        monkeypatch.setattr(dc, '_fetch_capital_flow_em_individual', _em_spy)
-        monkeypatch.setattr(dc, '_em_banned', lambda: True)
+        monkeypatch.setattr(_cf, '_fetch_capital_flow_em_individual', _em_spy)
+        monkeypatch.setattr(_cf, '_em_banned', lambda: True)
 
         status, msg = dc.fetch_capital_flow('600276', 'a_stock')
         assert status == 'success'
@@ -1063,16 +1085,18 @@ class TestCapitalSupplementListWestock:
         conn.commit()
         conn.close()
 
-        monkeypatch.setattr(dc, 'datetime', _TradingDayDateTime)
+        monkeypatch.setattr(_cf, 'datetime', _TradingDayDateTime)
+        # OPT-3：_is_intraday_session 在 kline 内也消费 datetime，须同步固定（单体时代同模块可见补丁）
+        monkeypatch.setattr(_kl, 'datetime', _TradingDayDateTime)
         # THS 批量源正常返回（仅辅助指标）
         monkeypatch.setattr(
-            dc,
+            _cf,
             '_fetch_capital_flow_ths_batch',
             lambda: pd.DataFrame([{'股票代码': '600276', '净额': '1.2亿'}]),
         )
         em_calls = []
         monkeypatch.setattr(
-            dc,
+            _cf,
             '_em_batch_collect',
             lambda symbols, **k: em_calls.append(list(symbols)) or {'success_count': 0, 'fail_count': 0, 'source': 'mock'},
         )
@@ -1093,15 +1117,17 @@ class TestCapitalSupplementListWestock:
         conn.commit()
         conn.close()
 
-        monkeypatch.setattr(dc, 'datetime', _TradingDayDateTime)
+        monkeypatch.setattr(_cf, 'datetime', _TradingDayDateTime)
+        # OPT-3：_is_intraday_session 在 kline 内也消费 datetime，须同步固定（单体时代同模块可见补丁）
+        monkeypatch.setattr(_kl, 'datetime', _TradingDayDateTime)
         monkeypatch.setattr(
-            dc,
+            _cf,
             '_fetch_capital_flow_ths_batch',
             lambda: pd.DataFrame([{'股票代码': '600276', '净额': '1.2亿'}]),
         )
         em_calls = []
         monkeypatch.setattr(
-            dc,
+            _cf,
             '_em_batch_collect',
             lambda symbols, **k: em_calls.append(list(symbols)) or {'success_count': 1, 'fail_count': 0, 'source': 'mock'},
         )

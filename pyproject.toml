@@ -49,6 +49,9 @@ ignore = [
 # 以下文件含 sys.path 注入 / 第三方库延迟导入等必要模式，
 # 其模块级导入无法置于文件顶部，豁免 E402：
 "modules/data_collector.py" = ["E402"]
+"modules/collector/_env.py" = ["E402", "F401"]  # OPT-3 环境基座：路径守卫 + 公共配置绑定（供 facade 再导出）
+"modules/collector/http_client.py" = ["E402"]   # OPT-3：akshare 必须在 requests 补丁之后导入
+"modules/collector/valuation.py" = ["E402"]     # OPT-3：baostock 登录生命周期导入位于函数定义之后
 "scripts/*.py" = ["E402"]
 "tests/conftest.py" = ["E402"]
 "test_us11_consistency.py" = ["E402"]

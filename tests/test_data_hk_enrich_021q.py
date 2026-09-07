@@ -12,6 +12,8 @@
 import database.db_manager as db_manager
 import modules.data_collector as dc
 from modules.capital_detail import compute_capital_detail
+from modules.collector import capital_westock as _cwk  # noqa: E402  # OPT-3 补丁指向实现子模块
+from modules.collector import holder_structure as _hs  # noqa: E402
 from modules.data_contract import StockData
 
 # ============================================================
@@ -44,13 +46,13 @@ class TestWestockSouthbound:
     """hkfund _lgtHoldInfo → 南下资金字段解析。"""
 
     def test_lgt_fields_parsed(self, monkeypatch):
-        monkeypatch.setattr(dc, '_westock_cooldown_active', lambda: False)
+        monkeypatch.setattr(_cwk, '_westock_cooldown_active', lambda: False)
 
         def fake_cli(cmd, code, date_str=''):
             assert cmd == 'hkfund'
             return _HKFUND_MD_LGT
 
-        monkeypatch.setattr(dc, '_westock_cli_query', fake_cli)
+        monkeypatch.setattr(_cwk, '_westock_cli_query', fake_cli)
         row = dc._fetch_capital_flow_westock('HK0700', 'hk_stock')
         assert row is not None
         # LgtCapChgDaily=1110029191.83 港元 → 111002.92 万港元
@@ -62,8 +64,8 @@ class TestWestockSouthbound:
 
     def test_no_lgt_fields_none(self, monkeypatch):
         """非港股通标的（无 _lgtHoldInfo 列）→ 南下两字段 None，不报错。"""
-        monkeypatch.setattr(dc, '_westock_cooldown_active', lambda: False)
-        monkeypatch.setattr(dc, '_westock_cli_query', lambda cmd, code, date_str='': _HKFUND_MD_NO_LGT)
+        monkeypatch.setattr(_cwk, '_westock_cooldown_active', lambda: False)
+        monkeypatch.setattr(_cwk, '_westock_cli_query', lambda cmd, code, date_str='': _HKFUND_MD_NO_LGT)
         row = dc._fetch_capital_flow_westock('HK0700', 'hk_stock')
         assert row is not None
         assert row['south_net_buy'] is None
@@ -79,8 +81,8 @@ class TestInstCount:
         assert parsed['inst_prev']['instCount'] == '819'
 
     def test_fetch_maps_inst_count(self, monkeypatch):
-        monkeypatch.setattr(dc, '_HK_SHAREHOLDER_CACHE', {})
-        monkeypatch.setattr(dc, '_westock_cli_query', lambda cmd, code, date_str='': _SHAREHOLDER_MD_2Q)
+        monkeypatch.setattr(_hs, '_HK_SHAREHOLDER_CACHE', {})
+        monkeypatch.setattr(_hs, '_westock_cli_query', lambda cmd, code, date_str='': _SHAREHOLDER_MD_2Q)
         data = dc._fetch_holder_structure_hk('HK0700')
         assert data['inst_count'] == 805
         # (805-819)/819*100 = -1.71（机构数量下降）
@@ -92,9 +94,9 @@ class TestInstCount:
 
     def test_single_quarter_no_chg(self, monkeypatch):
         """只有一期数据时环比为 None，机构数量仍可存。"""
-        monkeypatch.setattr(dc, '_HK_SHAREHOLDER_CACHE', {})
+        monkeypatch.setattr(_hs, '_HK_SHAREHOLDER_CACHE', {})
         monkeypatch.setattr(
-            dc, '_westock_cli_query', lambda cmd, code, date_str='': _SHAREHOLDER_MD_2Q.split('2026 Q1')[0] + '\n'
+            _hs, '_westock_cli_query', lambda cmd, code, date_str='': _SHAREHOLDER_MD_2Q.split('2026 Q1')[0] + '\n'
         )
         data = dc._fetch_holder_structure_hk('HK0700')
         assert data['inst_count'] == 805

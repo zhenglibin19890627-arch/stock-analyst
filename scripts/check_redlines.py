@@ -126,10 +126,22 @@ def b24_build_capital_factors_anchor():
     return ok, ('锚点存在' if ok else '锚点缺失')
 
 
+def _read_collector_all():
+    """OPT-3（2026-09-07）起 modules/data_collector.py 为兼容 facade，实现拆分至 modules/collector/ 包。
+    内容锚点检查须扫 facade + 全包子源，保证红线对拆分后的真实实现生效（§6 豁免登记）。"""
+    parts = [_read('modules/data_collector.py')]
+    pkg_dir = os.path.join(BASE_DIR, 'modules', 'collector')
+    if os.path.isdir(pkg_dir):
+        for name in sorted(os.listdir(pkg_dir)):
+            if name.endswith('.py') and not name.startswith('__'):
+                parts.append(_read(os.path.join('modules', 'collector', name)))
+    return '\n'.join(parts)
+
+
 @_check('R15')
 def fetch_capital_flow_signature():
     """011：fetch_capital_flow(symbol, market) 签名不可加参数"""
-    src = _read('modules/data_collector.py')
+    src = _read_collector_all()
     ok = 'def fetch_capital_flow(symbol, market):' in src
     return ok, ('签名 (symbol, market) 未变' if ok else '签名被修改')
 
@@ -150,7 +162,7 @@ def scoring_filters_estimated_rows():
 @_check('R1')
 def estimate_fallback_marked():
     """估算兜底写入必须带 is_estimated=1 标记"""
-    src = _read('modules/data_collector.py')
+    src = _read_collector_all()
     ok = 'is_estimated=1' in src
     return ok, ('估算兜底带标记' if ok else '估算兜底标记缺失')
 
@@ -158,7 +170,7 @@ def estimate_fallback_marked():
 @_check('R2')
 def no_insert_or_replace_capital():
     """019K：raw_capital_flow 写入严禁 INSERT OR REPLACE（会清除已有字段）"""
-    src = _read('modules/data_collector.py')
+    src = _read_collector_all()
     bad = re.search(r'INSERT OR REPLACE INTO raw_capital_flow', src, re.IGNORECASE)
     return bad is None, ('未发现违规写入模式' if bad is None else '发现 INSERT OR REPLACE INTO raw_capital_flow')
 
@@ -166,7 +178,7 @@ def no_insert_or_replace_capital():
 @_check('R3')
 def westock_strict_date_match():
     """M-2（westock）：逐日历史必须校验 EndDate == date_str，严禁取错日"""
-    src = _read('modules/data_collector.py')
+    src = _read_collector_all()
     ok = "(row.get('EndDate') or '').strip() != date_str" in src
     return ok, ('westock EndDate 精确匹配校验存在' if ok else 'westock 日期校验缺失')
 
@@ -174,7 +186,7 @@ def westock_strict_date_match():
 @_check('R3')
 def lscjfb_strict_date_match():
     """M-2（新浪 lscjfb）：逐日历史必须 opendate == target_date 才写，严禁取最新行"""
-    src = _read('modules/data_collector.py')
+    src = _read_collector_all()
     ok = 'opendate != target_date' in src
     return ok, ('lscjfb opendate 精确匹配校验存在' if ok else 'lscjfb 日期校验缺失')
 
@@ -182,7 +194,7 @@ def lscjfb_strict_date_match():
 @_check('R4')
 def capital_weekend_guard():
     """019G/020L：非交易日（周六/周日）资金面全链路跳过"""
-    src = _read('modules/data_collector.py')
+    src = _read_collector_all()
     ok = 'datetime.now(_CN_TZ).weekday() >= 5' in src
     return ok, ('fetch_capital_flow 周末守卫存在' if ok else '周末守卫缺失')
 
@@ -190,7 +202,7 @@ def capital_weekend_guard():
 @_check('R4')
 def orderbook_weekend_guard():
     """021C：五档盘口（mootdx）非交易日跳过，防周末脏行"""
-    src = _read('modules/data_collector.py')
+    src = _read_collector_all()
     ok = '非交易日跳过（mootdx 盘口）' in src
     return ok, ('盘口周末守卫存在' if ok else '盘口周末守卫缺失')
 
@@ -198,7 +210,7 @@ def orderbook_weekend_guard():
 @_check('R5')
 def net_calls_via_timeout_wrapper():
     """新浪/腾讯网络调用必须走模块级 _call_with_timeout，严禁裸调用"""
-    src = _read('modules/data_collector.py')
+    src = _read_collector_all()
     ok = 'def _call_with_timeout' in src
     return ok, ('超时包装函数存在' if ok else '_call_with_timeout 缺失')
 
@@ -242,18 +254,25 @@ def backup_before_destructive():
 
 @_check('R8')
 def business_modules_no_direct_akshare():
-    """数据源解耦：业务模块严禁直接 import akshare（仅数据采集模块允许）"""
-    allowed = {'data_collector.py', 'index_collector.py', 'news_collector.py'}
+    """数据源解耦：业务模块严禁直接 import akshare（仅数据采集层允许）
+    OPT-3（2026-09-07）：递归扫描 modules/ 全树；modules/collector/ 子包为采集层白名单。"""
+    allowed_names = {'data_collector.py', 'index_collector.py', 'news_collector.py'}
     offenders = []
-    for name in os.listdir(os.path.join(BASE_DIR, 'modules')):
-        if not name.endswith('.py') or name in allowed or name.startswith('__'):
-            continue
-        src = _read(os.path.join('modules', name))
-        if re.search(r'^\s*(import akshare|from akshare)', src, re.MULTILINE):
-            offenders.append(name)
+    modules_dir = os.path.join(BASE_DIR, 'modules')
+    for root, dirs, files in os.walk(modules_dir):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for name in files:
+            if not name.endswith('.py') or name.startswith('__'):
+                continue
+            rel = os.path.relpath(os.path.join(root, name), BASE_DIR).replace('\\', '/')
+            if os.path.basename(name) in allowed_names or rel.startswith('modules/collector/'):
+                continue
+            src = _read(rel)
+            if re.search(r'^\s*(import akshare|from akshare)', src, re.MULTILINE):
+                offenders.append(rel)
     if offenders:
         return False, f'业务模块直接耦合 akshare: {offenders}'
-    return True, '业务模块无直接 akshare 依赖'
+    return True, '业务模块无直接 akshare 依赖（含 collector 包递归扫描）'
 
 
 @_check('R8')
@@ -329,7 +348,7 @@ def dependency_whitelist():
 @_check('R17')
 def westock_node_guard():
     """零代码约束：westock npm CLI 依赖 Node 环境，必须有优雅降级（无 Node 跳过该层）"""
-    src = _read('modules/data_collector.py')
+    src = _read_collector_all()
     ok = "shutil.which('npx')" in src and "shutil.which('npm')" in src
     return ok, ('westock Node 可用性守卫存在' if ok else 'westock Node 守卫缺失')
 

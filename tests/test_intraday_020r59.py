@@ -7,6 +7,9 @@ import pytest
 
 from database import db_manager
 from modules import data_collector as dc
+from modules.collector import forecast_express as _fx2  # noqa: E402
+from modules.collector import kline as _kline  # noqa: E402  # OPT-3 补丁指向消费方子模块
+from modules.collector import sentiment_industry as _si2  # noqa: E402
 
 
 class _FakeDT:
@@ -20,7 +23,10 @@ class _FakeDT:
 
 
 def _patch_now(monkeypatch, year=2026, month=8, day=13, hour=10, minute=30):
-    monkeypatch.setattr(dc, 'datetime', _FakeDT(_dt.datetime(year, month, day, hour, minute)))
+    # OPT-3（2026-09-07）：datetime 消费方在 kline/sentiment_industry/forecast_express 各自模块内，
+    # 须逐模块固定（单体时代同一模块命名空间天然可见补丁）
+    for _mod in (_kline, _si2, _fx2):
+        monkeypatch.setattr(_mod, 'datetime', _FakeDT(_dt.datetime(year, month, day, hour, minute)))
 
 
 @pytest.fixture
@@ -89,7 +95,7 @@ class TestIntradayKlineRefresh:
             def __init__(self, text):
                 self.text = text
 
-        monkeypatch.setattr(dc, '_http_get', lambda url: _FakeResp(quote_text))
+        monkeypatch.setattr(_kline, '_http_get', lambda url: _FakeResp(quote_text))
 
         status, msg = dc.fetch_kline('600276', 'a_stock')
         assert status == 'success'
@@ -113,7 +119,7 @@ class TestIntradayKlineRefresh:
         def _boom(*a, **k):
             raise AssertionError('非盘中不应重拉腾讯行情')
 
-        monkeypatch.setattr(dc, '_http_get', _boom)
+        monkeypatch.setattr(_kline, '_http_get', _boom)
 
         status, msg = dc.fetch_kline('600276', 'a_stock')
         assert status == 'success'
@@ -175,7 +181,7 @@ class TestForecastExpressDayGate020R60:
         def _boom(*a, **k):
             raise AssertionError('当日已采集不应再查全市场预告表')
 
-        monkeypatch.setattr(dc, '_get_forecast_df_for_period', _boom)
+        monkeypatch.setattr(_fx2, '_get_forecast_df_for_period', _boom)
         status, msg = dc.collect_forecast(1, '600276', 'a_stock')
         assert status == 'success'
         assert '同日跳过' in msg
@@ -183,7 +189,7 @@ class TestForecastExpressDayGate020R60:
     def test_express_day_gate(self, idb, monkeypatch):
         self._seed_status(idb, 'express')
         monkeypatch.setattr(
-            dc, '_get_express_df_for_period',
+            _fx2, '_get_express_df_for_period',
             lambda p: (_ for _ in ()).throw(AssertionError('当日已采集不应再查全市场快报表')),
         )
         status, msg = dc.collect_express(1, '600276', 'a_stock')
@@ -191,7 +197,7 @@ class TestForecastExpressDayGate020R60:
         assert '同日跳过' in msg
 
     def test_forecast_no_record_proceeds(self, idb, monkeypatch):
-        monkeypatch.setattr(dc, '_get_forecast_df_for_period', lambda p: pd.DataFrame())
+        monkeypatch.setattr(_fx2, '_get_forecast_df_for_period', lambda p: pd.DataFrame())
         status, msg = dc.collect_forecast(1, '600276', 'a_stock')
         assert status == 'success'
         assert '暂无' in msg

@@ -16,6 +16,7 @@ from database import db_manager
 from database.db_manager import get_connection, init_database
 from modules import backfill_scheduler as bs
 from modules import data_collector as dc
+from modules.collector import sentiment_industry as _si  # noqa: E402  # OPT-3 补丁指向实现子模块
 
 # ============================================================
 # 工具
@@ -49,9 +50,9 @@ def tmp_db(tmp_path, monkeypatch):
 
 def test_industry_em_direct_success(monkeypatch):
     """EM 直连返回有效 f127 → 直接采用（东财行业名体系）"""
-    monkeypatch.setattr(dc, '_em_banned', lambda: False)
+    monkeypatch.setattr(_si, '_em_banned', lambda: False)
     monkeypatch.setattr(
-        dc,
+        _si,
         '_http_get_em',
         lambda *a, **k: _FakeResp({'data': {'f127': '半导体'}}),
     )
@@ -66,8 +67,8 @@ def test_industry_patient_controls_retry_rounds(monkeypatch):
         captured['max_retries'] = max_retries
         return _FakeResp({'data': {'f127': '橡胶'}})
 
-    monkeypatch.setattr(dc, '_em_banned', lambda: False)
-    monkeypatch.setattr(dc, '_http_get_em', fake_get)
+    monkeypatch.setattr(_si, '_em_banned', lambda: False)
+    monkeypatch.setattr(_si, '_http_get_em', fake_get)
     dc.fetch_stock_industry('002716', 'a_stock')
     assert captured['max_retries'] == 1
     dc.fetch_stock_industry('002716', 'a_stock', patient=True)
@@ -76,9 +77,9 @@ def test_industry_patient_controls_retry_rounds(monkeypatch):
 
 def test_industry_em_dash_falls_to_akshare(monkeypatch):
     """EM 直连返回 '-'（无效）→ 降级 akshare 备源"""
-    monkeypatch.setattr(dc, '_em_banned', lambda: False)
+    monkeypatch.setattr(_si, '_em_banned', lambda: False)
     monkeypatch.setattr(
-        dc, '_http_get_em', lambda *a, **k: _FakeResp({'data': {'f127': '-'}})
+        _si, '_http_get_em', lambda *a, **k: _FakeResp({'data': {'f127': '-'}})
     )
     monkeypatch.setattr(
         dc.ak,
@@ -90,7 +91,7 @@ def test_industry_em_dash_falls_to_akshare(monkeypatch):
 
 def test_industry_all_fail_local_map(monkeypatch):
     """EM 直连/akshare 全挂 + 本地映射命中 → 返回映射值"""
-    monkeypatch.setattr(dc, '_em_banned', lambda: True)  # 熔断期跳过 EM 直连
+    monkeypatch.setattr(_si, '_em_banned', lambda: True)  # 熔断期跳过 EM 直连
 
     def _raise(symbol):
         raise ConnectionError('EM down')
@@ -101,7 +102,7 @@ def test_industry_all_fail_local_map(monkeypatch):
 
 def test_industry_all_fail_unmapped(monkeypatch):
     """三级源全挂且无本地映射 → 返回'未分类'（不抛异常，不阻塞主流程）"""
-    monkeypatch.setattr(dc, '_em_banned', lambda: True)
+    monkeypatch.setattr(_si, '_em_banned', lambda: True)
 
     def _raise(symbol):
         raise ConnectionError('EM down')
@@ -116,7 +117,7 @@ def test_industry_hk_no_network(monkeypatch):
     def _boom(*a, **k):
         raise AssertionError('港股不应发起行业请求')
 
-    monkeypatch.setattr(dc, '_http_get_em', _boom)
+    monkeypatch.setattr(_si, '_http_get_em', _boom)
     assert dc.fetch_stock_industry('00700', 'hk_stock') == '港股'
 
 

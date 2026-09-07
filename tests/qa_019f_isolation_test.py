@@ -18,6 +18,17 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from modules import data_adapter  # noqa: E402  # sys.path 注入后再导入
 
 
+def _read_collector_all():
+    """OPT-3（2026-09-07）起 data_collector.py 为兼容 facade，实现拆分至 modules/collector/ 包。
+    源码锚点断言须扫 facade + 全包子源。"""
+    parts = [(PROJECT_ROOT / 'modules' / 'data_collector.py').read_text(encoding='utf-8')]
+    pkg = PROJECT_ROOT / 'modules' / 'collector'
+    for p in sorted(pkg.glob('*.py')):
+        if not p.name.startswith('__'):
+            parts.append(p.read_text(encoding='utf-8'))
+    return '\n'.join(parts)
+
+
 def _make_test_db(rows):
     """创建临时测试库，写入指定行数据"""
     db_fd, db_path = tempfile.mkstemp(suffix='.db')
@@ -160,8 +171,7 @@ class TestInspectStackProtection(unittest.TestCase):
     def test_07_except_catches_exception_not_base(self):
         """T7: 源码确认 except Exception（非 BaseException）"""
         import re
-        dc_path = PROJECT_ROOT / 'modules' / 'data_collector.py'
-        source = dc_path.read_text(encoding='utf-8')
+        source = _read_collector_all()
         pattern = r"except Exception:\s*\n\s*_trigger_source = 'batch-analyze'"
         self.assertIsNotNone(re.search(pattern, source),
                              "未找到 except Exception → batch-analyze 块")
@@ -191,8 +201,7 @@ class TestFilterExpressionConsistency(unittest.TestCase):
     def test_09_data_collector_supplement_check(self):
         """T9: data_collector 补采清单过滤（间接评分链路）"""
         canonical = "AND (is_estimated = 0 OR is_estimated IS NULL)"
-        dc_path = PROJECT_ROOT / 'modules' / 'data_collector.py'
-        source = dc_path.read_text(encoding='utf-8')
+        source = _read_collector_all()
         count = source.count(canonical)
         self.assertGreaterEqual(count, 2,
             f"data_collector: 期望至少2处补采过滤, 实际{count}处")

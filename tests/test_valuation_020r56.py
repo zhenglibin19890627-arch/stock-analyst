@@ -8,6 +8,7 @@ import pytest
 
 from database import db_manager
 from modules import data_collector as dc
+from modules.collector import valuation as _val  # noqa: E402  # OPT-3 补丁指向实现子模块
 
 
 @pytest.fixture
@@ -51,10 +52,10 @@ class TestValuationSameDaySkip:
         def _fail_bs(*a, **k):
             raise RuntimeError('baostock 不支持港股')
 
-        monkeypatch.setattr(dc, '_fetch_valuation_akshare', _fail_ak)
-        monkeypatch.setattr(dc, '_fetch_valuation_baostock', _fail_bs)
+        monkeypatch.setattr(_val, '_fetch_valuation_akshare', _fail_ak)
+        monkeypatch.setattr(_val, '_fetch_valuation_baostock', _fail_bs)
         monkeypatch.setattr(
-            dc, '_fetch_valuation_tencent', lambda s, m: (-20.83, 4.88, 5.385e11)
+            _val, '_fetch_valuation_tencent', lambda s, m: (-20.83, 4.88, 5.385e11)
         )
 
         status, msg = dc.fetch_valuation('HK3690', 'hk_stock')
@@ -79,9 +80,9 @@ class TestValuationSameDaySkip:
         def _boom(*a, **k):
             raise AssertionError('成功当日不应再触发采集')
 
-        monkeypatch.setattr(dc, '_fetch_valuation_akshare', _boom)
-        monkeypatch.setattr(dc, '_fetch_valuation_baostock', _boom)
-        monkeypatch.setattr(dc, '_fetch_valuation_tencent', _boom)
+        monkeypatch.setattr(_val, '_fetch_valuation_akshare', _boom)
+        monkeypatch.setattr(_val, '_fetch_valuation_baostock', _boom)
+        monkeypatch.setattr(_val, '_fetch_valuation_tencent', _boom)
 
         status, msg = dc.fetch_valuation('HK3690', 'hk_stock')
         assert status == 'success'
@@ -111,10 +112,10 @@ class TestValuationSameDaySkip:
         def _fail_bs(*a, **k):
             raise RuntimeError('baostock 不支持港股')
 
-        monkeypatch.setattr(dc, '_fetch_valuation_akshare', _fail_ak)
-        monkeypatch.setattr(dc, '_fetch_valuation_baostock', _fail_bs)
+        monkeypatch.setattr(_val, '_fetch_valuation_akshare', _fail_ak)
+        monkeypatch.setattr(_val, '_fetch_valuation_baostock', _fail_bs)
         monkeypatch.setattr(
-            dc, '_fetch_valuation_tencent', lambda s, m: (8.41, 2.01, 1.73e11)
+            _val, '_fetch_valuation_tencent', lambda s, m: (8.41, 2.01, 1.73e11)
         )
 
         status, msg = dc.fetch_valuation('HK3690', 'hk_stock')
