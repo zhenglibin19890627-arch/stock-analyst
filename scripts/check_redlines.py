@@ -310,7 +310,7 @@ def dependency_whitelist():
     """零代码约束：依赖必须落在白名单（新增需评审并更新 RED_LINES.md 附录A）"""
     allowed = {
         'akshare', 'flask', 'pandas', 'numpy', 'python-dateutil', 'pydantic',
-        'requests', 'openpyxl', 'pytest', 'pystray', 'pillow',
+        'requests', 'openpyxl', 'pytest', 'pytest-timeout', 'pystray', 'pillow',
     }
     names = []
     for line in _read('requirements.txt').splitlines():

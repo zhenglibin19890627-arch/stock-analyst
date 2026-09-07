@@ -84,7 +84,8 @@ python app.py
 ## 验证与治理
 
 ```bash
-python -m pytest tests/            # 单元/冒烟测试（隔离临时库，不触网）
+python -m pytest tests/            # 单元/冒烟测试（隔离临时库，不触网；默认 fast 层 <60s）
+python -m pytest tests/ -m "slow or not slow"   # 全量（含真实时钟退避的 slow 层）
 python scripts/check_redlines.py   # 红线自动核验
 ruff check .
 mypy app.py config.py modules

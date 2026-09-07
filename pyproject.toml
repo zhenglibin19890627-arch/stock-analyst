@@ -20,12 +20,14 @@ requires-python = ">=3.12"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-# 排除非源码目录（报告/日志/截图/文档均为非 .py 产物，避免误读编码报错）
+# 排除非源码目录（报告/日志/截图/文档均为非 .py 产物，避免误读编码报错；
+# scripts/archive 为一次性探针脚本归档，不再参与 lint 门禁——OPT-1，2026-09-07）
 extend-exclude = [
     "reports",
     "logs",
     "screenshots",
     "docs",
+    "scripts/archive",
 ]
 
 # -------------------- Ruff：Lint 规则 --------------------
@@ -80,3 +82,13 @@ files = [
 # 第三方数据源库无类型 stub，统一忽略
 module = ["akshare.*", "pandas.*", "numpy.*"]
 ignore_missing_imports = true
+
+# -------------------- Pytest：测试分层与看门狗（OPT-5，2026-09-07） --------------------
+# 分层动因：全量套件基线 431s，其中 TestTickBackoff 等真实时钟退避验证占 415s（96%），
+# 其余 750+ 用例全部 <0.4s。默认跳过 slow 层，使日常验证 <60s；
+# 全量运行：pytest -m "slow or not slow"
+[tool.pytest.ini_options]
+markers = [
+    "slow: 慢速测试（真实时钟/退避验证，单例可达 2 分钟）。默认跳过；全量运行用 -m \"slow or not slow\"",
+]
+addopts = "-m \"not slow\" --timeout=60"

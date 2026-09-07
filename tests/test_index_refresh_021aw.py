@@ -103,6 +103,9 @@ class TestMaybeRefreshStaleIndexes:
         assert ok is False  # 失败不抛，等待下轮巡检
 
 
+# OPT-5：真实定时器验证（基线实测 6.3s），默认跳过；全量运行：pytest -m "slow or not slow"
+@pytest.mark.slow
+@pytest.mark.timeout(600)
 def test_hk_batch_refreshes_indexes(monkeypatch):
     """港股批次(16:10)完成后必须追加指数刷新（021AW 主修复）。"""
     import modules.daily_report as dr
@@ -119,6 +122,9 @@ def test_hk_batch_refreshes_indexes(monkeypatch):
     assert order == ['report', 'index']
 
 
+# OPT-5：真实时钟自愈验证（基线实测 34.9s），默认跳过；全量运行：pytest -m "slow or not slow"
+@pytest.mark.slow
+@pytest.mark.timeout(600)
 def test_tick_self_heals_even_without_stock_gaps(idx_env, monkeypatch):
     """空转巡检（无个股缺口）时指数自愈仍生效且按低频间隔续排。"""
     from modules import backfill_scheduler

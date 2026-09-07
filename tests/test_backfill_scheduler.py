@@ -123,6 +123,11 @@ class TestGapDetection:
         assert 'ths' not in gaps[3]['dims']
 
 
+# OPT-5：真实时钟退避验证（time.sleep 累积，基线实测 4 例共 374s），
+# 默认跳过（pyproject addopts -m "not slow"）；全量运行：pytest -m "slow or not slow"
+@pytest.mark.slow
+# 全量运行时放宽单测超时看门狗（默认 60s 不够真实退避）
+@pytest.mark.timeout(600)
 class TestTickBackoff:
     def _run_tick(self, monkeypatch, collect_results):
         """执行一次 _tick（patch 采集与调度），返回注册的下一间隔。"""

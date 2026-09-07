@@ -99,11 +99,15 @@ python app.py
 
 ```bash
 # 标准验证命令（在项目根目录运行）
-python -m pytest tests/
+python -m pytest tests/            # 默认 = fast 层（实测 ~15s；跳过 slow 标记的真实时钟退避测试，OPT-5 分层）
+python -m pytest tests/ -m "slow or not slow"   # 全量（含 slow 层，约 7~8 分钟）
 python scripts/check_redlines.py   # 红线自动核验（021A，随 pytest 执行）
 ruff check .
 mypy app.py config.py modules
 ```
+
+> **测试分层（OPT-5，2026-09-07）**：`pyproject.toml` 设默认 `addopts = -m "not slow" --timeout=60`。
+> `slow` 标记（`TestTickBackoff` 等 6 例，真实时钟退避验证）默认跳过；CI 与全量验证用 `-m "slow or not slow"`。
 
 > **测试目录说明**：项目根目录下已建立独立 `tests/` 目录，作为标准单元测试入口，包含：
 > - `tests/test_scoring_engine.py` — 评分引擎（scoring_engine）单元测试，覆盖子项评分函数、权重应用与降级机制、评级映射及端到端 analyze()

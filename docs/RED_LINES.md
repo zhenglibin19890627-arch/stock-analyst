@@ -102,6 +102,7 @@
 | 2026-08-22 | **R13 `advisor.generate_advice`** / `config.py` / 新模块 `modules/rating_hysteresis.py` / `tests/` | 021AG：评级变更迟滞（抗抖动）——`generate_advice` 步骤 2 与 3 之间新增 2b：分数跨过档位边界但未达 **±3 分迟滞带** 时维持原档（升档需 ≥目标档 min+3；降档需 <原档 min−3；多档跳变天然满足立即换挡；首次评级不受迟滞影响）。迟滞后评级贯穿全链路（操作建议/风险提示/is_change/写库/日报同一口径）；`_save_analysis_results_for_v5` 移至迟滞之后（analysis_results 与 ratings_history 必须同档）；结果新增 `rating_hysteresis` 字段、markdown 附迟滞说明。边界取数与评分引擎同源（A股 RATING_THRESHOLDS / 港股 hk_stock.rating_overrides 热加载），**评级档位定义本身零改动**。依据：实测 67% 改评间隔 ≤3 天、42% 评级日分数距边界 ≤3 分，历史回放仿真改评 263→162（−38%）。回退：`config.RATING_HYSTERESIS_ENABLED=False` 即恢复旧行为。签名、返回结构（仅新增键）、R9/R10 写库不变量不变 | 用户（021AG 批准） |
 | 2026-08-28 | **R7 `scoring_engine.py`**（仅 `score_sentiment` 映射曲线）/ `config_weights.json`（a_stock 权重 + 7 行业覆盖）/ `tests/` | 021BC：消息面非对称映射 + 降权——①`score_sentiment` 改非对称曲线：s≤0 保持 (s+1)×48 全额惩罚，s>0 斜率减半 48+s×24 封顶 72（原对称曲线极多 95→72）；②A股 news 权重 0.1504→0.08，腾出 0.0704 按现值比例回填 k/f/c；7 个行业覆盖的 news 等比降至 0.08 同口径。**002 校准档位（margin 68/88、main 85、vol_ratio 80）、子项结构与权重、评级边界 80/65/50/30 全部零改动**。依据：699 条 v5 回测样本维度归因——消息面为四维中唯一与 1w 收益负相关（-0.098，n=410），高分错误样本消息分 76.8 vs 正确样本 67.1（正面情绪=已定价噪音）。回退：config_weights.json 恢复原值即回退权重；映射曲线还原 `score=(s+1)*48` 即回退引擎 | 用户（021BC 批准） |
 | 2026-08-28 | **B24 `advisor.py`**（仅 `_determine_action` 文案 + 持仓建议 prose 措辞，逻辑零改动）/ `price_advisor.py`（ACTION_MATRIX / RATING_ACTION_SUGGESTION / 状态机兜底词同步）/ 前端看板 MATRIX / `tests/` | 021BH：操作建议动作词统一——"持有"与"持有观望"两个动作词并存，且后者与评级档位名同名，用户无法区分"在说评级"还是"在说动作"。统一规则：**"持有观望"仅保留为评级档位名（R6 档位定义与判定零改动），动作词一律"持有"词根**（浮亏语境保留"继续持有"）。改动点：`_determine_action` 持有观望·浮亏格与建议减仓·浮盈格 '持有观望'→'持有'；持仓 prose 2 处 '建议持有观望'→'建议持有'；price_advisor ACTION_MATRIX 3 格 + RATING_ACTION_SUGGESTION 基线 + 状态机兜底词同步；看板 MATRIX 2 格同步。决策逻辑、矩阵结构零改动（纯字符串替换）。历史数据兼容：前端 ACTION_COLOR / ACTION_LEVEL 保留'持有观望'映射 | 用户（021BH 批准，本轮直接请求） |
+| 2026-09-07 | `requirements.txt` / **R17 白名单** / `pyproject.toml` / `tests/`（2 文件） | OPT-5 测试分层：新增 dev-only 依赖 `pytest-timeout`（单测防挂死看门狗，仅测试期使用，运行时不导入）；`pyproject.toml` 新增 pytest 配置（默认 `-m "not slow" --timeout=60`）；`test_backfill_scheduler.py::TestTickBackoff` 与 `test_index_refresh_021aw` 2 例打 `slow` 标记（真实时钟退避验证，基线实测占全量 431s 的 96%）。运行时零代码约束不受影响（`python app.py` 不导入该包）。附录 A 同步更新 | 用户（"开始执行"优化任务批准，OPT-5） |
 
 ---
 
@@ -138,6 +139,7 @@
 | requests | HTTP 客户端 |
 | openpyxl | Excel 导出 |
 | pytest | 测试框架 |
+| pytest-timeout | 单测超时看门狗（dev-only，OPT-5 2026-09-07 增补；运行时不依赖） |
 | pystray / Pillow | 系统托盘 |
 
 > 新增依赖须：可 pip 自动安装（无需用户手动配置）→ 评审 → 更新本表 + `scripts/check_redlines.py` 白名单。

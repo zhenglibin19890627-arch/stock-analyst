@@ -22,7 +22,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: 运行测试
-        run: python -m pytest tests/ -q
+        # CI 保持全量覆盖（含 slow 层真实时钟退避验证）；本地默认 fast 层（OPT-5 测试分层）
+        run: python -m pytest tests/ -q -m "slow or not slow"
 
       - name: 红线自动核验（021A，单一事实来源 docs/RED_LINES.md）
         run: python scripts/check_redlines.py
