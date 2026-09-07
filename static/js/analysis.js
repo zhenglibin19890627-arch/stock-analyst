@@ -1049,6 +1049,14 @@
         html += '</div>';
         html += '</div>';
 
+        // 3.5 趋势罗盘（2026-09-07）：日/周/月三周期趋势（异步填充，只读端点）
+        html += '<div class="card" id="trendCompassCard">';
+        html += '<div class="card-title" style="font-size:15px;margin-bottom:6px;">🧭 趋势罗盘' +
+                '<span style="font-size:12px;color:var(--text-3,#888);font-weight:normal;margin-left:8px;">' +
+                '短期(日线) · 中期(周线) · 长期(月线)｜红涨绿跌，黄为震荡</span></div>';
+        html += '<div id="trendCompassBody" style="color:var(--text-3,#999);font-size:13px;">加载中...</div>';
+        html += '</div>';
+
         // 4. K线图卡片已移除（020R：用户裁定报告页不再平铺K线卡片；
         // K线数据仍可在「数据」页查看，评分雷达/详情/建议紧接展示）
 
@@ -1227,6 +1235,73 @@
 
         // 渲染 ECharts 图表（020R：K线卡片已移除，仅雷达图）
         _renderRadarChart(dims);
+
+        // 趋势罗盘异步填充（不阻塞报告主体渲染）
+        loadTrendCompass(stockId);
+    }
+
+    // ============================================================
+    // 趋势罗盘（2026-09-07）：日/周/月三周期趋势（GET /api/stocks/<id>/trend，只读）
+    // 颜色按 A 股惯例：上涨=红、下跌=绿、震荡=黄、数据不足=灰
+    // ============================================================
+
+    function _tcBadge(trend, strength) {
+        var map = {
+            up:       { c: '#e74c3c', label: '上涨' },
+            down:     { c: '#27ae60', label: '下跌' },
+            sideways: { c: '#f39c12', label: '震荡' },
+            na:       { c: '#bbb',    label: '数据不足' }
+        };
+        var m = map[trend] || map.na;
+        var s = strength ? '·' + strength : '';
+        return '<span style="display:inline-block;min-width:86px;text-align:center;padding:2px 10px;' +
+               'border-radius:12px;background:' + m.c + ';color:#fff;font-weight:600;font-size:13px;">' +
+               m.label + s + '</span>';
+    }
+
+    function loadTrendCompass(stockId) {
+        var body = document.getElementById('trendCompassBody');
+        if (!body) return;
+        body.textContent = '加载中...';
+        fetch('/api/stocks/' + stockId + '/trend', { cache: 'no-store' })
+            .then(function(r) { return safeJson(r); })
+            .then(function(d) {
+                if (!body.isConnected) return;  // 用户已切走，丢弃
+                if (!d || !d.success) {
+                    body.innerHTML = '<span style="color:#999;">' + ((d && d.message) || '趋势数据不可用') + '（采集数据后自动可用）</span>';
+                    return;
+                }
+                var rows = [
+                    ['短期（日线）', d.timeframes.daily],
+                    ['中期（周线）', d.timeframes.weekly],
+                    ['长期（月线）', d.timeframes.monthly]
+                ];
+                var html = '';
+                // 综合判断行
+                var o = d.overall || {};
+                html += '<div style="display:flex;align-items:center;gap:10px;padding:4px 0 8px;border-bottom:1px dashed var(--border-light,#eee);">' +
+                        '<span style="font-weight:600;min-width:86px;">综合</span>' + _tcBadge(o.trend, o.strength);
+                if (o.resonance) {
+                    html += '<span style="background:#fff3e0;color:#e65100;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;">⚡ ' + o.resonance + '</span>';
+                }
+                (o.reasons || []).forEach(function(t) {
+                    html += '<span style="color:var(--text-2,#666);font-size:12.5px;">' + t + '</span>';
+                });
+                html += '</div>';
+                rows.forEach(function(pair) {
+                    var name = pair[0], tf = pair[1] || {};
+                    html += '<div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;">';
+                    html += '<span style="font-weight:600;min-width:86px;">' + name + '</span>';
+                    html += _tcBadge(tf.trend, tf.strength);
+                    html += '<span style="color:var(--text-2,#666);font-size:12.5px;line-height:1.7;">' +
+                            (tf.reasons || []).join('；') + '</span>';
+                    html += '</div>';
+                });
+                body.innerHTML = html;
+            })
+            .catch(function(e) {
+                if (body.isConnected) body.innerHTML = '<span style="color:#e74c3c;">加载失败：' + e + '</span>';
+            });
     }
 
     // ============================================================

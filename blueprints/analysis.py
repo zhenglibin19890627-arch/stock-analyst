@@ -7,6 +7,8 @@ from flask import Blueprint, jsonify, request
 from blueprints._utils import _resolve_report_type
 from database.db_manager import get_connection
 
+logger = logging.getLogger(__name__)
+
 bp = Blueprint('analysis', __name__)
 
 
@@ -877,6 +879,45 @@ def api_v5_scoring_validation():
             'all_pass': all_pass,
             'summary': f'{len(results)}条用例, {"全部通过" if all_pass else "存在异常"}',
             'cases': results,
+        }
+    )
+
+
+# ============================================================
+# 趋势罗盘（2026-09-07）：个股日/周/月三周期趋势判定（只读，无副作用）
+# ============================================================
+
+
+@bp.route('/api/stocks/<int:stock_id>/trend', methods=['GET'])
+def api_stock_trend(stock_id):
+    """个股三周期趋势：短期(日线)/中期(周线)/长期(月线) → 上涨/下跌/震荡。
+
+    数据复用 data_adapter 组装的 StockData（含 020R-48 周线/月线指标），
+    判定逻辑见 modules/trend_analyzer.py；不写库、不触发采集。
+    """
+    from modules.data_adapter import load_stockdata_from_db
+    from modules.trend_analyzer import analyze_trends
+
+    try:
+        data = load_stockdata_from_db(stock_id)
+    except Exception as e:  # noqa: BLE001 —— 数据缺失/坏行时按"数据不足"降级
+        logger.warning(f'[trend] stock_id={stock_id} 构建失败: {e}')
+        data = None
+
+    if data is None:
+        return jsonify({'success': False, 'message': '数据不足，请先采集数据'}), 404
+
+    result = analyze_trends(data)
+    from modules.collector._env import now_cn
+
+    return jsonify(
+        {
+            'success': True,
+            'stock_id': stock_id,
+            'code': data.code,
+            'close': data.close,
+            **result,
+            'generated_at': now_cn(),
         }
     )
 
