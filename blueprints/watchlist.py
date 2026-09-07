@@ -417,12 +417,34 @@ def api_update_stock(stock_id):
 
 @bp.route('/api/stocks/<int:stock_id>', methods=['DELETE'])
 def api_delete_stock(stock_id):
-    """删除自选股：先删除所有关联的子表数据，再删除主记录"""
+    """删除自选股：先删除所有关联的子表数据，再删除主记录。
+
+    OPT-6-G1 修复（2026-09-07）：child_tables 与 29 张含 stock_id 子表清单对齐
+    （此前仅 10 张，19 张残留孤儿行——见任务书"发现的问题"）。
+    安全守卫：任一账户仍有在仓持仓（quantity > 0）时拒绝删除（409），
+    需先经持仓页删除持仓；已清算（quantity=0）则连流水一并清除（该股数据整体出清）。
+    清单由 tests/test_cascade_integrity.py 守护：新增 stock_id 子表不同步此处 → 测试红。
+    """
     try:
         conn = get_connection()
         cursor = conn.cursor()
 
-        # 按依赖顺序删除所有子表数据
+        # 安全守卫：在仓持仓禁止连带删除（资金安全优先，与"删除持仓"路径形成两级防线）
+        active = cursor.execute(
+            'SELECT COUNT(*) AS c FROM holdings WHERE stock_id = ? AND quantity > 0',
+            (stock_id,),
+        ).fetchone()['c']
+        if active > 0:
+            conn.close()
+            return jsonify(
+                {
+                    'success': False,
+                    'message': f'该股票在 {active} 个账户仍有在仓持仓，请先在持仓页删除持仓后再删除自选股',
+                    'need_remove_holdings': True,
+                }
+            ), 409
+
+        # 按依赖顺序删除所有子表数据（清单 = 全部含 stock_id 的表，tests/test_cascade_integrity.py 对账）
         child_tables = [
             'data_status',
             'change_logs',
@@ -434,6 +456,26 @@ def api_delete_stock(stock_id):
             'raw_fundamental',
             'raw_kline',
             'positions',
+            # —— OPT-6-G1 补齐（2026-09-07）——
+            'daily_reports',
+            'alert_rules',
+            'alert_history',
+            'holder_structure',
+            'news_sentiment',
+            'stock_valuation',
+            'stock_valuation_history',
+            'price_backtest_results',
+            'raw_express',
+            'raw_forecast',
+            'raw_kline_weekly',
+            'raw_kline_monthly',
+            'stock_orderbook',
+            'stock_restricted_release',
+            'price_cache',
+            'error_logs',
+            'position_cost_adjustments',
+            'holdings',
+            'trade_records',
         ]
         for table in child_tables:
             cursor.execute('DELETE FROM ' + table + ' WHERE stock_id = ?', (stock_id,))

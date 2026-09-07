@@ -37,16 +37,11 @@ STOCK_ID_TABLES = [
     'stock_valuation_history', 'trade_records',
 ]
 
-# 已登记级联缺口（任务书"发现的问题"OPT-6-G1）：删除自选股时这些表不清，
-# 行为为"残留孤儿行"。修复立项前，coverage 断言豁免；residue 断言登记现状。
-KNOWN_UNCOVERED = {
-    'alert_history', 'alert_rules', 'daily_reports', 'error_logs',
-    'holder_structure', 'holdings', 'news_sentiment', 'position_cost_adjustments',
-    'price_backtest_results', 'price_cache', 'raw_express', 'raw_forecast',
-    'raw_kline_monthly', 'raw_kline_weekly', 'stock_orderbook',
-    'stock_restricted_release', 'stock_valuation', 'stock_valuation_history',
-    'trade_records',
-}
+# 已登记级联缺口（任务书 OPT-6-G1）：2026-09-07 已修复——api_delete_stock 的
+# child_tables 补齐至全部 29 张表，并新增"在仓持仓禁止连带删除"守卫（409）。
+# KNOWN_UNCOVERED 机制保留为空集：若未来新增 stock_id 子表而未同步级联，
+# 把表名加回这里并在任务书"发现的问题"登记，缺口即被测试钉住。
+KNOWN_UNCOVERED = set()
 
 # 各表最小种子行（stock_id 之外的必要列）；new table → 补一行
 SEEDS = {
@@ -158,12 +153,66 @@ def test_delete_stock_residue_zero(cidb, table):
 @pytest.mark.parametrize('table', sorted(KNOWN_UNCOVERED))
 def test_delete_stock_known_gap_documented(cidb, table):
     """已登记缺口表：删除自选股后残留孤儿行（现状登记，见任务书 OPT-6-G1）。
-    若本断言失败=有人已修复该表级联 → 请把它移出 KNOWN_UNCOVERED 并入正式清单。"""
+    若本断言失败=有人已修复该表级联 → 请把它移出 KNOWN_UNCOVERED 并入正式清单。
+    （2026-09-07 OPT-6-G1 已修复，当前白名单为空 → 本测试空转保留机制。）"""
     _seed(cidb, table)
     r = _delete_stock(cidb)
     assert r.status_code == 200
     assert not _stock_exists()
     assert _count(table) == 1, f'{table} 级联已被修复 → 更新 KNOWN_UNCOVERED'
+
+
+# ============================================================
+# 1b. 删自选股安全守卫（OPT-6-G1 修复配套）：在仓持仓禁止连带删除
+# ============================================================
+
+
+def test_delete_stock_blocked_by_active_holding(cidb):
+    """任一账户在仓（quantity>0）→ 409 拒绝；清除在仓后才能删。"""
+    conn = db_manager.get_connection()
+    conn.execute(
+        "INSERT INTO holdings (account_id, stock_id, cost_price, quantity, status) VALUES (1, 1, 10.0, 100, 'active')"
+    )
+    _ = conn.execute('SELECT id FROM holdings').fetchone()['id']
+    conn.commit()
+    conn.close()
+
+    r = _delete_stock(cidb)
+    assert r.status_code == 409
+    body = r.get_json()
+    assert body['need_remove_holdings'] is True
+    assert _stock_exists()  # 主记录未被误删
+
+
+def test_delete_stock_cleared_holding_full_cleanup(cidb):
+    """已清算（quantity=0）→ 允许删除，且持仓/流水/成本修正记录一并出清（零孤儿）。"""
+    conn = db_manager.get_connection()
+    conn.execute(
+        "INSERT INTO holdings (account_id, stock_id, cost_price, quantity, status) VALUES (1, 1, 10.0, 0, 'cleared')"
+    )
+    hid = conn.execute('SELECT id FROM holdings').fetchone()['id']
+    conn.execute(
+        'INSERT INTO trade_records (holding_id, account_id, stock_id, trade_type, price, quantity, amount, trade_date) '
+        "VALUES (?, 1, 1, 'buy', 10.0, 100, 1000, '2026-09-01')",
+        (hid,),
+    )
+    conn.execute(
+        "INSERT INTO position_cost_adjustments (holding_id, stock_id, old_cost, new_cost, reason) "
+        "VALUES (?, 1, 10.0, 11.0, 'r')",
+        (hid,),
+    )
+    conn.execute(
+        "INSERT INTO daily_reports (report_date, stock_id, stock_code, stock_name, status) "
+        "VALUES ('2026-09-07', 1, '000333', '测试股', 'success')"
+    )
+    conn.commit()
+    conn.close()
+
+    r = _delete_stock(cidb)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert not _stock_exists()
+    for t in ('holdings', 'trade_records', 'position_cost_adjustments', 'daily_reports'):
+        assert _count(t) == 0, f'{t} 残留孤儿行'
 
 
 # ============================================================
