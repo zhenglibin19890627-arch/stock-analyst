@@ -86,7 +86,13 @@ def _classify(close: float, ma_fast, ma_slow, dif, dea, fast_label: str = '快�
 
     score = round(sum(w if up else -w for up, w, _ in signals), 2)
     trend = UP if score >= 2.5 else (DOWN if score <= -2.5 else SIDEWAYS)
-    strength = '强' if abs(score) >= 4 else ('中' if abs(score) >= 3 else '弱')
+    raw_strength = '强' if abs(score) >= 4 else ('中' if abs(score) >= 3 else '弱')
+    # 强度诚实化（2026-09-07，用户实测中国中免反馈）：MACD 动能未过零轴时，
+    # 趋势只是"反弹/回落修复"阶段，未获动能确认——强度上限"中"，不再标"强"。
+    if (trend == UP and dif <= 0) or (trend == DOWN and dif >= 0):
+        strength = '中' if raw_strength == '强' else raw_strength
+    else:
+        strength = raw_strength
 
     # 理由分配：与最终趋势同向 → 主因（按权重取前3）；反向 → 「但」提示（最多1条）
     if trend == SIDEWAYS:
@@ -100,10 +106,15 @@ def _classify(close: float, ma_fast, ma_slow, dif, dea, fast_label: str = '快�
     else:
         want_up = trend == UP
         matched = [t for up, _, t in signals if up == want_up]
-        opposed = [t for up, _, t in signals if up != want_up]
         reasons = matched[:3]
-        if opposed and len(reasons) < 4:
-            reasons.append('但 ' + opposed[0])
+        if want_up and dif <= 0:
+            reasons.append('但 MACD 仍在零轴下方：属反弹修复阶段，尚非强势上涨')
+        elif (not want_up) and dif >= 0:
+            reasons.append('但 MACD 已在零轴上方：属回落中的强势整理，留意企稳信号')
+        else:
+            opposed = [t for up, _, t in signals if up != want_up]
+            if opposed and len(reasons) < 4:
+                reasons.append('但 ' + opposed[0])
     return {'trend': trend, 'score': score, 'strength': strength, 'reasons': reasons[:4]}
 
 

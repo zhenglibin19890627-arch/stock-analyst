@@ -315,19 +315,24 @@ def aggregate_period_klines(stock_id):
         .reset_index(drop=True)
     )
 
+    # 2026-09-07 修复：改为"先删后插"整表重建（原 INSERT OR REPLACE 只覆盖同名日期行，
+    # 导致 020R-48 初版 bug 时期写入的日频残留行永久滞留周/月表，周月线指标被日频数据扭曲）
     for table, wdf in (('raw_kline_weekly', weekly), ('raw_kline_monthly', monthly)):
-        for _, r in wdf.iterrows():
-            cur.execute(
-                f'INSERT OR REPLACE INTO {table} '
-                '(stock_id, trade_date, open, close, high, low, volume) '
-                'VALUES (?,?,?,?,?,?,?)',
+        cur.execute(f'DELETE FROM {table} WHERE stock_id = ?', (stock_id,))
+        cur.executemany(
+            f'INSERT INTO {table} '
+            '(stock_id, trade_date, open, close, high, low, volume) '
+            'VALUES (?,?,?,?,?,?,?)',
+            [
                 (
                     stock_id, str(r['trade_date'])[:10],
                     float(r['open'] or 0), float(r['close'] or 0),
                     float(r['high'] or 0), float(r['low'] or 0),
                     float(r['volume'] or 0),
-                ),
-            )
+                )
+                for _, r in wdf.iterrows()
+            ],
+        )
     conn.commit()
     conn.close()
     logger.info(f'[020R-48 周期聚合] stock_id={stock_id}: 周线{len(weekly)}根/月线{len(monthly)}根')

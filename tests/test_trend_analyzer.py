@@ -85,6 +85,21 @@ def test_all_missing_everything_na():
         assert tf['trend'] == NA
 
 
+def test_rebound_up_capped_at_mid_when_dif_below_zero():
+    """中国中免实测反馈：均线多头+金叉但 DIF<0 → 上涨但强度上限"中"（反弹修复非强势）。"""
+    r = analyze_trends(_stock(close=12.0, ma5=11.0, ma20=10.0, macd_dif=-0.1, macd_dea=-0.3))
+    d = r['timeframes']['daily']
+    assert d['trend'] == UP and d['strength'] == '中'
+    assert any('反弹修复' in x for x in d['reasons'])
+
+
+def test_rebound_down_capped_when_dif_above_zero():
+    """镜像：空头排列但 DIF>0 → 下跌但强度上限"中"（强势整理回落）。"""
+    r = analyze_trends(_stock(close=8.0, ma5=9.0, ma20=10.0, macd_dif=0.2, macd_dea=0.5))
+    d = r['timeframes']['daily']
+    assert d['trend'] == DOWN and d['strength'] == '中'
+
+
 def test_resonance_when_all_timeframes_agree():
     r = analyze_trends(
         _stock(
