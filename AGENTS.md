@@ -148,7 +148,7 @@ curl http://127.0.0.1:5000/api/health
 | `optimizer_engine.py` | M9 自动优化引擎（规则化方案；以 T+1 日准确率为代理，安全阀已知空转，021AI 起动态目标走 dynamic_optimizer）。 |
 | `dynamic_optimizer.py` | 021AI 动态窗口权重优化器：维度分重放+网格+前向验证+数据门槛（v5 纯净样本不足不改权）；入口 `scripts/run_dynamic_optimizer.py`。 |
 | `daily_report.py` | 每日报告生成（ThreadPoolExecutor 超时控制）。 |
-| `market_screener.py` | 021BI 全市场选股扫描器：两段漏斗（新浪快照粗筛 ~5553 只 → 腾讯K线 8 类技术信号精筛）。数据源新浪/腾讯，与东财断连解耦；只产候选不自动入库，加自选 ≤20。端点 `POST /api/market/scan`、`/api/market/scan-signals`。 |
+| `market_screener.py` | 021BI 全市场选股扫描器：两段漏斗（新浪快照粗筛 ~5553 只 → 腾讯K线 4 类金叉信号精筛 + 4 组买点共振组合：双金叉/周线共振/底部反转背离/零轴上二次金叉；2026-09-07 共振重设计，死叉/超买/超卖类已删——选股器只产买点候选）。数据源新浪/腾讯，与东财断连解耦；只产候选不自动入库，加自选 ≤20。端点 `POST /api/market/scan`、`/api/market/scan-signals`。 |
 | `index_collector.py` | 指数数据采集与评级。 |
 | `export_engine.py` | 报告导出（Excel .xlsx）。 |
 | `news_collector.py` | 新闻/消息面采集。 |

@@ -80,19 +80,17 @@ def _http_get(url, params=None, headers=None, channel='sina', timeout=10, retrie
 
 
 # ================================================================
-# 信号库（8 类，触发窗口内检测；note 为结果页白话解读）
+# 信号库（2026-09-07 共振重设计：收缩为 4 个触发类金叉信号）
+# 删除依据：死叉/超买/超卖是状态或反向信号，不产"买入候选"——
+#   死叉股不会出现在金叉结果里；纯超卖=接飞刀半成品（等企稳）。
+#   超卖语义由 kdj_golden_low（D<25）与共振层的环境注记承接。
 # ================================================================
 
 SIGNAL_LIBRARY = {
     'macd_golden_above': {'label': 'MACD水上金叉', 'note': 'DIF上穿DEA且DIF>0：多头趋势中的加速信号，相对可靠'},
     'macd_golden_below': {'label': 'MACD水下金叉', 'note': 'DIF上穿DEA且DIF≤0：下跌趋势中的反弹信号，需配合量能，偏短线'},
-    'macd_dead': {'label': 'MACD死叉', 'note': 'DIF下穿DEA：转空预警，用于排除'},
     'kdj_golden_low': {'label': 'KDJ低位金叉', 'note': 'K上穿D且交叉时D<25：超卖区反转，信号中较可靠的买点'},
     'kdj_golden': {'label': 'KDJ金叉', 'note': 'K上穿D：一般买点参考'},
-    'kdj_oversold': {'label': 'KDJ超卖', 'note': 'J<0 或 K<20：短期超跌状态，等企稳信号'},
-    'kdj_overbought': {'label': 'KDJ超买', 'note': 'J>100 或 K>80：短期过热，谨防回调'},
-    'rsi_oversold': {'label': 'RSI超卖', 'note': 'RSI14<30：超跌状态（Wilder 口径，与评分引擎一致）'},
-    'rsi_overbought': {'label': 'RSI超买', 'note': 'RSI14>70：过热状态'},
 }
 
 DEFAULT_HYGIENE = {
@@ -103,29 +101,36 @@ DEFAULT_HYGIENE = {
 }
 
 # ================================================================
-# 共振库（021BI 跟进：跨指标系同向叠加，不新增指标、零额外请求）
-# 规则：两个独立指标系（MACD/KDJ）的触发证据落在同一窗口内才成立；
-#       RSI 为状态类，只做环境层不作为触发证据。
-# kind: bull=买点型 / bear=风险预警（用于排除） / watch=观察池
+# 共振库（2026-09-07 重设计：按"共振组合"口径重构为 4 组买点共振）
+#   ① 双金叉共振        MACD金叉 + KDJ金叉同窗（同日 ⭐4 / 同窗 ⭐3）
+#   ② 周线共振波段      周线MACD多头(DIF>DEA) + 日线窗口金叉（跨周期共振）
+#   ③ 底部反转共振      底背离(价格60日新低而DIF未新低) + KDJ低位金叉 + 放量阳线
+#   ④ 零轴上二次金叉    近15日MACD第2次金叉且DIF>0 + KDJ中位(D 40~70)金叉
+# 已删：空头共振预警（选股器不产卖点，持仓风险归预警系统）、超卖观察池（接飞刀）。
+# 兼容说明：用户需求表中"日线金叉+60分钟金叉"因 60 分钟K线未采集不实现，
+#   跨周期共振位由②承接（周线数据对触发股按需补拉腾讯周K）。
 # ================================================================
 
 RESONANCE_LIBRARY = {
-    'res_bottom_reverse': {
-        'label': '底部反转共振', 'stars': 3, 'kind': 'bull',
-        'note': 'KDJ低位金叉+MACD水下金叉同窗：超卖反转与趋势反弹双确认，经典底部结构'},
     'res_double_golden': {
-        'label': '双金叉共振', 'stars': 2, 'kind': 'bull',
-        'note': 'MACD系金叉+KDJ系金叉同窗：两个独立指标系同向触发'},
-    'res_bear_confirm': {
-        'label': '空头共振预警', 'stars': 0, 'kind': 'bear',
-        'note': 'MACD死叉+超买状态同窗：转空双确认，建议排除'},
-    'res_oversold_watch': {
-        'label': '超卖待确认', 'stars': 1, 'kind': 'watch',
-        'note': 'KDJ与RSI双超卖且窗口内无金叉：深度超跌观察池，等右侧触发'},
+        'label': '双金叉共振', 'stars': 4, 'kind': 'bull',
+        'note': 'MACD系金叉+KDJ系金叉同窗：两个独立指标系同向触发；同日触发更佳'},
+    'res_week_daily': {
+        'label': '周线共振波段', 'stars': 5, 'kind': 'bull',
+        'note': '周线MACD多头(DIF>DEA)+日线窗口金叉：月线定方向周线定买点，中线波段结构'},
+    'res_bottom_reverse': {
+        'label': '底部反转共振', 'stars': 5, 'kind': 'bull',
+        'note': '底背离(价格创60日新低而DIF未新低)+KDJ低位金叉+放量阳线：左侧反转最强确认'},
+    'res_zero_relay': {
+        'label': '零轴上二次金叉', 'stars': 5, 'kind': 'bull',
+        'note': '近15日MACD第二次金叉且DIF>0+KDJ中位金叉：主升浪中继的经典买点'},
 }
 
 _MACD_BULL = ('macd_golden_above', 'macd_golden_below')
 _KDJ_BULL = ('kdj_golden_low', 'kdj_golden')
+_ALL_BULL = _MACD_BULL + _KDJ_BULL
+# 买点型共振取最高档（先到先得）：周线共振 > 底部反转 > 二次金叉 > 双金叉
+_RES_TIER_ORDER = ('res_week_daily', 'res_bottom_reverse', 'res_zero_relay', 'res_double_golden')
 
 
 def _ma_series(closes, n):
@@ -141,26 +146,29 @@ def _ma_series(closes, n):
     return out
 
 
-def detect_resonances(hits, kline_rows=None):
-    """从单只股票的信号命中推导共振（同窗口前提由 detect_signals 保证）。
+def detect_resonances(hits, kline_rows=None, weekly_kline_rows=None):
+    """从单只股票的信号命中推导共振组合（2026-09-07 重设计）。
 
-    hits: detect_signals 输出；kline_rows: 可选，用于 MA20 环境注记。
+    hits: detect_signals 输出；kline_rows: 日K（背离/放量/二次金叉证据）；
+    weekly_kline_rows: 周K（可选，周线共振波段用，由调用方按需补拉）。
     Returns: [{'key', 'label', 'stars', 'kind', 'note', 'signals': [label@date...]}]
-    每股买点型取最高档（底部反转 > 双金叉）；空头预警与观察池独立判定。
+    买点型取最高档（周线共振 > 底部反转 > 二次金叉 > 双金叉）。
     """
     if not hits:
         return []
     keys = {h['signal'] for h in hits}
     macd_bull = any(k in keys for k in _MACD_BULL)
     kdj_bull = any(k in keys for k in _KDJ_BULL)
-    bull_trigger = macd_bull or kdj_bull
+    if not (macd_bull or kdj_bull):
+        return []
 
-    # 环境注记（不定级）
+    # 环境注记（不定级）：RSI 超卖环境 + MA20 位置
     env = []
-    if 'rsi_oversold' in keys:
-        env.append('+RSI超卖环境')
     if kline_rows and len(kline_rows) >= 20:
         closes = [r['close'] for r in kline_rows]
+        rsis = _rsi_series(closes)
+        if rsis and rsis[-1] is not None and rsis[-1] < 30:
+            env.append('RSI超卖环境')
         ma20 = _ma_series(closes, 20)[-1]
         if ma20:
             env.append('MA20上方' if closes[-1] >= ma20 else 'MA20下方')
@@ -174,19 +182,63 @@ def detect_resonances(hits, kline_rows=None):
                 'kind': lib['kind'], 'note': lib['note'] + env_str,
                 'signals': sig_desc}
 
-    out = []
-    # 买点型：取最高档
-    if 'kdj_golden_low' in keys and 'macd_golden_below' in keys:
-        out.append(_res('res_bottom_reverse'))
-    elif macd_bull and kdj_bull:
-        out.append(_res('res_double_golden'))
-    # 空头预警：独立判定（窗口内先死叉后金叉的极端V转可两者并存，如实展示）
-    if 'macd_dead' in keys and ('kdj_overbought' in keys or 'rsi_overbought' in keys):
-        out.append(_res('res_bear_confirm'))
-    # 超卖观察池：双超卖状态且无任何触发类金叉
-    if 'kdj_oversold' in keys and 'rsi_oversold' in keys and not bull_trigger:
-        out.append(_res('res_oversold_watch'))
-    return out
+    found = {}
+
+    # ① 双金叉共振：MACD系 + KDJ系同窗（同日触发 ⭐4，跨日同窗 ⭐3）
+    if macd_bull and kdj_bull:
+        dates = {h['trigger_date'] for h in hits if h['signal'] in _ALL_BULL}
+        res = _res('res_double_golden')
+        res['stars'] = 4 if len(dates) == 1 else 3
+        if len(dates) == 1:
+            res['note'] = '同日双金叉（MACD+KDJ同日触发）：标准买入共振' + env_str
+        found['res_double_golden'] = res
+
+    if kline_rows and len(kline_rows) >= 35:
+        closes = [r['close'] for r in kline_rows]
+        n = len(closes)
+
+        # ② 周线共振波段：周线 MACD 多头（DIF>DEA）+ 日线窗口内金叉
+        if weekly_kline_rows and len(weekly_kline_rows) >= 35:
+            wdif, wdea = _macd_series([r['close'] for r in weekly_kline_rows])
+            if wdif[-1] > wdea[-1]:
+                found['res_week_daily'] = _res('res_week_daily')
+
+        # ③ 底部反转共振：底背离 + KDJ低位金叉 + 放量阳线
+        if 'kdj_golden_low' in keys and len(kline_rows) >= 60:
+            dif, _dea = _macd_series(closes)
+            look = 60
+            seg = closes[-look:]
+            pmin_off = seg.index(min(seg))
+            recent_low = pmin_off >= look - 5            # 价格新低出现在近5根内
+            dif_seg = dif[-look:]
+            divergence = recent_low and dif_seg[pmin_off] > min(dif_seg) + 1e-9
+            last = kline_rows[-1]
+            prev_vols = [r['volume'] for r in kline_rows[-6:-1]]
+            vol_yang = (last['close'] > last['open'] and prev_vols
+                        and last['volume'] >= 1.5 * (sum(prev_vols) / len(prev_vols)))
+            if divergence and vol_yang:
+                found['res_bottom_reverse'] = _res('res_bottom_reverse')
+
+        # ④ 零轴上二次金叉：近15日第2次金叉且 DIF>0 + KDJ中位金叉
+        if len(closes) >= 50:
+            dif, dea = _macd_series(closes)
+            golden2 = [i for i in range(n - 15, n)
+                       if dif[i - 1] <= dea[i - 1] and dif[i] > dea[i] and dif[i] > 0]
+            if len(golden2) >= 2:
+                highs = [r['high'] for r in kline_rows]
+                lows = [r['low'] for r in kline_rows]
+                ks, ds, _js = _kdj_series(highs, lows, closes)
+                mid_golden = any(
+                    ks[i - 1] <= ds[i - 1] and ks[i] > ds[i] and 40 <= ds[i] <= 70
+                    for i in range(n - 15, n))
+                if mid_golden:
+                    found['res_zero_relay'] = _res('res_zero_relay')
+
+    # 买点型取最高档
+    for key in _RES_TIER_ORDER:
+        if key in found:
+            return [found[key]]
+    return []
 
 
 # ================================================================
@@ -420,13 +472,23 @@ def fetch_tencent_enrich(symbols):
 
 def fetch_kline(symbol, count=120):
     """腾讯日K（前复权）→ [{date, open, close, high, low, volume}]，时间正序。"""
+    return _fetch_tencent_kline(symbol, period='day', key_prefix='qfqday', count=count)
+
+
+def fetch_kline_weekly(symbol, count=60):
+    """腾讯周K（前复权）→ 同日K结构。周线共振波段专用（对触发股按需补拉）。"""
+    return _fetch_tencent_kline(symbol, period='week', key_prefix='qfqweek', count=count)
+
+
+def _fetch_tencent_kline(symbol, period, key_prefix, count):
+    """腾讯K线通用拉取（period: day/week）。"""
     r = _http_get(
         'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get',
-        params={'param': f'{symbol},day,,,{count},qfq'},
+        params={'param': f'{symbol},{period},,,{count},qfq'},
         headers=_UA_QQ, channel='qq', timeout=10)
     d = r.json()
     node = (d.get('data') or {}).get(symbol) or {}
-    days = node.get('qfqday') or node.get('day') or []
+    days = node.get(key_prefix) or node.get(period) or []
     out = []
     for row in days:
         try:
@@ -527,11 +589,8 @@ def detect_signals(kline_rows, wanted=None, window=3):
     n = len(closes)
     hits = []
 
-    def _within(i):
-        return i >= n - window
-
-    # ---- MACD 交叉类 ----
-    if wanted & {'macd_golden_above', 'macd_golden_below', 'macd_dead'}:
+    # ---- MACD 金叉类（死叉已随 2026-09-07 共振重设计移除：选股器不产卖点） ----
+    if wanted & {'macd_golden_above', 'macd_golden_below'}:
         dif, dea = _macd_series(closes)
         for i in range(n - window, n):
             if dif[i - 1] <= dea[i - 1] and dif[i] > dea[i]:
@@ -540,14 +599,9 @@ def detect_signals(kline_rows, wanted=None, window=3):
                     lib = SIGNAL_LIBRARY[key]
                     hits.append({'signal': key, 'label': lib['label'],
                                  'trigger_date': dates[i], 'note': lib['note']})
-            elif dif[i - 1] >= dea[i - 1] and dif[i] < dea[i]:
-                if 'macd_dead' in wanted:
-                    lib = SIGNAL_LIBRARY['macd_dead']
-                    hits.append({'signal': 'macd_dead', 'label': lib['label'],
-                                 'trigger_date': dates[i], 'note': lib['note']})
 
-    # ---- KDJ ----
-    if wanted & {'kdj_golden_low', 'kdj_golden', 'kdj_oversold', 'kdj_overbought'}:
+    # ---- KDJ 金叉类（超买/超卖为状态类，已移出信号库） ----
+    if wanted & {'kdj_golden_low', 'kdj_golden'}:
         ks, ds, js = _kdj_series(highs, lows, closes)
         low_hit_at = None
         for i in range(n - window, n):
@@ -568,27 +622,6 @@ def detect_signals(kline_rows, wanted=None, window=3):
                         hits.append({'signal': 'kdj_golden', 'label': lib['label'],
                                      'trigger_date': dates[i], 'note': lib['note']})
                     break
-        if 'kdj_oversold' in wanted and (js[-1] < 0 or ks[-1] < 20):
-            lib = SIGNAL_LIBRARY['kdj_oversold']
-            hits.append({'signal': 'kdj_oversold', 'label': lib['label'],
-                         'trigger_date': dates[-1], 'note': lib['note']})
-        if 'kdj_overbought' in wanted and (js[-1] > 100 or ks[-1] > 80):
-            lib = SIGNAL_LIBRARY['kdj_overbought']
-            hits.append({'signal': 'kdj_overbought', 'label': lib['label'],
-                         'trigger_date': dates[-1], 'note': lib['note']})
-
-    # ---- RSI 状态类 ----
-    if wanted & {'rsi_oversold', 'rsi_overbought'}:
-        rsis = _rsi_series(closes)
-        if rsis and rsis[-1] is not None:
-            if 'rsi_oversold' in wanted and rsis[-1] < 30:
-                lib = SIGNAL_LIBRARY['rsi_oversold']
-                hits.append({'signal': 'rsi_oversold', 'label': lib['label'],
-                             'trigger_date': dates[-1], 'note': lib['note']})
-            if 'rsi_overbought' in wanted and rsis[-1] > 70:
-                lib = SIGNAL_LIBRARY['rsi_overbought']
-                hits.append({'signal': 'rsi_overbought', 'label': lib['label'],
-                             'trigger_date': dates[-1], 'note': lib['note']})
 
     return hits
 
@@ -792,9 +825,15 @@ def run_signal_chunk(entries, signals=None, window=3):
             klines = fetch_kline(sym)
             matches = detect_signals(klines, wanted=wanted, window=window)
             if matches:
+                # 周线共振波段：仅对日线已触发金叉的候选补拉周K（漏斗收窄后增量请求很小）
+                weekly = None
+                try:
+                    weekly = fetch_kline_weekly(sym)
+                except Exception:  # noqa: BLE001 —— 周K失败只降级为无周线共振
+                    weekly = None
                 results.append({'symbol': sym, 'name': ent.get('name') or '',
                                 'matches': matches,
-                                'resonances': detect_resonances(matches, klines)})
+                                'resonances': detect_resonances(matches, klines, weekly)})
         except Exception as e:  # noqa: BLE001
             errors.append({'symbol': sym, 'error': str(e)[:120]})
     return {'results': results, 'errors': errors}

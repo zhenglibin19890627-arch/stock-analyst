@@ -96,30 +96,12 @@ class TestSignalDetectors:
     def test_macd_golden_above(self):
         """上升途中回踩企稳后缺口大阳 → DIF>0 区域金叉（缺口法构造确定性交叉）。"""
         closes = [50 + i * 2.0 for i in range(40)]           # 强趋势，DIF>0
-        closes += [closes[-1] - 4.0 * (i + 1) for i in range(4)]   # 回踩（此处死叉，在窗口外）
+        closes += [closes[-1] - 4.0 * (i + 1) for i in range(4)]   # 回踩
         closes += [closes[-1]] * 2                                  # 横盘企稳
         closes += [closes[-1] + 25.0]                               # 缺口大阳 → 金叉
         closes += [closes[-1]] * 2
-        hits = detect_signals(_mk_klines(closes), wanted=['macd_golden_above', 'macd_dead'])
+        hits = detect_signals(_mk_klines(closes), wanted=['macd_golden_above'])
         assert 'macd_golden_above' in _signal_keys(hits)
-        assert 'macd_dead' not in _signal_keys(hits)
-
-    def test_macd_dead(self):
-        closes = [50 + i * 1.0 for i in range(40)]
-        closes += [closes[-1] - 3.0 * (i + 1) for i in range(3)]
-        hits = detect_signals(_mk_klines(closes), wanted=['macd_dead'])
-        assert 'macd_dead' in _signal_keys(hits)
-
-    def test_kdj_oversold_state(self):
-        closes = [120 - i * 1.5 for i in range(40)]  # 单边深跌
-        hits = detect_signals(_mk_klines(closes), wanted=['kdj_oversold'])
-        assert 'kdj_oversold' in _signal_keys(hits)
-
-    def test_rsi_oversold_and_overbought(self):
-        down = [200 - i * 1.5 for i in range(40)]
-        up = down[::-1]
-        assert 'rsi_oversold' in _signal_keys(detect_signals(_mk_klines(down), wanted=['rsi_oversold']))
-        assert 'rsi_overbought' in _signal_keys(detect_signals(_mk_klines(up), wanted=['rsi_overbought']))
 
     def test_window_excludes_old_cross(self):
         """金叉发生在窗口外（5根前）→ window=3 不报。"""
@@ -134,25 +116,65 @@ class TestSignalDetectors:
 
 
 class TestResonances:
-    """021BI 跟进：跨指标系共振（形态均经实证调参）。"""
+    """2026-09-07 共振重设计：4 组买点共振（死叉/超买/超卖类已删）。"""
 
     def _deep_v(self):
         closes = [110 - i * 1.5 for i in range(45)]
         closes += [closes[-1] + 2.0 * (i + 1) for i in range(4)]
         return closes
 
-    def test_bottom_reverse_highest_tier(self):
-        """深跌后反弹：低位金叉+水下金叉同窗 → ⭐⭐⭐ 底部反转（非普通双金叉）。"""
+    def test_double_golden_same_day_upgrade(self):
+        """深V反弹：低位金叉+水下金叉同窗；若同日触发升 ⭐4，跨日同窗 ⭐3。"""
         closes = self._deep_v()
         hits = detect_signals(_mk_klines(closes), window=4)
         res = detect_resonances(hits, _mk_klines(closes))
-        assert [r['key'] for r in res] == ['res_bottom_reverse']
+        assert [r['key'] for r in res] == ['res_double_golden']
         top = res[0]
-        assert top['stars'] == 3 and top['kind'] == 'bull'
+        assert top['kind'] == 'bull' and top['stars'] in (3, 4)
         assert 'KDJ低位金叉' in top['signals'] and 'MACD水下金叉' in top['signals']
+        if top['stars'] == 4:
+            assert '同日双金叉' in top['note']
+
+    def test_week_daily_top_tier(self):
+        """周线MACD多头 + 日线金叉 → ⭐5 周线共振波段（最高档优先）。"""
+        closes = self._deep_v()
+        hits = detect_signals(_mk_klines(closes), window=4)
+        weekly = _mk_klines([100 + i * 1.0 for i in range(40)])   # 周线稳步上行 → DIF>DEA
+        res = detect_resonances(hits, _mk_klines(closes), weekly)
+        assert [r['key'] for r in res] == ['res_week_daily']
+        assert res[0]['stars'] == 5
+
+    def test_bottom_reverse_divergence(self):
+        """急跌→缓涨→阴跌创新低（DIF未新低=背离）+低位金叉+放量阳线 → ⭐5 底部反转。"""
+        closes = [100 - i * 1.0 for i in range(20)]        # 急跌：DIF 深渊
+        closes += [80 + i * 0.3 for i in range(20)]        # 缓涨：DIF 修复
+        closes += [86 - i * 0.35 for i in range(12)]       # 阴跌：DIF 回落但不创新低
+        closes += [81.8 - i * 0.55 for i in range(13)]     # 边缘创新低（价格新低、DIF未新低）
+        closes += [closes[-1] + 1.8 * (i + 1) for i in range(3)]  # 反弹 → 低位金叉
+        rows = _mk_klines(closes)
+        rows[-1]['volume'] = 3000.0                        # 放量
+        rows[-1]['open'] = rows[-1]['close'] * 0.95        # 阳线
+        hits = detect_signals(rows, window=4)
+        assert 'kdj_golden_low' in _signal_keys(hits)
+        res = detect_resonances(hits, rows)
+        assert [r['key'] for r in res] == ['res_bottom_reverse']
+        assert res[0]['stars'] == 5
+
+    def test_zero_relay_second_golden(self):
+        """强趋势内两次"回调-修复"：近15日二次金叉且DIF>0 + KDJ中位金叉 → ⭐5。"""
+        closes = [50 + i * 1.2 for i in range(45)]
+        closes += [closes[-1] - 6.0 * (i + 1) for i in range(3)]   # 回调一（死叉）
+        closes += [closes[-1] + 9.0 * (i + 1) for i in range(3)]   # 修复 → 金叉①
+        closes += [closes[-1] - 6.0 * (i + 1) for i in range(3)]   # 回调二（再死叉）
+        closes += [closes[-1] + 9.0 * (i + 1) for i in range(3)]   # 修复 → 金叉②
+        rows = _mk_klines(closes)
+        hits = detect_signals(rows, window=3)
+        res = detect_resonances(hits, rows)
+        assert res and res[0]['key'] == 'res_zero_relay'
+        assert res[0]['stars'] == 5
 
     def test_double_golden_not_low(self):
-        """强趋势缺口金叉：KDJ非低位 → ⭐⭐ 双金叉（不得误判为底部反转）。"""
+        """强趋势缺口金叉：非60日新低 → 不得误判为底部反转。"""
         closes = [50 + i * 2.0 for i in range(40)]
         closes += [closes[-1] - 4.0 * (i + 1) for i in range(4)]
         closes += [closes[-1]] * 2
@@ -163,41 +185,18 @@ class TestResonances:
         assert 'res_double_golden' in [r['key'] for r in res]
         assert 'res_bottom_reverse' not in [r['key'] for r in res]
 
-    def test_bear_confirm(self):
-        """强上涨后单日崩：死叉+超买同窗 → ⚠️ 空头共振预警。"""
-        closes = [50 + i * 3.0 for i in range(40)]
-        closes += [closes[-1] - 10.0]
-        hits = detect_signals(_mk_klines(closes), window=3,
-                              wanted=['macd_dead', 'kdj_overbought', 'rsi_overbought'])
-        res = detect_resonances(hits, _mk_klines(closes))
-        assert [r['key'] for r in res] == ['res_bear_confirm']
-        assert res[0]['kind'] == 'bear'
-
-    def test_oversold_watch_requires_no_trigger(self):
-        """单边深跌双超卖且无金叉 → 💤 观察池。"""
-        closes = [120 - i * 1.5 for i in range(40)]
-        hits = detect_signals(_mk_klines(closes), window=3)
-        res = detect_resonances(hits, _mk_klines(closes))
-        assert [r['key'] for r in res] == ['res_oversold_watch']
-
-    def test_watch_suppressed_when_trigger_exists(self):
-        """超卖+低位金叉同现 → 买点共振成立，不再报观察池。"""
-        closes = self._deep_v()
-        hits = detect_signals(_mk_klines(closes), window=4)
-        res = detect_resonances(hits, _mk_klines(closes))
-        assert 'res_oversold_watch' not in [r['key'] for r in res]
-
     def test_ma20_env_annotation(self):
         """环境注记：深跌股收盘应在 MA20 下方。"""
         closes = self._deep_v()
         res = detect_resonances(detect_signals(_mk_klines(closes), window=4), _mk_klines(closes))
         assert 'MA20下方' in res[0]['note']
 
-    def test_single_signal_no_resonance(self):
-        """仅单一信号（无跨系同向）→ 无共振。"""
-        closes = [120 - i * 1.5 for i in range(40)]  # 只有 KDJ 超卖状态
-        hits = detect_signals(_mk_klines(closes), window=3, wanted=['kdj_oversold'])
-        assert detect_resonances(hits) == []
+    def test_single_system_no_resonance(self):
+        """仅单一指标系（如仅MACD金叉、无KDJ）→ 无共振。"""
+        closes = [100 - i * 1.2 for i in range(40)]
+        closes += [closes[-1] + 1.5 * (i + 1) for i in range(4)]
+        hits = detect_signals(_mk_klines(closes), window=4, wanted=['macd_golden_below'])
+        assert detect_resonances(hits, _mk_klines(closes)) == []
 
 
 class TestSinaRowParser:

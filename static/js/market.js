@@ -182,13 +182,13 @@
 
     function msStopSignals() { _msAbort = true; }
 
-    // 021BI 跟进：共振组渲染顺序（⭐⭐⭐ → ⭐⭐ → ⚠️空头 → 💤观察）
-    var _MS_RES_ORDER = ['res_bottom_reverse', 'res_double_golden', 'res_bear_confirm', 'res_oversold_watch'];
+    // 2026-09-07 共振重设计：4 组买点共振渲染顺序（死叉/超买/超卖类已删）
+    var _MS_RES_ORDER = ['res_week_daily', 'res_bottom_reverse', 'res_zero_relay', 'res_double_golden'];
     var _MS_RES_META = {
-        res_bottom_reverse: { icon: '⭐⭐⭐', note: 'KDJ低位金叉+MACD水下金叉同窗：超卖反转与趋势反弹双确认，经典底部结构' },
-        res_double_golden:  { icon: '⭐⭐',  note: 'MACD系金叉+KDJ系金叉同窗：两个独立指标系同向触发' },
-        res_bear_confirm:   { icon: '⚠️',   note: 'MACD死叉+超买状态同窗：转空双确认，建议排除' },
-        res_oversold_watch: { icon: '💤',   note: 'KDJ与RSI双超卖且窗口内无金叉：深度超跌观察池，等右侧触发' }
+        res_week_daily:     { icon: '⭐⭐⭐⭐⭐', note: '周线共振波段：周线MACD多头+日线金叉，中线波段结构' },
+        res_bottom_reverse: { icon: '⭐⭐⭐⭐⭐', note: '底部反转共振：底背离+KDJ低位金叉+放量阳线，左侧反转最强确认' },
+        res_zero_relay:     { icon: '⭐⭐⭐⭐⭐', note: '零轴上二次金叉：近15日MACD二次金叉+KDJ中位金叉，主升浪中继买点' },
+        res_double_golden:  { icon: '⭐⭐⭐⭐',   note: '双金叉共振：MACD系+KDJ系金叉同窗，同日触发更佳' }
     };
 
     function _msRowCells(r) {
