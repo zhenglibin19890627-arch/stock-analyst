@@ -223,20 +223,20 @@
             <label><input type="checkbox" id="msExSt" checked> 剔ST</label>
             <label>总市值≥<input type="number" id="msMktMin" value="100" min="0" style="width:68px;">亿</label>
             <label>流通(亿)
-                <input type="number" id="msNmcMin" placeholder="≥" min="0" style="width:64px;"> ~
-                <input type="number" id="msNmcMax" placeholder="≤" min="0" style="width:64px;">
+                <input type="number" id="msNmcMin" placeholder="≥" value="50" min="0" style="width:64px;"> ~
+                <input type="number" id="msNmcMax" placeholder="≤" value="500" min="0" style="width:64px;">
             </label>
             <label>换手%
-                <input type="number" id="msTurnMin" value="1" min="0" step="0.5" style="width:56px;"> ~
-                <input type="number" id="msTurnMax" placeholder="不限" min="0" step="0.5" style="width:56px;">
+                <input type="number" id="msTurnMin" placeholder="≥" value="3" min="0" step="0.5" style="width:56px;"> ~
+                <input type="number" id="msTurnMax" placeholder="不限" value="10" min="0" step="0.5" style="width:56px;">
             </label>
             <label>量比
-                <input type="number" id="msVrMin" placeholder="≥" min="0" step="0.1" style="width:56px;"> ~
-                <input type="number" id="msVrMax" placeholder="≤" min="0" step="0.1" style="width:56px;">
+                <input type="number" id="msVrMin" placeholder="≥" value="1.2" min="0" step="0.1" style="width:56px;"> ~
+                <input type="number" id="msVrMax" placeholder="≤" value="3" min="0" step="0.1" style="width:56px;">
             </label>
             <label>涨跌幅
-                <input type="number" id="msChgMin" placeholder="≥" style="width:60px;"> ~
-                <input type="number" id="msChgMax" placeholder="≤" style="width:60px;">%
+                <input type="number" id="msChgMin" placeholder="≥" value="2" style="width:60px;"> ~
+                <input type="number" id="msChgMax" placeholder="≤" value="7" style="width:60px;">%
             </label>
             <label>板块
                 <select id="msBoard" style="width:90px;">
