@@ -133,7 +133,7 @@ def _refresh_kline_today_bar(symbol, market, stock_id, today_str):
         conn.execute(
             'INSERT OR REPLACE INTO raw_kline '
             '(stock_id, trade_date, open, close, high, low, volume, amount, turnover, pct_change, data_source) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)',
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             (
                 stock_id,
                 today_str,
@@ -145,6 +145,10 @@ def _refresh_kline_today_bar(symbol, market, stock_id, today_str):
                 existing['amount'] if existing else None,
                 existing['turnover'] if existing else None,
                 pct,
+                # 2026-09-08 修复：盘中快照行打标记——收盘后 fetch_kline 据此识别残留
+                # 并重采回填真实收盘（原先写 NULL 与历史行无法区分，当日行被"同日
+                # 跳过"永久锁死在盘中价，实测东山精密收盘价错 3.2%）
+                'tencent_intraday',
             ),
         )
         conn.commit()
@@ -189,10 +193,32 @@ def fetch_kline(symbol, market, force_full=False):
                                 return 'success', f'盘中刷新今日K线({today_str})'
                         except Exception as e:  # noqa: BLE001 —— 刷新失败保持旧bar，走原跳过
                             logger.warning(f'[{symbol}] 盘中刷新今日K线失败(保持旧bar): {e}')
-                    skip_msg = f'同日跳过(K线已有{last_date}数据)'
-                    save_data_status(stock_id, 'kline', 'success', skip_msg)
-                    logger.info(f'[{symbol}] {skip_msg}')
-                    return 'success', skip_msg
+                        skip_msg = f'同日跳过(K线已有{last_date}数据)'
+                        save_data_status(stock_id, 'kline', 'success', skip_msg)
+                        logger.info(f'[{symbol}] {skip_msg}')
+                        return 'success', skip_msg
+
+                    # 2026-09-08 修复（收盘时段）：当日行若为盘中实时残留（020R-59
+                    # 盘中刷新写入，data_source='tencent_intraday'，close 是采集
+                    # 时刻的盘中价），必须重采回填真实收盘——原先无条件"同日跳过"，
+                    # 残留价被永久锁死（实测东山精密收盘价错 3.2% 且周线连带污染）。
+                    conn_src = get_connection()
+                    try:
+                        r_src = conn_src.execute(
+                            'SELECT data_source FROM raw_kline WHERE stock_id=? AND trade_date=?',
+                            (stock_id, last_date),
+                        ).fetchone()
+                    finally:
+                        conn_src.close()
+                    if not (r_src and r_src['data_source'] == 'tencent_intraday'):
+                        skip_msg = f'同日跳过(K线已有{last_date}数据)'
+                        save_data_status(stock_id, 'kline', 'success', skip_msg)
+                        logger.info(f'[{symbol}] {skip_msg}')
+                        return 'success', skip_msg
+                    logger.info(
+                        f'[{symbol}] 当日K线为盘中实时残留({last_date})，收盘后重采回填真实收盘'
+                    )
+                    # 不 return —— 落到下方正常历史采集（INSERT OR REPLACE 覆盖当日行）
         except Exception as e:
             logger.warning(f'[{symbol}] K线增量检查异常(降级为全量): {e}')
 

@@ -103,13 +103,14 @@ class TestIntradayKlineRefresh:
 
         conn = idb.get_connection()
         row = conn.execute(
-            "SELECT close, pct_change, amount FROM raw_kline WHERE stock_id=1 AND trade_date='2026-08-13'"
+            "SELECT close, pct_change, amount, data_source FROM raw_kline WHERE stock_id=1 AND trade_date='2026-08-13'"
         ).fetchone()
         n = conn.execute('SELECT COUNT(*) FROM raw_kline WHERE stock_id=1').fetchone()[0]
         conn.close()
         assert row['close'] == 32.46  # 今日 bar 已更新（腾讯行情现价）
         assert row['pct_change'] == pytest.approx(-0.86, abs=0.01)  # (32.46-32.74)/32.74
         assert row['amount'] == 4000000  # amount 保留
+        assert row['data_source'] == 'tencent_intraday'  # 2026-09-08：盘中快照行打标记
         assert n == 2  # 历史数据未动
 
     def test_skip_out_of_session(self, idb, monkeypatch):
@@ -124,6 +125,46 @@ class TestIntradayKlineRefresh:
         status, msg = dc.fetch_kline('600276', 'a_stock')
         assert status == 'success'
         assert '同日跳过' in msg
+
+    def test_backfill_intraday_residue_after_close(self, idb, monkeypatch):
+        """2026-09-08 修复（收盘时段）：当日行为盘中实时残留（data_source=
+        'tencent_intraday'）→ 不再同日跳过，重采回填真实收盘。
+
+        实测背景：东山精密盘中刷新写入 close=盘中价后，收盘真实 K 线被旧
+        "同日跳过"永久锁死，收盘价错 3.2% 且周线连带污染。
+        """
+        _patch_now(monkeypatch, hour=20, minute=0)
+
+        conn = idb.get_connection()
+        conn.execute(
+            "UPDATE raw_kline SET data_source='tencent_intraday' WHERE trade_date='2026-08-13'"
+        )
+        conn.commit()
+        conn.close()
+
+        df = pd.DataFrame(
+            [
+                {'日期': '2026-08-12', '开盘': 9.0, '收盘': 9.5, '最高': 9.8,
+                 '最低': 8.9, '成交量': 1000, '成交额': 5000000.0, '涨跌幅': 1.0},
+                {'日期': '2026-08-13', '开盘': 9.6, '收盘': 10.35, '最高': 10.4,
+                 '最低': 9.55, '成交量': 2000, '成交额': 8000000.0, '涨跌幅': 8.95},
+            ]
+        )
+        monkeypatch.setattr(_kline, '_fetch_kline_tencent', lambda *a, **k: df)
+
+        status, msg = dc.fetch_kline('600276', 'a_stock')
+        assert status == 'success'
+        assert '同日跳过' not in msg  # 残留行不跳过
+
+        conn = idb.get_connection()
+        row = conn.execute(
+            "SELECT close, data_source FROM raw_kline WHERE stock_id=1 AND trade_date='2026-08-13'"
+        ).fetchone()
+        n = conn.execute('SELECT COUNT(*) FROM raw_kline WHERE stock_id=1').fetchone()[0]
+        conn.close()
+        assert row['close'] == 10.35  # 真实收盘回填（覆盖盘中价 10.0）
+        assert row['data_source'] is None  # 历史源（腾讯主源）恢复标准标注
+        assert n == 2  # 无重复行
 
 
 class TestSentimentIntraday020R60:
