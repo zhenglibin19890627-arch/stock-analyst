@@ -1,5 +1,16 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-09-08] 趋势罗盘显示截断修复：后端文案 "<" 被 innerHTML 吞掉的系统性根治
+
+用户实测：中免报告页罗盘月线理由显示到"MACD 双线死叉（DIF"半截——`（DIF<DEA）` 的 `<DEA）` 被前端 innerHTML 当 HTML 标签吞掉（与此前月线空头惩罚说明同病根）。全项目扫描 modules/blueprints 所有含 `<` 且会被前端渲染的文案，一次根治：
+
+- **趋势罗盘**：`trend_analyzer.py` 4 处信号文案 `（DIF<DEA）/（DIF<0）/（DIF>DEA）/（DIF>0）` → 文字描述"高于/低于"；`analysis.js` 罗盘渲染加 `_tcEsc` 转义防守（理由/共振标签全走转义）。
+- **报告页关键因子**：`advisor.py::_build_kline_factors`（B20 独立因子构建器，非 generate_advice 本体）`ma_trend` 空头文案 `MA5 < MA20` → "低于"，均线趋势行不再吞字。
+- **选股扫描器**：`market_screener.py` KDJ低位金叉 note `D<25` → "D低于25"（扫描结果列表直接渲染 note）。
+- **评分明细（防御性）**：`scoring_engine.py` cross/macd 两处 detail 文案去 `<`（当前前端未渲染该键，防未来透出）。
+- **回测中心 Markdown**：marked.parse 渲染下 `（<30）` 同样被吞——`backtest_engine.py` 2 处、`price_backtest.py` 3 处样本量提示改"不足30/不足20"。
+- 剩余 `<` 仅存在于日志/控制台/注释（不进 HTML 渲染）与代码比较运算，无风险。终验 fast 870 绿 + ruff + mypy 0 + 红线 28/28；重启后实测中免趋势 API 文案完整（"MACD 双线死叉（DIF 低于 DEA）"）。
+
 ## [2026-09-07] 第二轮批判性审查：算法口径统一（RSI/KDJ）+ 每日自动备份
 
 用户要求再批判性检查一轮，复查未审区域后修复 4 处问题（3 处算法/口径 + 1 处运维缺口）：

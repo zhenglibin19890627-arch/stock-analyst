@@ -1277,15 +1277,20 @@
                     ['长期（月线）', d.timeframes.monthly]
                 ];
                 var html = '';
+                // 2026-09-07：后端理由文本若含 "<" 会被 innerHTML 当标签吞掉（实测
+                // "MACD 双线死叉（DIF" 半截）——渲染前统一转义防守
+                function _tcEsc(s) {
+                    return String(s).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                }
                 // 综合判断行
                 var o = d.overall || {};
                 html += '<div style="display:flex;align-items:center;gap:10px;padding:4px 0 8px;border-bottom:1px dashed var(--border-light,#eee);">' +
                         '<span style="font-weight:600;min-width:86px;">综合</span>' + _tcBadge(o.trend, o.strength);
                 if (o.resonance) {
-                    html += '<span style="background:#fff3e0;color:#e65100;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;">⚡ ' + o.resonance + '</span>';
+                    html += '<span style="background:#fff3e0;color:#e65100;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;">⚡ ' + _tcEsc(o.resonance) + '</span>';
                 }
                 (o.reasons || []).forEach(function(t) {
-                    html += '<span style="color:var(--text-2,#666);font-size:12.5px;">' + t + '</span>';
+                    html += '<span style="color:var(--text-2,#666);font-size:12.5px;">' + _tcEsc(t) + '</span>';
                 });
                 html += '</div>';
                 rows.forEach(function(pair) {
@@ -1294,7 +1299,7 @@
                     html += '<span style="font-weight:600;min-width:86px;">' + name + '</span>';
                     html += _tcBadge(tf.trend, tf.strength);
                     html += '<span style="color:var(--text-2,#666);font-size:12.5px;line-height:1.7;">' +
-                            (tf.reasons || []).join('；') + '</span>';
+                            _tcEsc((tf.reasons || []).join('；')) + '</span>';
                     html += '</div>';
                 });
                 body.innerHTML = html;

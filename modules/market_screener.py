@@ -89,7 +89,7 @@ def _http_get(url, params=None, headers=None, channel='sina', timeout=10, retrie
 SIGNAL_LIBRARY = {
     'macd_golden_above': {'label': 'MACD水上金叉', 'note': 'DIF上穿DEA且DIF>0：多头趋势中的加速信号，相对可靠'},
     'macd_golden_below': {'label': 'MACD水下金叉', 'note': 'DIF上穿DEA且DIF≤0：下跌趋势中的反弹信号，需配合量能，偏短线'},
-    'kdj_golden_low': {'label': 'KDJ低位金叉', 'note': 'K上穿D且交叉时D<25：超卖区反转，信号中较可靠的买点'},
+    'kdj_golden_low': {'label': 'KDJ低位金叉', 'note': 'K上穿D且交叉时D低于25：超卖区反转，信号中较可靠的买点'},
     'kdj_golden': {'label': 'KDJ金叉', 'note': 'K上穿D：一般买点参考'},
 }
 

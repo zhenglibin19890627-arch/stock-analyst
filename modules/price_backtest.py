@@ -1196,9 +1196,9 @@ def compute_price_backtest_report(market='a_stock'):
             't20_take_profit': _hr_sub(conf_rows, 't20_hit_take_profit'),
         }
         if conf == 'confirmed' and 0 < total_c < 30:
-            entry['note'] = '样本量不足（<30），仅供参考'
+            entry['note'] = '样本量不足（不足30），仅供参考'
         elif conf == 'mismatched' and 0 < total_c < 20:
-            entry['note'] = '样本量极少（<20），仅作定性参考'
+            entry['note'] = '样本量极少（不足20），仅作定性参考'
         confidence_report[conf] = entry
 
     # 高偏差风险样本
@@ -1246,7 +1246,7 @@ def compute_price_backtest_report(market='a_stock'):
         if real_total > 0:
             if real_total < 30:
                 _add_interp(
-                    f'真实样本仅 {real_total} 个（<30），以下命中率仅供趋势参考，样本不足结论易反转。',
+                    f'真实样本仅 {real_total} 个（不足30），以下命中率仅供趋势参考，样本不足结论易反转。',
                     'bad',
                 )
             _r5b = real_hit_rates['t5']['buy_range']

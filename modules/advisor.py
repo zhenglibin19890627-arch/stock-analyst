@@ -1079,9 +1079,11 @@ def _build_kline_factors(factors, stock_data, stock_id):
     ma5, ma20 = stock_data.ma5, stock_data.ma20
     if ma5 is not None and ma20 is not None:
         if ma5 > ma20:
-            factors['ma_trend'] = f'多头排列(MA5={ma5:.2f} > MA20={ma20:.2f})'
+            factors['ma_trend'] = f'多头排列(MA5={ma5:.2f} 高于 MA20={ma20:.2f})'
         else:
-            factors['ma_trend'] = f'空头排列(MA5={ma5:.2f} < MA20={ma20:.2f})'
+            # 2026-09-07："<" 会被前端 innerHTML 当标签吞掉（均线趋势行显示半截），
+            # 改文字描述；本函数为 B20 独立因子构建器，不属 generate_advice（B24）本体
+            factors['ma_trend'] = f'空头排列(MA5={ma5:.2f} 低于 MA20={ma20:.2f})'
 
     rsi = stock_data.rsi_14
     if rsi is not None:

@@ -327,7 +327,7 @@ def score_ma(data: StockData) -> tuple[float, dict]:
         else:
             deviation = (ma20_v - ma5_v) / ma20_v * 100 if ma20_v > 0 else 0
             score = _clamp(15.0 - deviation * 1.0)
-            detail['cross'] = f'死叉(MA5={ma5_v:.2f} < MA20={ma20_v:.2f})'
+            detail['cross'] = f'死叉(MA5={ma5_v:.2f} 低于 MA20={ma20_v:.2f})'
 
     # 价格在均线之上加分
     for name, ma_val in available.items():
@@ -368,7 +368,7 @@ def score_trend(data: StockData) -> tuple[float, dict]:
         else:
             hist = dea_v - dif_v
             score = _clamp(10.0 - min(15.0, hist * 30))
-            detail['macd'] = f'DIF<DEA 空头({-hist:.4f})'
+            detail['macd'] = f'DIF低于DEA 空头({-hist:.4f})'
     elif 'macd_dif' in available:
         dif_only: float = available['macd_dif']
         if dif_only > 0:

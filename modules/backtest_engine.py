@@ -707,7 +707,7 @@ class BacktestEngine:
             add(f'引擎构成：{"、".join(comp_parts)}。')
             if v5n < 30 and (legacy_n + unmarked) > 0:
                 add(
-                    f'当前 v5 规则样本仅 {v5n} 条（<30），本报告总体结论主要反映历史引擎表现，'
+                    f'当前 v5 规则样本仅 {v5n} 条（不足30），本报告总体结论主要反映历史引擎表现，'
                     '当前评分规则尚未积累足够回测样本、未被验证。',
                     'bad',
                 )
@@ -819,7 +819,7 @@ class BacktestEngine:
             if 0 < s.get('total', 0) < 30 and s.get('accuracy') is not None
         ]
         if low:
-            add(f'注意：「{'、'.join(sorted(low))}」样本不足（<30条），其准确率仅供参考，勿单独作为决策依据。', 'bad')
+            add(f'注意：「{'、'.join(sorted(low))}」样本不足（不足30条），其准确率仅供参考，勿单独作为决策依据。', 'bad')
 
         add('以上为历史回测统计解读，不构成投资建议。')
         # 020R-20/21：逐条观点 + 色调列表（前端卡片化逐条着色展示）

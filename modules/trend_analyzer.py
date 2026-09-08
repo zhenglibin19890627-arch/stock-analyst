@@ -72,13 +72,15 @@ def _classify(close: float, ma_fast, ma_slow, dif, dea, fast_label: str = '快�
     else:
         signals.append((False, 1.0, f'现价跌破 {slow_name}'))
     if dif > dea:
-        signals.append((True, 1.0, 'MACD 双线金叉（DIF>DEA）'))
+        signals.append((True, 1.0, 'MACD 双线金叉（DIF 高于 DEA）'))
     else:
-        signals.append((False, 1.0, 'MACD 双线死叉（DIF<DEA）'))
+        # 2026-09-07：文案含 "<DEA)" 会被前端 innerHTML 当 HTML 标签吞掉
+        # （实测罗盘月线理由显示到 "MACD 双线死叉（DIF" 截断），改文字描述
+        signals.append((False, 1.0, 'MACD 双线死叉（DIF 低于 DEA）'))
     if dif > 0:
-        signals.append((True, 0.5, 'MACD 红柱区（DIF>0）'))
+        signals.append((True, 0.5, 'MACD 红柱区（DIF 高于 0）'))
     else:
-        signals.append((False, 0.5, 'MACD 绿柱区（DIF<0）'))
+        signals.append((False, 0.5, 'MACD 绿柱区（DIF 低于 0）'))
     if close > ma_fast:
         signals.append((True, 0.5, f'现价在 {fast_name} 上方'))
     else:
