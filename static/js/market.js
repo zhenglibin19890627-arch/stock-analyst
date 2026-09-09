@@ -928,7 +928,7 @@
         }
         if (td.monthly_vol_ratio != null) {
             monthlyInner += _row('月线量能',
-                ('当月累计量/前20月均量 ' + td.monthly_vol_ratio), td.monthly_vol_state);
+                ('当月量/前20月均 ' + td.monthly_vol_ratio), td.monthly_vol_state);
         }
         if (td.monthly_latest_close != null) {
             monthlyInner += _row('月线收盘', String(td.monthly_latest_close), null);
@@ -973,7 +973,7 @@
                 td.weekly_kdj_state);
         }
         if (td.weekly_vol_ratio != null) {
-            weeklyInner += _row('周线量能', ('本周累计量/前20周均量 ' + td.weekly_vol_ratio), td.weekly_vol_state);
+            weeklyInner += _row('周线量能', ('本周量/前20周均 ' + td.weekly_vol_ratio), td.weekly_vol_state);
         }
         html += _group('📊 周线波段层', '45%', _layerScore(['weekly_trend', 'weekly_obos', 'weekly_vol']), weeklyInner);
 
@@ -984,14 +984,14 @@
             _subRow('vol_price', '量价分析') +
             _subRow('vol_ratio', '量比') +
             _row('均线系统',
-                (td.ma5 != null ? ('MA5 ' + td.ma5 + ' · MA10 ' + td.ma10 + ' · MA20 ' + td.ma20) : null),
+                (td.ma5 != null ? ('MA5 ' + td.ma5 + '/MA10 ' + td.ma10 + '/MA20 ' + td.ma20) : null),
                 td.ma_state) +
             _row('MACD趋势',
-                (td.macd_dif != null ? ('DIF ' + td.macd_dif + ' · DEA ' + td.macd_dea + ' · 柱 ' + (td.macd_hist >= 0 ? '+' : '') + td.macd_hist) : null),
+                (td.macd_dif != null ? ('DIF' + td.macd_dif + '/DEA' + td.macd_dea + '/柱' + (td.macd_hist >= 0 ? '+' : '') + td.macd_hist) : null),
                 td.macd_state) +
             _row('布林带',
                 (td.boll_position != null
-                    ? ('位置 ' + td.boll_position + '% · 上' + td.boll_upper + '/中' + td.boll_mid + '/下' + td.boll_lower)
+                    ? (td.boll_position + '% 上' + td.boll_upper + '/' + td.boll_mid + '/' + td.boll_lower)
                     : null),
                 td.boll_state);
         if (!(subs && subs['obos'])) {
