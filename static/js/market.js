@@ -893,14 +893,18 @@
         // ---- 月线方向层（25%）----
         // 021S：月线同样有六类指标（technical_detail.py 已按 monthly_ 前缀计算），
         // MA 排列 + MACD + RSI + KDJ + 布林 + 量能 + 近12月走势全量展示
+        // 2026-09-09：子项行 detail 已含对应读数（MA 状态等）——有子项时不再渲染
+        // 重复读数行，一行说清（无子项数据的旧报告回退读数行）
         var monthlyInner = _subRow('monthly_trend', '月线方向');
-        monthlyInner += _row('月线均线',
-            (td.monthly_ma5 != null
-                ? ('MA5 ' + td.monthly_ma5 +
-                    (td.monthly_ma10 != null ? ' · MA10 ' + td.monthly_ma10 : '') +
-                    (td.monthly_ma20 != null ? ' · MA20 ' + td.monthly_ma20 : ''))
-                : null),
-            td.monthly_ma_state);
+        if (!(subs && subs['monthly_trend'])) {
+            monthlyInner += _row('月线均线',
+                (td.monthly_ma5 != null
+                    ? ('MA5 ' + td.monthly_ma5 +
+                        (td.monthly_ma10 != null ? ' · MA10 ' + td.monthly_ma10 : '') +
+                        (td.monthly_ma20 != null ? ' · MA20 ' + td.monthly_ma20 : ''))
+                    : null),
+                td.monthly_ma_state);
+        }
         if (td.monthly_macd_state != null) {
             monthlyInner += _row('月线MACD',
                 (td.monthly_macd_dif != null
@@ -941,20 +945,24 @@
         var weeklyInner = _subRow('weekly_trend', '周线趋势') +
             _subRow('weekly_obos', '周线超买超卖') +
             _subRow('weekly_vol', '周线波动');
-        if (td.weekly_ma_state != null) {
-            weeklyInner += _row('周线均线',
-                (td.weekly_ma10 != null ? ('MA10 ' + td.weekly_ma10 + ' · MA20 ' + td.weekly_ma20) : null),
-                td.weekly_ma_state);
+        // 读数行去重（2026-09-09）：均线/MACD 已并入周线趋势子项 detail、RSI 已并入
+        // 周线超买超卖、布林位置已并入周线波动——有子项时不再重复渲染
+        if (!(subs && subs['weekly_trend'])) {
+            if (td.weekly_ma_state != null) {
+                weeklyInner += _row('周线均线',
+                    (td.weekly_ma10 != null ? ('MA10 ' + td.weekly_ma10 + ' · MA20 ' + td.weekly_ma20) : null),
+                    td.weekly_ma_state);
+            }
+            if (td.weekly_macd_state != null) {
+                weeklyInner += _row('周线MACD',
+                    (td.weekly_macd_dif != null ? ('DIF ' + td.weekly_macd_dif + ' · DEA ' + td.weekly_macd_dea) : null),
+                    td.weekly_macd_state);
+            }
         }
-        if (td.weekly_macd_state != null) {
-            weeklyInner += _row('周线MACD',
-                (td.weekly_macd_dif != null ? ('DIF ' + td.weekly_macd_dif + ' · DEA ' + td.weekly_macd_dea) : null),
-                td.weekly_macd_state);
-        }
-        if (td.weekly_rsi14 != null) {
+        if (!(subs && subs['weekly_obos']) && td.weekly_rsi14 != null) {
             weeklyInner += _row('周线RSI', String(td.weekly_rsi14), td.weekly_rsi_state);
         }
-        if (td.weekly_boll_position != null) {
+        if (!(subs && subs['weekly_vol']) && td.weekly_boll_position != null) {
             weeklyInner += _row('周线布林',
                 ('位置 ' + td.weekly_boll_position + '% · 上' + td.weekly_boll_upper + '/下' + td.weekly_boll_lower),
                 td.weekly_boll_state);
@@ -970,6 +978,8 @@
         html += _group('📊 周线波段层', '45%', _layerScore(['weekly_trend', 'weekly_obos', 'weekly_vol']), weeklyInner);
 
         // ---- 日线择时层（30%）----
+        // 读数行去重（2026-09-09）：RSI/KDJ 已并入超买超卖子项、量能已并入量比子项；
+        // 均线系统/MACD趋势/布林带不参评，保留展示
         var dailyInner = _subRow('obos', '超买超卖') +
             _subRow('vol_price', '量价分析') +
             _subRow('vol_ratio', '量比') +
@@ -979,14 +989,18 @@
             _row('MACD趋势',
                 (td.macd_dif != null ? ('DIF ' + td.macd_dif + ' · DEA ' + td.macd_dea + ' · 柱 ' + (td.macd_hist >= 0 ? '+' : '') + td.macd_hist) : null),
                 td.macd_state) +
-            _row('RSI(14)', (td.rsi14 != null ? String(td.rsi14) : null), td.rsi_state) +
-            _row('KDJ', (td.kdj_k != null ? ('K ' + td.kdj_k + ' · D ' + td.kdj_d + ' · J ' + td.kdj_j) : null), td.kdj_state) +
             _row('布林带',
                 (td.boll_position != null
                     ? ('位置 ' + td.boll_position + '% · 上' + td.boll_upper + '/中' + td.boll_mid + '/下' + td.boll_lower)
                     : null),
-                td.boll_state) +
-            _row('量能', (td.vol_ratio != null ? ('量比 ' + td.vol_ratio) : null), td.vol_state);
+                td.boll_state);
+        if (!(subs && subs['obos'])) {
+            dailyInner += _row('RSI(14)', (td.rsi14 != null ? String(td.rsi14) : null), td.rsi_state) +
+                _row('KDJ', (td.kdj_k != null ? ('K ' + td.kdj_k + ' · D ' + td.kdj_d + ' · J ' + td.kdj_j) : null), td.kdj_state);
+        }
+        if (!(subs && subs['vol_ratio'])) {
+            dailyInner += _row('量能', (td.vol_ratio != null ? ('量比 ' + td.vol_ratio) : null), td.vol_state);
+        }
         if (factors && factors.recent_trend) {
             dailyInner += _row('近期走势', String(factors.recent_trend), null);
         }
@@ -1100,20 +1114,27 @@
             g1Html += _dimFoldSubRow(subs, 'valuation', '估值') +
                 _dimFoldSubRow(subs, 'profitability', '盈利能力');
         }
-        g1Html += _dimFoldRow('估值',
-            (fd.pe != null ? ('PE ' + _fv(fd.pe, fd.pe_state)) : '') +
-            (fd.pb != null ? (' · PB ' + _fv(fd.pb, fd.pb_state)) : ''));
-        g1Html += _dimFoldRow('盈利能力',
-            (fd.roe != null ? ('ROE ' + _fv(fd.roe + '%', fd.roe_state)) : '') +
-            (fd.gross_margin != null ? (' · 毛利率 ' + _fv(fd.gross_margin + '%', fd.gm_state)) : ''));
+        // 读数行去重（2026-09-09）：子项 detail 已含同值——有子项时不再渲染
+        if (!(subs && subs['valuation'])) {
+            g1Html += _dimFoldRow('估值',
+                (fd.pe != null ? ('PE ' + _fv(fd.pe, fd.pe_state)) : '') +
+                (fd.pb != null ? (' · PB ' + _fv(fd.pb, fd.pb_state)) : ''));
+        }
+        if (!(subs && subs['profitability'])) {
+            g1Html += _dimFoldRow('盈利能力',
+                (fd.roe != null ? ('ROE ' + _fv(fd.roe + '%', fd.roe_state)) : '') +
+                (fd.gross_margin != null ? (' · 毛利率 ' + _fv(fd.gross_margin + '%', fd.gm_state)) : ''));
+        }
         html += _dimFoldGroup('估值与盈利', '📊', g1.wpct, g1.score, g1Html);
 
         // ---- 成长性层（25%；业绩预告/快报折价参评，020R-49/50）----
         var g2 = _dimFoldStats(subs, ['growth']);
         var g2Html = subs ? _dimFoldSubRow(subs, 'growth', '成长性') : '';
-        g2Html += _dimFoldRow('成长性',
-            (fd.revenue_growth != null ? ('营收 ' + _fv((fd.revenue_growth > 0 ? '+' : '') + fd.revenue_growth + '%', fd.rg_state)) : '') +
-            (fd.profit_growth != null ? (' · 净利 ' + _fv((fd.profit_growth > 0 ? '+' : '') + fd.profit_growth + '%', fd.pg_state)) : ''));
+        if (!(subs && subs['growth'])) {
+            g2Html += _dimFoldRow('成长性',
+                (fd.revenue_growth != null ? ('营收 ' + _fv((fd.revenue_growth > 0 ? '+' : '') + fd.revenue_growth + '%', fd.rg_state)) : '') +
+                (fd.profit_growth != null ? (' · 净利 ' + _fv((fd.profit_growth > 0 ? '+' : '') + fd.profit_growth + '%', fd.pg_state)) : ''));
+        }
         if (fd.forecast_type) {
             var fcBody = fd.forecast_type;
             if (fd.forecast_change_pct != null) {
@@ -1145,11 +1166,15 @@
             g3Html += _dimFoldSubRow(subs, 'cashflow', '现金流质量') +
                 _dimFoldSubRow(subs, 'fin_health', '财务健康度');
         }
-        g3Html += _dimFoldRow('现金流质量',
-            fd.ocf_to_profit != null ? ('经营现金流/净利润 ' + _fv(fd.ocf_to_profit, fd.ocf_state)) : '');
-        g3Html += _dimFoldRow('财务健康度',
-            (fd.debt_ratio != null ? ('负债率 ' + _fv(fd.debt_ratio + '%', fd.dr_state)) : '') +
-            (fd.current_ratio != null ? (' · 流动比率 ' + _fv(fd.current_ratio, fd.cr_state)) : ''));
+        if (!(subs && subs['cashflow'])) {
+            g3Html += _dimFoldRow('现金流质量',
+                fd.ocf_to_profit != null ? ('经营现金流/净利润 ' + _fv(fd.ocf_to_profit, fd.ocf_state)) : '');
+        }
+        if (!(subs && subs['fin_health'])) {
+            g3Html += _dimFoldRow('财务健康度',
+                (fd.debt_ratio != null ? ('负债率 ' + _fv(fd.debt_ratio + '%', fd.dr_state)) : '') +
+                (fd.current_ratio != null ? (' · 流动比率 ' + _fv(fd.current_ratio, fd.cr_state)) : ''));
+        }
         if (factors && factors.fund_trend) {
             g3Html += _dimFoldRow('基本面趋势', '<span style="color:var(--text,#333);font-weight:400;">' + String(factors.fund_trend) + '</span>');
         }
@@ -1207,11 +1232,15 @@
         // ---- 021V：主力资金层（50%）----
         var g1 = _dimFoldStats(subs, ['main_capital']);
         var g1Html = subs ? _dimFoldSubRow(subs, 'main_capital', '主力资金') : '';
-        g1Html += _dimFoldRow('主力资金',
-            cd.main_net != null ? _fv(_wanFmt(cd.main_net), cd.main_state) :
-            '<span style="color:var(--text-3,#999);">数据缺失</span>');
-        if (cd.main_avg_5d != null) {
-            g1Html += _dimFoldRow('主力5日均', '<span style="color:var(--text,#333);font-weight:400;">' + _wanFmt(cd.main_avg_5d) + '</span>');
+        // 读数行去重（2026-09-09）：主力资金/主力5日均已并入子项 detail（融合口径
+        // "当日X/5日均Y融合"信息量大于单独读数行）——有子项时不再渲染
+        if (!(subs && subs['main_capital'])) {
+            g1Html += _dimFoldRow('主力资金',
+                cd.main_net != null ? _fv(_wanFmt(cd.main_net), cd.main_state) :
+                '<span style="color:var(--text-3,#999);">数据缺失</span>');
+            if (cd.main_avg_5d != null) {
+                g1Html += _dimFoldRow('主力5日均', '<span style="color:var(--text,#333);font-weight:400;">' + _wanFmt(cd.main_avg_5d) + '</span>');
+            }
         }
         // 021Q：南下资金·个股（港股通标的，展示暂不参评）
         if (cd.south_stock_net != null) {
@@ -1228,22 +1257,27 @@
             g2Html += _dimFoldSubRow(subs, 'inst_hold', '机构持仓') +
                 _dimFoldSubRow(subs, 'holder_count', '股东人数');
         }
-        g2Html += _dimFoldRow('机构持仓',
-            cd.inst_ratio != null
-                ? _fv(cd.inst_ratio + '%' + (cd.inst_report_date ? '（' + cd.inst_report_date + '）' : ''), cd.inst_state)
-                : '<span style="color:var(--text-3,#999);">数据缺失</span>');
-        // 021U/021Q：A股显示户数环比；港股显示机构股东数代理；两边皆无则 A股保留缺失提示、港股整行省略
-        if (cd.holder_count_change_pct != null) {
-            g2Html += _dimFoldRow('股东人数',
-                '户数环比 ' + _fv((cd.holder_count_change_pct > 0 ? '+' : '') + cd.holder_count_change_pct + '%', cd.holder_state));
-        } else if (cd.inst_count != null) {
-            var icBody = cd.inst_count + ' 家机构';
-            if (cd.inst_count_change_pct != null) {
-                icBody += '（环比 ' + (cd.inst_count_change_pct > 0 ? '+' : '') + cd.inst_count_change_pct + '%）';
+        // 读数行去重（2026-09-09）：有子项时不重复渲染（港股机构股东数/南向参考无子项，保留）
+        if (!(subs && subs['inst_hold'])) {
+            g2Html += _dimFoldRow('机构持仓',
+                cd.inst_ratio != null
+                    ? _fv(cd.inst_ratio + '%' + (cd.inst_report_date ? '（' + cd.inst_report_date + '）' : ''), cd.inst_state)
+                    : '<span style="color:var(--text-3,#999);">数据缺失</span>');
+        }
+        if (!(subs && subs['holder_count'])) {
+            // 021U/021Q：A股显示户数环比；港股显示机构股东数代理；两边皆无则 A股保留缺失提示、港股整行省略
+            if (cd.holder_count_change_pct != null) {
+                g2Html += _dimFoldRow('股东人数',
+                    '户数环比 ' + _fv((cd.holder_count_change_pct > 0 ? '+' : '') + cd.holder_count_change_pct + '%', cd.holder_state));
+            } else if (cd.inst_count != null) {
+                var icBody = cd.inst_count + ' 家机构';
+                if (cd.inst_count_change_pct != null) {
+                    icBody += '（环比 ' + (cd.inst_count_change_pct > 0 ? '+' : '') + cd.inst_count_change_pct + '%）';
+                }
+                g2Html += _dimFoldRow('机构股东数(港股)', _fv(icBody, cd.inst_count_state));
+            } else if (!isHk) {
+                g2Html += _dimFoldRow('股东人数', '<span style="color:var(--text-3,#999);">数据缺失</span>');
             }
-            g2Html += _dimFoldRow('机构股东数(港股)', _fv(icBody, cd.inst_count_state));
-        } else if (!isHk) {
-            g2Html += _dimFoldRow('股东人数', '<span style="color:var(--text-3,#999);">数据缺失</span>');
         }
         // 020R-47：南向资金大盘参考（仅港股展示，不参评）
         if (cd.south_net_buy != null) {
@@ -1259,10 +1293,12 @@
         // 021U：港股无两融披露源（制度性恒缺）→ 整组不渲染；A股缺失保留提示行（可能是数据源故障）
         if (!isHk) {
             var g3 = _dimFoldStats(subs, ['margin_capital']);
-            var g3Html = (subs ? _dimFoldSubRow(subs, 'margin_capital', '杠杆资金') : '') +
-                _dimFoldRow('杠杆资金',
+            var g3Html = subs ? _dimFoldSubRow(subs, 'margin_capital', '杠杆资金') : '';
+            if (!(subs && subs['margin_capital'])) {
+                g3Html += _dimFoldRow('杠杆资金',
                     cd.margin_chg != null ? ('融资余额 ' + _fv(_wanFmt(cd.margin_chg), cd.margin_state)) :
                     '<span style="color:var(--text-3,#999);">数据缺失（A股两融）</span>');
+            }
             html += _dimFoldGroup('杠杆资金', '⚖️', g3.wpct, g3.score, g3Html);
         }
 
@@ -1295,10 +1331,13 @@
         // ---- 021V：市场情绪层（70%）----
         var g1 = _dimFoldStats(subs, ['sentiment']);
         var g1Html = subs ? _dimFoldSubRow(subs, 'sentiment', '情绪') : '';
-        g1Html += _dimFoldRow('情绪',
-            nd.avg_sentiment != null
-                ? _fv((nd.avg_sentiment > 0 ? '+' : '') + nd.avg_sentiment.toFixed(2), nd.sentiment_state)
-                : '<span style="color:var(--text-3,#999);">数据缺失</span>');
+        // 读数行去重（2026-09-09）：情绪值已并入子项 detail——有子项时不再渲染
+        if (!(subs && subs['sentiment'])) {
+            g1Html += _dimFoldRow('情绪',
+                nd.avg_sentiment != null
+                    ? _fv((nd.avg_sentiment > 0 ? '+' : '') + nd.avg_sentiment.toFixed(2), nd.sentiment_state)
+                    : '<span style="color:var(--text-3,#999);">数据缺失</span>');
+        }
         if (nd.total_count != null) {
             var overview = '共 ' + nd.total_count + ' 条';
             if (nd.positive_ratio != null) overview += ' · 正面 ' + nd.positive_ratio + '%';
@@ -1315,14 +1354,17 @@
         // ---- 股东行为层（30%，020R-44 三态显示）----
         var g2 = _dimFoldStats(subs, ['holder']);
         var g2Html = subs ? _dimFoldSubRow(subs, 'holder', '股东行为') : '';
-        if (nd.holder === true) {
-            g2Html += _dimFoldRow('股东行为', _fv('增持', '增持·利好'));
-        } else if (nd.holder === false) {
-            g2Html += _dimFoldRow('股东行为',
-                '<span style="color:#27ae60;font-weight:600;">近30天无增持</span>');
-        } else {
-            g2Html += _dimFoldRow('股东行为',
-                '<span style="color:var(--text-3,#999);">数据缺失（接口不可用或港股未采集）</span>');
+        // 读数行去重（2026-09-09）：有子项时不重复渲染
+        if (!(subs && subs['holder'])) {
+            if (nd.holder === true) {
+                g2Html += _dimFoldRow('股东行为', _fv('增持', '增持·利好'));
+            } else if (nd.holder === false) {
+                g2Html += _dimFoldRow('股东行为',
+                    '<span style="color:#27ae60;font-weight:600;">近30天无增持</span>');
+            } else {
+                g2Html += _dimFoldRow('股东行为',
+                    '<span style="color:var(--text-3,#999);">数据缺失（接口不可用或港股未采集）</span>');
+            }
         }
         html += _dimFoldGroup('股东行为', '👥', g2.wpct, g2.score, g2Html);
 
