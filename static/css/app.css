@@ -928,10 +928,10 @@ html[data-theme='warm'] {
         .dim-card .dim-factors .factor-row .factor-val {
             font-weight: 600;
             flex-shrink: 0;
-            /* 2026-09-09：60% → 72%——长读数（均线系统/MACD/布林带）被 60% 列宽
-               折成两行（overflow-wrap:anywhere 任意断行）；label 本身短，
-               放宽值列让"label 一行 + 值一行"回到单行 */
-            max-width: 72%;
+            /* 2026-09-09：60% → 78%——长读数（均线系统/MACD/布林带）被 60% 列宽
+               折成两行（overflow-wrap:anywhere 任意断行）；label 最长"基本面趋势"
+               5 字约 70px，22% 余量足够，值列 78% 单行容纳最长读数 */
+            max-width: 78%;
             text-align: right;
             font-variant-numeric: tabular-nums;
             overflow-wrap: anywhere;
