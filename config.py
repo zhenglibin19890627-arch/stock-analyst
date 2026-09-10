@@ -149,7 +149,7 @@ TRADE_FEE_A_STOCK = {
 }
 TRADE_FEE_BROKERS = [
     # keywords 命中账户名即采用该券商佣金（先命中先用）
-    {'keywords': ['银河'], 'commission_rate': 0.00018, 'commission_min': 5.0},   # 万1.8 最低5元
+    {'keywords': ['银河'], 'commission_rate': 0.0001853, 'commission_min': 5.0},  # 万1.853 最低5元（用户交割单实测口径，2026-09-09）
     {'keywords': ['东方财富', '东财'], 'commission_rate': 0.00015, 'commission_min': 5.0},  # 万1.5 最低5元
 ]
 TRADE_FEE_BROKER_DEFAULT = {'keywords': [], 'commission_rate': 0.00015, 'commission_min': 5.0}

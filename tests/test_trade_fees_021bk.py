@@ -97,7 +97,7 @@ class TestFeeEstimationApi:
 
 class TestBrokerProfile:
     def test_galaxy(self):
-        assert resolve_broker_profile('银河证券')['commission_rate'] == 0.00018
+        assert resolve_broker_profile('银河证券')['commission_rate'] == 0.0001853
 
     def test_eastmoney(self):
         assert resolve_broker_profile('东方财富')['commission_rate'] == 0.00015
@@ -109,7 +109,7 @@ class TestBrokerProfile:
 
 class TestAStockFee:
     def test_buy_small_amount_floor(self):
-        # 银河万1.8：10000×0.00018=1.8 < 5 → 取最低 5 元 + 过户费 0.1
+        # 银河万1.853：10000×0.0001853=1.853 < 5 → 取最低 5 元 + 过户费 0.1
         assert estimate_trade_fee('buy', 10000, '银河证券') == 5.1
 
     def test_sell_includes_stamp(self):
