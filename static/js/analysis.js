@@ -957,6 +957,17 @@
         html += '<div class="score-label">综合评分</div>';
         html += '<div class="score-value" style="color:' + scoreColor + ';">' +
                 (adviseData.total_score != null ? adviseData.total_score.toFixed(1) : '--') + '</div>';
+        // 2026-09-09：上一轮评分对比行（总分 + 日期），涨红跌绿
+        var _prevR = adviseData.prev_report;
+        if (_prevR && _prevR.total_score != null && adviseData.total_score != null) {
+            var _diff = adviseData.total_score - _prevR.total_score;
+            var _dColor = _diff > 0 ? '#e74c3c' : _diff < 0 ? '#27ae60' : 'var(--text-3,#999)';
+            var _dSign = _diff > 0 ? '+' : '';
+            var _prevDate = String(_prevR.report_date || '').slice(5);
+            html += '<div class="rating-time" style="font-size:12px;">上轮 ' +
+                    Number(_prevR.total_score).toFixed(1) + '（' + _prevDate + '）' +
+                    ' <span style="color:' + _dColor + ';font-weight:600;">' + _dSign + _diff.toFixed(1) + '</span></div>';
+        }
         html += '<div class="rating-badge ' + ratingClass + '" title="' + getRatingTitle(adviseData.rating) + '">评级 ' + adviseData.rating + '</div>';
         // 021AR：v5 中文5档 key=label 恒等，标签行/建议行与徽章重复时不再显示
         if (adviseData.rating_label && adviseData.rating_label !== adviseData.rating) {
@@ -1039,6 +1050,16 @@
         _reportCapDetail = adviseData.capital_detail || null;
         _reportNewsDetail = adviseData.news_detail || null;
         _reportMarket = adviseData.market || null;
+        // 2026-09-09：上一轮四维分注入（维度卡「上轮」小字对比）；兼容维度键别名
+        var _prevDims = (_prevR && _prevR.dims) || null;
+        if (_prevDims) {
+            [['kline', 'technical'], ['fundamental', 'fundamental'],
+             ['capital_flow', 'capital'], ['news', 'sentiment']].forEach(function(pair) {
+                var dk = pair[0], alt = pair[1];
+                var target = dims[dk] || dims[alt];
+                if (target && _prevDims[dk] != null) { target.prev = _prevDims[dk]; }
+            });
+        }
         html += '<div class="card dim-detail-card">';
         html += '<div class="card-title" style="font-size:15px;margin-bottom:6px;">四维评分详情</div>';
         html += '<div class="dim-grid">';

@@ -795,6 +795,15 @@
                 '<span class="dim-score-big" style="color:' + scoreColor + ';">' + score.toFixed(0) + '</span>' +
                 '<span class="dim-name"' + (dimLabelTip ? ' title="' + dimLabelTip + '" style="cursor:help;border-bottom:1px dotted #ccc;"' : '') + '>' + label + '</span>' +
             '</div>' +
+            // 2026-09-09：上一轮四维分对比小字（涨红跌绿）
+            (dimInfo.prev != null
+                ? '<div style="font-size:11px;color:var(--text-3,#999);margin:-2px 0 2px;">上轮 ' +
+                  Number(dimInfo.prev).toFixed(1) +
+                  ' <span style="font-weight:600;color:' +
+                  (score > dimInfo.prev ? '#e74c3c' : score < dimInfo.prev ? '#27ae60' : 'var(--text-3,#999)') + ';">' +
+                  (score > dimInfo.prev ? '↑' : score < dimInfo.prev ? '↓' : '→') +
+                  (score - dimInfo.prev >= 0 ? '+' : '') + (score - dimInfo.prev).toFixed(1) + '</span></div>'
+                : '') +
             '<div class="dim-mid">' +
                 '<span class="dim-status-badge ' + badgeClass + '">' + badgeIcon + ' ' + badgeText + '</span>' +
             '</div>' +

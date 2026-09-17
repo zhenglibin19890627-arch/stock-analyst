@@ -250,6 +250,56 @@ def _news_detail_for_stock(stock_id):
         return None
 
 
+def _prev_report_snapshot(stock_id, before_date):
+    """上一轮有效日报快照（评分对比展示用，2026-09-09）。
+
+    取同股 report_type='daily' + status='ok' + report_date < before_date 的
+    最近一份，提取 总分/评级/四维分（key_factors[dim].score）。
+
+    Returns: dict {report_date, total_score, rating, dims} 或 None（无历史报告）。
+    只读、失败静默降级为 None，不影响报告主流程。
+    """
+    import json as _json
+
+    try:
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT report_date, total_score, rating, key_factors
+                   FROM daily_reports
+                   WHERE stock_id = ? AND report_type = 'daily' AND status = 'ok'
+                   AND report_date < ?
+                   ORDER BY report_date DESC LIMIT 1""",
+                (stock_id, before_date),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            dims = {}
+            try:
+                kf = _json.loads(row['key_factors']) if row['key_factors'] else {}
+                for dk in ('kline', 'fundamental', 'capital_flow', 'news'):
+                    info = kf.get(dk)
+                    if info and info.get('score') is not None:
+                        dims[dk] = info['score']
+            except (ValueError, TypeError):
+                pass
+            return {
+                'report_date': row['report_date'],
+                'total_score': row['total_score'],
+                'rating': row['rating'],
+                'dims': dims,
+            }
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            f'[prev_report] 上一轮评分快照查询失败 stock_id={stock_id}: {e}'
+        )
+        return None
+
+
 def _parse_markdown_risks(md):
     """020R-43：从 markdown_content 解析「**风险提示**」列表（快照路径 risk_warnings 字段来源）。"""
     risks = []
@@ -383,6 +433,10 @@ def _enrich_advice_result(stock_id, result):
     _attach_scoring_subitems(stock_id, result)
     # 020R-54：行业资金背景
     result['industry_flow_bg'] = _industry_flow_bg_for_stock(stock_id)
+    # 2026-09-09：上一轮评分快照（总分+四维分对比展示）——实时路径当前报告日期=今天
+    result['prev_report'] = _prev_report_snapshot(
+        stock_id, datetime.now(_CN_TZ).strftime('%Y-%m-%d')
+    )
     return result
 
 
@@ -657,6 +711,8 @@ def api_get_report_latest(stock_id):
         'strongest_dim': strongest_dim,
         'weakest_dim': weakest_dim,
         'data_quality': data_quality if data_quality else None,
+        # 2026-09-09：上一轮评分快照（总分+四维分对比展示）
+        'prev_report': _prev_report_snapshot(stock_id, latest_date),
         # 来源标记
         'data_source': 'daily_reports',
         'generated_at': row['generated_at'],
