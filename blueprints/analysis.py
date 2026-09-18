@@ -991,5 +991,35 @@ def api_stock_trend(stock_id):
 
 
 # ============================================================
+# 操盘手建议（2026-09-18）：阶段判定 + 主力解读 + 对策（只读，无副作用）
+# ============================================================
+
+
+@bp.route('/api/stocks/<int:stock_id>/trader-advice', methods=['GET'])
+def api_stock_trader_advice(stock_id):
+    """操盘手建议：股价阶段（6态）/ 主力行为解读 / 对策与裁决信号 / 评级分歧标注。
+
+    逻辑见 modules/trader_advisor.py；与趋势罗盘同模式——报告页卡片异步拉取，
+    只读纯函数，不写库、不触发采集、不触碰 generate_advice（B24 红线）。
+    """
+    from modules.trader_advisor import generate_trader_advice
+
+    result = generate_trader_advice(stock_id)
+    if not result.get('available'):
+        return jsonify({'success': False, 'message': result.get('reason', '数据不足')}), 404
+
+    from modules.collector._env import now_cn
+
+    return jsonify(
+        {
+            'success': True,
+            'stock_id': stock_id,
+            **result,
+            'generated_at': now_cn(),
+        }
+    )
+
+
+# ============================================================
 # US-11: 每日报告 API
 # ============================================================

@@ -1094,6 +1094,14 @@
         html += '<div id="trendCompassBody" style="color:var(--text-3,#999);font-size:13px;">加载中...</div>';
         html += '</div>';
 
+        // 3.6 操盘手建议（2026-09-18）：阶段/主力/对策（异步填充，只读端点）
+        html += '<div class="card" id="traderAdviceCard">';
+        html += '<div class="card-title" style="font-size:15px;margin-bottom:6px;">🎯 操盘手建议' +
+                '<span style="font-size:12px;color:var(--text-3,#888);font-weight:normal;margin-left:8px;">' +
+                '股价阶段 · 主力行为 · 对策与裁决信号｜仓位动作以评级为准</span></div>';
+        html += '<div id="traderAdviceBody" style="color:var(--text-3,#999);font-size:13px;">加载中...</div>';
+        html += '</div>';
+
         // 4. K线图卡片已移除（020R：用户裁定报告页不再平铺K线卡片；
         // K线数据仍可在「数据」页查看，评分雷达/详情/建议紧接展示）
 
@@ -1273,8 +1281,11 @@
         // 渲染 ECharts 图表（020R：K线卡片已移除，仅雷达图）
         _renderRadarChart(dims);
 
-        // 趋势罗盘异步填充（不阻塞报告主体渲染）
-        loadTrendCompass(stockId);
+        // 趋势罗盘异步填充（不阻塞报告主体渲染）；传入 adviseData 供评级×罗盘调和提示
+        loadTrendCompass(stockId, adviseData);
+
+        // 操盘手建议异步填充（2026-09-18，只读端点，不阻塞主体）
+        loadTraderAdvice(stockId);
     }
 
     // ============================================================
@@ -1339,6 +1350,124 @@
                             _tcEsc((tf.reasons || []).join('；')) + '</span>';
                     html += '</div>';
                 });
+                // 021BN：评级 × 罗盘调和提示（有矛盾信号时才显示）
+                var hint = _tcReconcileHint(rating, o, d.timeframes || {});
+                if (hint) {
+                    html += '<div style="margin-top:8px;padding:6px 10px;background:var(--bg-light,#f5f7fa);' +
+                            'border-left:3px solid #1a73e8;font-size:12.5px;color:var(--text-2,#555);line-height:1.6;">' +
+                            '💡 ' + hint + '</div>';
+                }
+                body.innerHTML = html;
+            })
+            .catch(function(e) {
+                if (body.isConnected) body.innerHTML = '<span style="color:#e74c3c;">加载失败：' + e + '</span>';
+            });
+    }
+
+    // ============================================================
+    // 操盘手建议（2026-09-18）：GET /api/stocks/<id>/trader-advice（只读）
+    // 三段：股价阶段 / 主力行为 / 对策与裁决信号；判断依据 <details> 默认收起
+    // ============================================================
+
+    function _taStageBadge(code, confidence) {
+        var map = {
+            accumulation:  { c: '#f39c12', label: '底部吸筹区' },
+            markup_early:  { c: '#e67e22', label: '拉升初期' },
+            markup_full:   { c: '#e74c3c', label: '主升期' },
+            distribution:  { c: '#8e44ad', label: '顶部出货区' },
+            decline:       { c: '#27ae60', label: '下跌期' },
+            range:         { c: '#95a5a6', label: '震荡无趋势' }
+        };
+        var m = map[code] || map.range;
+        return '<span style="display:inline-block;padding:3px 12px;border-radius:12px;' +
+               'background:' + m.c + ';color:#fff;font-weight:600;font-size:13.5px;">' + m.label + '</span>' +
+               '<span style="margin-left:8px;font-size:12px;color:var(--text-3,#888);">判定置信：' +
+               _taEsc(confidence || '—') + '</span>';
+    }
+
+    function _taEsc(s) {
+        return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function loadTraderAdvice(stockId) {
+        var body = document.getElementById('traderAdviceBody');
+        if (!body) return;
+        body.textContent = '加载中...';
+        fetch('/api/stocks/' + stockId + '/trader-advice', { cache: 'no-store' })
+            .then(function(r) { return safeJson(r); })
+            .then(function(d) {
+                if (!body.isConnected) return;  // 用户已切走，丢弃
+                if (!d || !d.success) {
+                    body.innerHTML = '<span style="color:#999;">' + _taEsc((d && d.message) || '数据不足') +
+                                     '（采集数据后自动可用）</span>';
+                    return;
+                }
+                var st = d.stage || {}, cap = d.capital || {}, pb = d.playbook || {}, dis = d.disagreement;
+                var html = '';
+
+                // 分歧条（置顶显性化：主指令仍是评级）
+                if (dis) {
+                    html += '<div style="margin-bottom:10px;padding:7px 10px;background:#fff8e1;' +
+                            'border-left:3px solid #f39c12;font-size:12.5px;color:#7a5c00;line-height:1.7;">' +
+                            '⚠️ <b>与评级分歧</b>：' + _taEsc(dis.text) + '</div>';
+                }
+
+                // 第一段：股价阶段
+                html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:2px 0 6px;">' +
+                        '<span style="font-weight:600;font-size:13px;min-width:70px;">① 阶段</span>' +
+                        _taStageBadge(st.code, st.confidence) + '</div>';
+                html += '<div style="color:var(--text-2,#555);font-size:12.5px;line-height:1.7;margin-bottom:8px;">' +
+                        '该阶段打法：' + _taEsc(st.name && pb.actions && pb.actions[0] ? String(pb.actions[0]).replace(/^[^：]*：/, '') : '') + '</div>';
+
+                // 第二段：主力在干嘛
+                var toneColor = cap.tone === 'bullish' ? '#e74c3c' : cap.tone === 'bearish' ? '#27ae60' : '#f39c12';
+                html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:2px 0 4px;">' +
+                        '<span style="font-weight:600;font-size:13px;min-width:70px;">② 主力</span>' +
+                        '<span style="font-weight:600;color:' + toneColor + ';font-size:13px;">' + _taEsc(cap.summary) + '</span></div>';
+                (cap.details || []).forEach(function(t) {
+                    html += '<div style="color:var(--text-2,#666);font-size:12.5px;line-height:1.7;padding-left:78px;">· ' + _taEsc(t) + '</div>';
+                });
+
+                // 第三段：对策 + 裁决信号
+                html += '<div style="font-weight:600;font-size:13px;padding:8px 0 4px;">③ 对策' +
+                        (pb.profile ? ' <span style="font-weight:400;color:var(--text-3,#888);font-size:12px;">' + _taEsc(pb.profile) + '</span>' : '') + '</div>';
+                (pb.actions || []).forEach(function(a, i) {
+                    var warn = a.indexOf('⚠️') === 0;
+                    html += '<div style="' + (warn ? 'background:#fff8e1;border-radius:6px;padding:5px 8px;margin:3px 0;' : '') +
+                            'color:' + (warn ? '#7a5c00' : 'var(--text-2,#555)') + ';font-size:12.5px;line-height:1.7;padding-left:' + (warn ? '8px' : '8px') + ';">' +
+                            _taEsc(a) + '</div>';
+                });
+                if ((pb.watch_signals || []).length) {
+                    html += '<div style="margin-top:6px;padding:6px 10px;background:var(--bg-light,#f5f7fa);border-radius:6px;">' +
+                            '<div style="font-size:12px;font-weight:600;color:var(--text-2,#555);margin-bottom:3px;">改变判断的信号</div>';
+                    pb.watch_signals.forEach(function(w) {
+                        html += '<div style="color:var(--text-2,#666);font-size:12.5px;line-height:1.7;">▸ ' + _taEsc(w) + '</div>';
+                    });
+                    html += '</div>';
+                }
+
+                // 判断依据（默认收起，点开展开）+ 主力细节 + 盲区
+                var ev = st.evidence || [];
+                var blind = cap.blind_spots || [];
+                html += '<details style="margin-top:10px;">';
+                html += '<summary style="cursor:pointer;font-size:12.5px;color:#1a73e8;user-select:none;">查看完整判断依据' +
+                        (ev.length ? '（' + ev.length + ' 条）' : '') + '</summary>';
+                html += '<div style="margin-top:6px;padding:8px 10px;background:var(--bg-light,#f5f7fa);border-radius:6px;">';
+                ev.forEach(function(t) {
+                    html += '<div style="color:var(--text-2,#666);font-size:12.5px;line-height:1.8;">· ' + _taEsc(t) + '</div>';
+                });
+                (cap.details || []).forEach(function(t) {
+                    html += '<div style="color:var(--text-2,#666);font-size:12.5px;line-height:1.8;">· ' + _taEsc(t) + '</div>';
+                });
+                if (blind.length) {
+                    html += '<div style="margin-top:5px;padding-top:5px;border-top:1px dashed var(--border-light,#ddd);' +
+                            'color:#999;font-size:12px;line-height:1.7;">数据盲区：' + _taEsc(blind.join('；')) + '</div>';
+                }
+                html += '</div></details>';
+
+                if (d.disclaimer) {
+                    html += '<div style="margin-top:8px;font-size:11px;color:#bbb;">' + _taEsc(d.disclaimer) + '</div>';
+                }
                 body.innerHTML = html;
             })
             .catch(function(e) {
