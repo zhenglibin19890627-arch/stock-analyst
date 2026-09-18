@@ -842,7 +842,13 @@
                         (pa.has_position ? '操作网格计划'
                             : (pa.zone_label === '支撑参考区间' ? '支撑观察预案（非买入建议）' : '网格买入计划')) + '</div>';
                 gridSideHtml += '<table class="pa-grid-table"><thead><tr><th>档位</th><th>价位</th><th>仓位</th><th>说明</th></tr></thead><tbody>';
+                // 2026-09-09：档位去重防御——label+price 相同的档只渲染一次
+                //（用户实测见"两个回本清仓位"，系旧版 JS 缓存过渡期渲染两份；防同类脏数据再现）
+                var _seenLevel = {};
                 pa.grid.forEach(function(g) {
+                    var _key = (g.label || '') + '@' + g.price;
+                    if (_seenLevel[_key]) return;
+                    _seenLevel[_key] = 1;
                     var typeCls = _paGridCls[g.type] || '';
                     gridSideHtml += '<tr><td>' + g.level + '</td>';
                     gridSideHtml += '<td class="' + typeCls + '">' + g.price.toFixed(2) + '</td>';
