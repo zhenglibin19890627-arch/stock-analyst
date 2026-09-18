@@ -1020,6 +1020,36 @@ def api_stock_trader_advice(stock_id):
     )
 
 
+@bp.route('/api/stocks/<int:stock_id>/position-note', methods=['GET'])
+def api_stock_position_note(stock_id):
+    """评级位置标注（2026-09-18 回测提升②）：当前位置 × 历史矩阵的条件化提示。
+
+    分化可信（两带各>=10条且差>=15pp）才返回，否则 404（前端不显示，不硬造结论）。
+    rating 缺省取最新评级；只读不写库，不触碰 generate_advice（B24 红线）。
+    """
+    rating = request.args.get('rating')
+    if not rating:
+        from database.db_manager import get_connection
+
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT rating FROM ratings_history WHERE stock_id = ? '
+            'ORDER BY rating_date DESC LIMIT 1', (stock_id,))
+        row = cursor.fetchone()
+        conn.close()
+        rating = row['rating'] if row else None
+    if not rating:
+        return jsonify({'success': False, 'message': '暂无评级'}), 404
+
+    from modules.backtest_engine import position_note_for
+
+    note = position_note_for(stock_id, rating)
+    if not note:
+        return jsonify({'success': False, 'message': '无显著分化或样本不足'}), 404
+    return jsonify({'success': True, 'stock_id': stock_id, 'rating': rating, **note})
+
+
 # ============================================================
 # US-11: 每日报告 API
 # ============================================================

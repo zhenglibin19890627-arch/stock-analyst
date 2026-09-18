@@ -117,6 +117,7 @@
             .then(data => {
                 if (data.success) {
                     area.innerHTML = renderAdviceResult(data);
+                    loadPositionNote(id);  // 2026-09-18 回测提升②：评级位置标注（异步，无分化静默）
                     refreshDashboardIfLoaded();  // 同步看板批量评分表
                 } else {
                     area.innerHTML = '<div class="card"><div class="alert alert-error">建议生成失败：' + (data.message || '未知错误') + '</div></div>';
@@ -125,6 +126,25 @@
             .catch(err => {
                 area.innerHTML = '<div class="card"><div class="alert alert-error">请求失败：' + err + '</div></div>';
             });
+    }
+
+    // 2026-09-18 回测提升②：评级位置标注——当前位置 × 分档位置矩阵的条件化提示。
+    // 端点仅在分化可信（两带各>=10条且差>=15pp）时返回，否则 404 → 静默不显示（不硬造结论）。
+    function loadPositionNote(stockId) {
+        var box = document.getElementById('posNoteBox');
+        if (!box) return;
+        box.innerHTML = '';
+        fetch('/api/stocks/' + stockId + '/position-note')
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .then(function(d) {
+                var box2 = document.getElementById('posNoteBox');
+                if (!d || !d.success || !box2) return;
+                box2.innerHTML = '<div style="margin:8px 0 2px;padding:8px 12px;border-radius:6px;' +
+                    'background:var(--surface-alt,#f8f9fa);border:1px solid var(--border-light,#e8e8e8);' +
+                    'font-size:12.5px;color:var(--text-2,#555);line-height:1.7;">' + d.text +
+                    ' <span style="color:var(--text-3,#999);">（分档×位置矩阵自动标注）</span></div>';
+            })
+            .catch(function() { /* 静默：标注是增强，失败不影响评级卡 */ });
     }
 
     // U6(#3): 更多操作下拉菜单
@@ -985,6 +1005,7 @@
                     ' <span style="color:' + _dColor + ';font-weight:600;">' + _dSign + _diff.toFixed(1) + '</span></div>';
         }
         html += '<div class="rating-badge ' + ratingClass + '" title="' + getRatingTitle(adviseData.rating) + '">评级 ' + adviseData.rating + '</div>';
+        html += '<div id="posNoteBox"></div>';  // 2026-09-18 回测提升②：位置标注容器（异步填充）
         // 021AR：v5 中文5档 key=label 恒等，标签行/建议行与徽章重复时不再显示
         if (adviseData.rating_label && adviseData.rating_label !== adviseData.rating) {
             html += '<div class="rating-label">' + adviseData.rating_label + '</div>';
