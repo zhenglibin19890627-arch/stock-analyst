@@ -1625,6 +1625,18 @@
                         pa.label + ' ' + Number(pa.low).toFixed(2) + '~' + Number(pa.high).toFixed(2) + lvShow + '</span>';
                 }
 
+                // 2026-09-18：操盘手阶段×评级分歧标记（日报预计算，零重算读取）
+                var traderStr = '';
+                var trader = st.trader_signal;
+                if (trader && trader.has_disagreement) {
+                    var tName = trader.stage_name || '';
+                    var tTip = (trader.disagreement_text || '评级与操盘手阶段判定存在分歧，主指令仍以评级为准') +
+                        '（阶段：' + tName + '；来自最新报告 ' + (st.report_date || '—') + '，点击查看完整操盘手建议）';
+                    traderStr = '<span style="font-size:11px;color:#8a6d00;background:#fff3cd;padding:2px 7px;' +
+                        'border-radius:10px;white-space:nowrap;cursor:help;" title="' +
+                        tTip.replace(/"/g, '&quot;') + '">⚡' + tName + '·分歧</span>';
+                }
+
                 var clickFn, clickTitle;
                 if (action === '待评分') {
                     clickFn = 'quickBatchAnalyze(' + st.id + ')';
@@ -1643,6 +1655,7 @@
                     '<span style="font-size:12px;color:var(--text-3,#888);">' + scoreStr + '分</span>' +
                     pnlStr +
                     zoneStr +
+                    traderStr +
                     '</span>';
             });
 

@@ -1104,6 +1104,22 @@ def _process_single_stock(stock, target_date, force, report_type='daily', skip_c
     # 构建关键因子
     key_factors = _build_key_factors(advice)
 
+    # 2026-09-18：操盘手建议摘要预计算（阶段名 + 评级分歧标记）——
+    # 看板「操作建议」卡零重算读取（portfolio._derive_trader_signal 派生展示）；
+    # 只读函数不触碰 generate_advice（B24 红线），失败静默降级不阻塞报告
+    try:
+        from modules.trader_advisor import generate_trader_advice
+
+        _ta = generate_trader_advice(stock_id)
+        if _ta.get('available'):
+            key_factors['trader'] = {
+                'stage_name': _ta['stage'].get('name'),
+                'has_disagreement': bool(_ta.get('disagreement')),
+                'disagreement_text': (_ta.get('disagreement') or {}).get('text'),
+            }
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f'[daily-report] trader 摘要预计算失败 stock_id={stock_id}: {e}')
+
     # 构建单只 Markdown（末尾追加数据完整度小节）
     md_content = _build_markdown_single(advice, prev_score)
     md_content += '\n\n## 数据完整度\n\n'

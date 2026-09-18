@@ -602,6 +602,28 @@ def _parse_pa_zone(pa_json):
     }
 
 
+def _derive_trader_signal(kf_json):
+    """2026-09-18：从最新报告 key_factors.trader 摘要提取看板分歧标记（零重算）。
+
+    日报生成时由 trader_advisor 预计算（阶段名 + 与评级的分歧）；
+    无摘要/解析失败返回 None（前端不显示标记，不影响主卡片）。
+    """
+    if not kf_json:
+        return None
+    try:
+        kf = json.loads(kf_json) if isinstance(kf_json, str) else kf_json
+        t = (kf or {}).get('trader') or {}
+        if not t.get('stage_name'):
+            return None
+        return {
+            'stage_name': t.get('stage_name'),
+            'has_disagreement': bool(t.get('has_disagreement')),
+            'disagreement_text': t.get('disagreement_text'),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
 @bp.route('/api/portfolio/watchlist-scores')
 def api_portfolio_watchlist_scores():
     """自选股批量评分看板数据（单次四表 JOIN，零引擎侵入）。
@@ -746,6 +768,8 @@ def api_portfolio_watchlist_scores():
                 'data_warnings': r.get('data_warnings'),
                 # DEV-TASKS-20260727-003：超买超卖信号（从 key_factors 派生，不暴露原始因子）
                 'obos_signal': _derive_obos_signal(r.get('key_factors')),
+                # 2026-09-18：操盘手阶段×评级分歧标记（日报预计算，零重算）
+                'trader_signal': _derive_trader_signal(r.get('key_factors')),
                 # 021BM：价格建议区间（最新报告已存 JSON，零重算；建议卡买入侧展示）
                 'pa_zone': _parse_pa_zone(r.get('price_advice')),
             }

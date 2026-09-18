@@ -10,6 +10,8 @@
 隔离临时库：直接构造 raw_kline/holdings/daily_reports，走 generate_trader_advice 全流程。
 """
 
+import json
+
 import pytest
 
 import app as app_module
@@ -290,6 +292,32 @@ class TestCapitalNarrative:
 
         cap = capital_narrative(_D())
         assert cap['tone'] == 'bearish'
+
+
+class TestWatchlistDerive:
+    """看板零重算派生（portfolio._derive_trader_signal，照 obos_signal 先例）"""
+
+    def test_derive_from_key_factors_json(self):
+        from blueprints.portfolio import _derive_trader_signal
+        kf = json.dumps({
+            'kline': {'score': 50},
+            'trader': {
+                'stage_name': '底部吸筹区',
+                'has_disagreement': True,
+                'disagreement_text': '与评级「建议减仓」分歧：阶段特征更接近底部吸筹区',
+            },
+        }, ensure_ascii=False)
+        sig = _derive_trader_signal(kf)
+        assert sig['stage_name'] == '底部吸筹区'
+        assert sig['has_disagreement'] is True
+        assert '分歧' in sig['disagreement_text']
+
+    def test_derive_none_when_absent_or_bad(self):
+        from blueprints.portfolio import _derive_trader_signal
+        assert _derive_trader_signal(None) is None
+        assert _derive_trader_signal('{}') is None
+        assert _derive_trader_signal('not-json') is None
+        assert _derive_trader_signal(json.dumps({'kline': {'score': 50}})) is None
 
 
 class TestEndToEnd:
