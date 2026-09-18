@@ -1,11 +1,13 @@
 """
-021BL：持仓重算引擎——券商口径（摊薄成本 + 持仓盈亏）
+021BL：持仓重算引擎——摊薄成本法（2026-09-18 用户口径）
 
 验证（隔离临时库，走 API 全流程）：
 1. 买入优先用实际成交金额（021AM 金额直填），缺失回退 价格×数量；佣金计入成本
-2. 卖出不改摊薄成本价；已实现盈亏 = 卖出金额 - 费用 - 卖出数量×摊薄成本
+2. 卖出（部分）摊薄成本：卖出净得从总成本扣除 → 成本价被利润平摊降低；
+   持仓中不记已实现盈亏（盈亏留在浮动盈亏里按新成本计算）
 3. 补仓后摊薄成本重算（不是停留在买入价）
-4. 清仓后 status=cleared、成本价归零（券商口径，不残留旧成本）
+4. 清仓后 status=cleared、成本价归零；累计已实现 = 全部卖出净得 - 总买入成本
+   （与旧逐笔口径的清仓累计值数学一致）
 5. 盈亏比例字段：无价格时为 None
 """
 
@@ -56,23 +58,24 @@ class TestDilutedCostBrokerConvention:
         assert p['realized_pnl'] == 0
 
         # 2. 卖出 500@12（金额直填 6000），佣金 5
-        #    已实现 = 6000 - 5 - 500×10.005 = 992.5；摊薄成本不变（券商口径）
+        #    摊薄法：净得 5995 从总成本扣除 → (10005-5995)/500 = 8.02；
+        #    仍持仓中，不转已实现
         p = _add_trade(client, sid, trade_type='sell', price=12.0, quantity=500,
                        amount=6000, commission=5, trade_date='2026-09-02')
         assert p['quantity'] == 500
-        assert p['avg_cost'] == pytest.approx(10.005)
-        assert p['realized_pnl'] == pytest.approx(992.5)
+        assert p['avg_cost'] == pytest.approx(8.02)
+        assert p['realized_pnl'] == 0
 
         # 3. 补仓 500@9（金额直填 4500），佣金 5
-        #    新摊薄成本 = (10.005×500 + 4505) / 1000 = 9.5075（交易后算出新成本）
+        #    新摊薄成本 = (4010 + 4505) / 1000 = 8.515（交易后算出新成本）
         p = _add_trade(client, sid, trade_type='buy', price=9.0, quantity=500,
                        amount=4500, commission=5, trade_date='2026-09-03')
         assert p['quantity'] == 1000
-        assert p['avg_cost'] == pytest.approx(9.5075)
-        assert p['realized_pnl'] == pytest.approx(992.5)
+        assert p['avg_cost'] == pytest.approx(8.515)
+        assert p['realized_pnl'] == 0
 
         # 4. 清仓 1000@9.5（金额直填 9500），佣金 5
-        #    已实现 += 9500 - 5 - 1000×9.5075 = -12.5 → 累计 980.0
+        #    已实现 += 9495 - 8515 = 980.0（与旧逐笔口径清仓累计值一致）
         p = _add_trade(client, sid, trade_type='sell', price=9.5, quantity=1000,
                        amount=9500, commission=5, trade_date='2026-09-04')
         assert p['quantity'] == 0

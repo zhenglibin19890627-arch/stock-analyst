@@ -260,7 +260,9 @@ def test_trade_recalc_isolated_by_account(client_with_stocks):
     )
     p3 = r3.get_json()['recalculated_position']
     assert p3['quantity'] == 60
-    assert abs(p3['realized_pnl'] - 400.0) < 0.01  # (110-100)*40
+    # 摊薄法（2026-09-18）：净得 4400 平摊 → (10000-4400)/60 = 93.33；持仓中不转已实现
+    assert abs(p3['avg_cost'] - 93.3333) < 0.01
+    assert p3['realized_pnl'] == 0
 
     conn = db_manager.get_connection()
     qty2 = conn.execute(
@@ -370,11 +372,11 @@ def test_buy_commission_folded_into_cost(client_with_stocks):
     assert abs(p['avg_cost'] - 100.05) < 0.0001  # (100*100+5)/100
 
 
-def test_sell_commission_reduces_realized_pnl(client_with_stocks):
-    """卖出手续费扣减已实现盈亏"""
+def test_sell_net_dilutes_cost(client_with_stocks):
+    """卖出净得平摊到剩余持仓（摊薄成本法，2026-09-18）：
+    买 100@100 无费 → 卖 50@110 费 7 → 净得 5493 从总成本扣除，
+    剩余成本 (10000-5493)/50 = 90.14；持仓中不记已实现盈亏"""
     client, stock_a, _ = client_with_stocks
-    # 买腿显式 commission=0（021BK 填写即尊重），保证成本恰为 100.0；
-    # 卖腿显式 7.0 即为本测试的验证对象
     client.post(
         f'/api/portfolio/holdings/{stock_a}/trades',
         json={'trade_type': 'buy', 'price': 100.0, 'quantity': 100,
@@ -386,8 +388,8 @@ def test_sell_commission_reduces_realized_pnl(client_with_stocks):
               'trade_date': '2026-08-02', 'commission': 7.0},
     )
     p = resp.get_json()['recalculated_position']
-    # (110-100)*50 - 7 = 493
-    assert abs(p['realized_pnl'] - 493.0) < 0.01
+    assert abs(p['avg_cost'] - 90.14) < 0.01   # (10000-5493)/50
+    assert p['realized_pnl'] == 0              # 持仓中不转已实现
 
 
 def test_negative_commission_rejected(client_with_stocks):

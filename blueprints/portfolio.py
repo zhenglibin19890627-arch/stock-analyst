@@ -889,9 +889,14 @@ def api_delete_holding(stock_id):
 def _recalculate_holding(cursor, stock_id, account_id):
     """根据该（股票, 账户）下所有有效流水（按时间顺序）重新计算持仓。
     021S 多账户：重算范围严格限定在单一账户内，账户间成本/盈亏互不影响。
-    计算规则：
+    计算规则（2026-09-18 起卖出改摊薄成本法，用户口径）：
     - 买入(buy)：增加数量，加权平均成本 = (旧持仓成本 + 新买入金额) / 新数量
-    - 卖出(sell)：减少数量，已实现盈亏 += (卖出价 - 持仓均价) * 卖出数量
+    - 卖出(sell)：摊薄成本法——
+      · 部分卖出（卖出后仍持仓）：卖出净得（成交额-费用）从总成本中扣除，
+        剩余成本 = (旧总成本 - 卖出净得) / 剩余数量 → 成本价被利润平摊降低，
+        不记已实现盈亏（仍持仓中，盈亏继续体现在浮动盈亏里）
+      · 清仓卖出：剩余总成本与卖出净得的差额一次性转入已实现盈亏
+        （数学上与旧逐笔口径的清仓累计值一致：累计卖出净得 - 总买入成本）
     - 分红(dividend)：数量不变，已实现盈亏 += 分红金额(amount)
     - 红利补税(dividend_tax)：数量不变，已实现盈亏 -= 补税金额(amount)——
       021AM：股息红利差异扣税（A股按持股期限补扣/港股通代扣20%）与派息日
@@ -958,14 +963,20 @@ def _recalculate_holding(cursor, stock_id, account_id):
                 sell_amount = amount if amount > 0 else price * sell_qty
                 if qty > sell_qty:
                     sell_amount = sell_amount * sell_qty / qty  # 超卖钳制时按比例折算
-                realized_pnl += sell_amount - commission - sell_qty * avg_cost
-                total_qty -= qty
-                if total_qty <= 0:
+                sell_net = sell_amount - commission
+                # 2026-09-18：摊薄成本法——卖出净得平摊到剩余持仓
+                if total_qty > qty:
+                    # 部分卖出：净得从总成本扣除 → 成本价被利润平摊降低；
+                    # 不转已实现（仍持仓中，盈亏留在浮动盈亏里按新成本计算）
+                    total_cost -= sell_net
+                    total_qty -= qty
+                    avg_cost = total_cost / total_qty if total_qty > 0 else 0
+                else:
+                    # 清仓卖出：剩余总成本与净得的差额一次性转已实现盈亏
+                    realized_pnl += sell_net - total_cost
                     total_qty = 0
                     total_cost = 0
                     avg_cost = 0   # 021BL：清仓后成本价归零（券商口径），不再残留旧成本
-                else:
-                    total_cost = avg_cost * total_qty
         elif t['trade_type'] == 'dividend':
             # 分红：金额计入已实现盈亏（手续费/划扣费一并扣除）
             realized_pnl += max(0, amount) - commission
