@@ -161,6 +161,10 @@ def _ensure_columns():
         'alpha_1w': 'REAL',
         'alpha_1m': 'REAL',
         'is_correct_alpha': 'INTEGER',
+        # 2026-09-18（回测提升①）：个股位置分位 + 事后20日最大回撤——
+        # 支撑「分档×位置矩阵」与「避损口径」（验证结论：低位买入68% vs 高位买入33%）
+        'pos_pctile': 'REAL',
+        'dd20': 'REAL',
     }
     cursor.execute('PRAGMA table_info(backtest_results)')
     existing = {row['name'] for row in cursor.fetchall()}
@@ -173,6 +177,68 @@ def _ensure_columns():
                 logger.warning(f'backtest_results: cannot add {col}: {e}')
     conn.commit()
     conn.close()
+
+
+def _calc_pos_and_dd20(cursor, stock_id, rating_date):
+    """评级日个股 60 日位置分位 + 事后 20 日最大回撤（2026-09-18 回测提升①）。
+
+    - pos_pctile: 评级日收盘在近 60 日高低区间的分位（0~1，回测验证的核心分层因子）
+    - dd20: 评级日后 20 个交易日最低收盘相对评级日收盘的回撤%（避损口径）
+    数据不足返回 (None, None)，不硬造。
+    """
+    ks = [r[0] for r in cursor.execute(
+        'SELECT close FROM raw_kline WHERE stock_id = ? AND trade_date <= ? '
+        'ORDER BY trade_date DESC LIMIT 60',
+        (stock_id, rating_date)).fetchall()]
+    pos = None
+    if len(ks) >= 40:
+        hi, lo, now = max(ks), min(ks), ks[0]
+        pos = round((now - lo) / (hi - lo), 3) if hi > lo else None
+    fwd = [r[0] for r in cursor.execute(
+        'SELECT close FROM raw_kline WHERE stock_id = ? AND trade_date > ? '
+        'ORDER BY trade_date LIMIT 20',
+        (stock_id, rating_date)).fetchall()]
+    base = cursor.execute(
+        'SELECT close FROM raw_kline WHERE stock_id = ? AND trade_date <= ? '
+        'ORDER BY trade_date DESC LIMIT 1',
+        (stock_id, rating_date)).fetchone()
+    dd = round((min(fwd) / base[0] - 1) * 100, 2) if (fwd and base and base[0]) else None
+    return pos, dd
+
+
+def _backfill_pos_dd():
+    """自愈式回填 pos_pctile/dd20 为 NULL 的行（报告聚合前调用，幂等增量）。
+
+    raw_kline 表不存在时（极简测试库）直接跳过——不阻塞报告生成。
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    has_kline = cursor.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='raw_kline'"
+    ).fetchone()[0]
+    if not has_kline:
+        conn.close()
+        return 0
+    cursor.execute(
+        'SELECT DISTINCT stock_id, rating_date FROM backtest_results '
+        'WHERE pos_pctile IS NULL AND dd20 IS NULL')
+    todo = cursor.fetchall()
+    if not todo:
+        conn.close()
+        return 0
+    n = 0
+    for row in todo:
+        pos, dd = _calc_pos_and_dd20(cursor, row['stock_id'], row['rating_date'])
+        cursor.execute(
+            'UPDATE backtest_results SET pos_pctile = ?, dd20 = ? '
+            'WHERE stock_id = ? AND rating_date = ?',
+            (pos, dd, row['stock_id'], row['rating_date']))
+        n += 1
+    conn.commit()
+    conn.close()
+    if n:
+        logger.info(f'[backtest] 位置/回撤列回填 {n} 行')
+    return n
 
 
 # ============================================================
@@ -821,6 +887,44 @@ class BacktestEngine:
         if low:
             add(f'注意：「{'、'.join(sorted(low))}」样本不足（不足30条），其准确率仅供参考，勿单独作为决策依据。', 'bad')
 
+        # 2026-09-18（回测提升①）：位置矩阵条件化解读——仅在分化显著（≥15pp）且子样本≥10 时输出
+        pm = report.get('position_matrix') or {}
+        for rating, cell_hint in (
+            ('推荐买入', '（高位买入=追涨信号，历史易回落；低位买入=底部确认，历史较可信）'),
+            ('建议减仓', '（高位减仓=出货识别，历史较可信；低位减仓=错杀嫌疑，历史接近随机）'),
+        ):
+            bands = pm.get(rating) or {}
+            lo_c, lo_t = bands.get('low', {}).get('correct', 0), bands.get('low', {}).get('total', 0)
+            hi_c, hi_t = bands.get('high', {}).get('correct', 0), bands.get('high', {}).get('total', 0)
+            if lo_t >= 10 and hi_t >= 10:
+                lo_acc, hi_acc = lo_c / lo_t, hi_c / hi_t
+                if abs(lo_acc - hi_acc) >= 0.15:
+                    direction = '低' if lo_acc > hi_acc else '高'
+                    add(
+                        f'位置分层：「{rating}」在低位票准确率 {lo_acc * 100:.0f}%（{lo_c}/{lo_t}）、'
+                        f'高位票 {hi_acc * 100:.0f}%（{hi_c}/{hi_t}），{direction}位更可信{cell_hint}'
+                        '。子样本仍偏小，随样本积累复核。',
+                        'good' if max(lo_acc, hi_acc) >= 0.6 else 'neutral',
+                    )
+
+        # 避损口径：减仓/卖出档的事后回撤若与其他档无显著差，如实说明
+        dr = report.get('drawdown_risk') or {}
+        rk, ot = dr.get('risk') or {}, dr.get('other') or {}
+        if (rk.get('n') or 0) >= 20 and (ot.get('n') or 0) >= 20 and rk.get('mean') is not None:
+            if rk['mean'] >= ot['mean'] - 1.0:
+                add(
+                    f'避损口径：减仓/卖出评级标记的票事后20日回撤（平均 {rk["mean"]:+.1f}%）'
+                    f'与其他档（{ot["mean"]:+.1f}%）无明显差异——当前减仓评级暂无额外避损价值，'
+                    '其价值更多在纪律触发（止盈止损线），而非预测更弱。',
+                    'bad',
+                )
+            else:
+                add(
+                    f'避损口径：减仓/卖出评级标记的票事后20日回撤（平均 {rk["mean"]:+.1f}%）'
+                    f'小于其他档（{ot["mean"]:+.1f}%）——评级具备一定避损价值。',
+                    'good',
+                )
+
         add('以上为历史回测统计解读，不构成投资建议。')
         # 020R-20/21：逐条观点 + 色调列表（前端卡片化逐条着色展示）
         report['interpretation_parts'] = parts
@@ -861,6 +965,34 @@ class BacktestEngine:
                 (market,),
             )
         rows = [dict(r) for r in cursor.fetchall()]
+
+        # 2026-09-18（回测提升①）：位置/回撤列自愈式回填（首次增量，其后仅新行）
+        cursor.execute(
+            'SELECT COUNT(*) FROM backtest_results '
+            'WHERE pos_pctile IS NULL AND dd20 IS NULL')
+        if cursor.fetchone()[0] > 0:
+            conn.close()
+            _backfill_pos_dd()
+            conn = get_connection()
+            cursor = conn.cursor()
+            if include_simulated:
+                cursor.execute(
+                    'SELECT br.*, rh.engine_version FROM backtest_results br '
+                    'LEFT JOIN ratings_history rh '
+                    'ON rh.stock_id = br.stock_id AND rh.rating_date = br.rating_date '
+                    'WHERE br.market = ? ORDER BY br.rating_date',
+                    (market,),
+                )
+            else:
+                cursor.execute(
+                    'SELECT br.*, rh.engine_version FROM backtest_results br '
+                    'LEFT JOIN ratings_history rh '
+                    'ON rh.stock_id = br.stock_id AND rh.rating_date = br.rating_date '
+                    'WHERE br.market = ? '
+                    'AND (br.is_simulated IS NULL OR br.is_simulated = 0) ORDER BY br.rating_date',
+                    (market,),
+                )
+            rows = [dict(r) for r in cursor.fetchall()]
         conn.close()
 
         if not rows:
@@ -1021,6 +1153,42 @@ class BacktestEngine:
         # 小样本警告
         small_sample = total < 30
 
+        # 2026-09-18（回测提升①）：分档×位置矩阵 + 避损口径——
+        # 回测验证：低位买入 68% vs 高位买入 33%、高位减仓 88% vs 低位减仓 37%，
+        # 方向信息被位置混杂掩盖，矩阵是「条件化使用评级」的数据基础
+        POS_BANDS = (('low', 0.0, 0.4, '低位<40%'), ('mid', 0.4, 0.7, '中位40-70%'), ('high', 0.7, 1.01, '高位>70%'))
+        position_matrix = {}
+        dd_risk = {'risk': [], 'other': []}
+        for r in rows:
+            pos = r.get('pos_pctile')
+            rating = r.get('rating', '?')
+            # 分母口径与其他准确率一致：仅可判定行（中性/无法判定不计入，防稀释）
+            if r.get('dynamic_is_correct') not in (0, 1):
+                continue
+            if pos is not None:
+                for band, lo, hi, _label in POS_BANDS:
+                    if lo <= pos < hi:
+                        cell = position_matrix.setdefault(rating, {}).setdefault(
+                            band, {'correct': 0, 'total': 0})
+                        cell['total'] += 1
+                        if r.get('dynamic_is_correct') == 1:
+                            cell['correct'] += 1
+                        break
+            if r.get('dd20') is not None:
+                bucket = 'risk' if rating in ('建议减仓', '强烈建议卖出') else 'other'
+                dd_risk[bucket].append(r['dd20'])
+        for rating, bands in position_matrix.items():
+            for band, cell in bands.items():
+                cell['accuracy'] = round(cell['correct'] / cell['total'], 4) if cell['total'] else None
+        drawdown_risk = {}
+        for bucket, vals in dd_risk.items():
+            drawdown_risk[bucket] = {
+                'n': len(vals),
+                'mean': round(sum(vals) / len(vals), 2) if vals else None,
+                'median': round(sorted(vals)[len(vals) // 2], 2) if vals else None,
+                'worst': round(min(vals), 2) if vals else None,
+            }
+
         report = {
             'market': market,
             'total': total,
@@ -1037,6 +1205,10 @@ class BacktestEngine:
             'small_sample_warning': small_sample,
             'sample_period_note': f'样本期: {date_range} (共{len(set(dates))}个交易日)',
             'engine_stats': engine_stats,
+            # 2026-09-18（回测提升①）：分档×位置矩阵 + 避损口径
+            'position_matrix': position_matrix,
+            'position_bands': [{'key': b, 'lo': lo, 'hi': hi, 'label': lb} for b, lo, hi, lb in POS_BANDS],
+            'drawdown_risk': drawdown_risk,
         }
         # 客观解读评语（纯数据驱动，基于真实样本统计）
         report['interpretation'] = self._build_interpretation(report)

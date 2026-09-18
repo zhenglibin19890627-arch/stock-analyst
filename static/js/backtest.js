@@ -118,6 +118,34 @@
                     });
                     html += '</tbody></table>';
                 }
+
+                // 2026-09-18（回测提升①）：分档×位置矩阵 + 避损口径（条件化使用评级的数据基础）
+                var pm = rpt.position_matrix, bands = rpt.position_bands, dr = rpt.drawdown_risk;
+                if (pm && bands && Object.keys(pm).length) {
+                    html += '<h4 style="margin:16px 0 8px;">分档 × 位置矩阵 <span style="font-size:12px;color:var(--text-3,#888);font-weight:normal;">' +
+                        '（动态口径；评级发出时个股在近60日高低区间的位置——同档评级在不同位置的胜率不同，这是「条件化使用」的依据）</span></h4>';
+                    html += '<table class="bt-report-table" style="font-size:13px;"><thead><tr style="background:#f0f7ff;"><th style="padding:8px;text-align:left;">评级</th>';
+                    bands.forEach(function(b) { html += '<th style="padding:8px;text-align:center;">' + b.label + '</th>'; });
+                    html += '</tr></thead><tbody>';
+                    Object.keys(pm).sort(function(a, b) { return ratingOrder.indexOf(a) - ratingOrder.indexOf(b); }).forEach(function(rating) {
+                        html += '<tr style="border-bottom:1px solid var(--border-light,#eee);"><td style="padding:8px;"><span class="rating-badge ' + getRatingClass(rating) + '">' + rating + '</span></td>';
+                        bands.forEach(function(b) {
+                            var cell = (pm[rating] || {})[b.key];
+                            if (!cell || !cell.total) { html += '<td style="padding:8px;text-align:center;color:#bbb;">—</td>'; return; }
+                            var acc = Math.round(cell.accuracy * 100);
+                            var col = acc >= 60 ? '#27ae60' : acc >= 45 ? '#f39c12' : '#e74c3c';
+                            html += '<td style="padding:8px;text-align:center;font-weight:700;color:' + col + ';" title="正确 ' + cell.correct + ' / 共 ' + cell.total + '">' + acc + '%<span style="font-weight:400;color:var(--text-3,#999);"> (' + cell.total + ')</span></td>';
+                        });
+                        html += '</tr>';
+                    });
+                    html += '</tbody></table>';
+                    html += '<div style="margin-top:6px;font-size:12px;color:var(--text-3,#999);">子样本≥10 才有参考意义；分化显著时：同档评级在低位/高位的胜率差异即「条件化使用」空间。</div>';
+                }
+                if (dr && (dr.risk || {}).n >= 20) {
+                    html += '<div style="margin-top:10px;padding:8px 12px;background:var(--surface-alt,#f8f9fa);border-radius:6px;font-size:12.5px;color:var(--text-2,#555);line-height:1.7;">' +
+                        '<b>避损口径</b>（评级后20日最大回撤）：减仓/卖出档 平均 ' + dr.risk.mean + '% / 中位 ' + dr.risk.median + '% / 最深 ' + dr.risk.worst + '%（' + dr.risk.n + '条）；' +
+                        '其他档 平均 ' + dr.other.mean + '% / 中位 ' + dr.other.median + '%（' + dr.other.n + '条）。</div>';
+                }
                 html += '</div>';
                 el.innerHTML = html;
                 loadPriceBacktestReport();
