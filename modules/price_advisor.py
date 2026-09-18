@@ -568,7 +568,9 @@ def _build_grid(
                     'price': round(recover_exit, 2),
                     'pct': 100,
                     'type': 'reduce',
-                    'label': '回本清仓位',
+                    # 2026-09-09：原"回本清仓位"名不副实——recover_exit =
+                    # max(成本+0.6ATR, 成本×1.02) 高于成本，是回本之后再清的价位
+                    'label': '回本后清仓位',
                 }
             )
         else:

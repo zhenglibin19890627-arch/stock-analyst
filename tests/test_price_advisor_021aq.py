@@ -36,9 +36,9 @@ class TestUnderwaterTargetBelowCost:
         # tp=11.5 < cost=12：回本减仓50% @12 + 回本清仓100% @max(12+0.18, 12.24)=12.24
         g = _grid(10.0, 12.0, tp=11.5, stop=8.9)
         labels = _labels(g)
-        assert '回本减仓位' in labels and '回本清仓位' in labels
+        assert '回本减仓位' in labels and '回本后清仓位' in labels
         rb = next(x for x in g if x['label'] == '回本减仓位')
-        rc = next(x for x in g if x['label'] == '回本清仓位')
+        rc = next(x for x in g if x['label'] == '回本后清仓位')
         assert rb['pct'] == 50 and rb['price'] == pytest.approx(12.0, abs=0.01)
         assert rc['pct'] == 100 and rc['price'] == pytest.approx(12.24, abs=0.01)
 
@@ -100,7 +100,7 @@ class TestProfitAndEdge:
         g = _grid(10.0, 8.0, tp=11.0, stop=8.9)
         labels = _labels(g)
         assert '第一止盈位' in labels and '最终止盈位' in labels
-        assert '回本减仓位' not in labels and '回本清仓位' not in labels
+        assert '回本减仓位' not in labels and '回本后清仓位' not in labels
         tp1 = next(x for x in g if x['label'] == '第一止盈位')
         assert tp1['price'] == pytest.approx(10.18, abs=0.01)  # close+0.6ATR
         _assert_ascending(g)
@@ -112,7 +112,7 @@ class TestProfitAndEdge:
         assert sum(1 for x in g if x['type'] == 'add') == 1
         sc = next(x for x in g if x['label'] == '止损清仓位')
         assert sc['price'] == pytest.approx(8.54, abs=0.01)
-        rc = next(x for x in g if x['label'] == '回本清仓位')
+        rc = next(x for x in g if x['label'] == '回本后清仓位')
         assert rc['price'] == pytest.approx(12.36, abs=0.01)
         _assert_ascending(g)
 
