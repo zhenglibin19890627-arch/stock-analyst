@@ -82,19 +82,19 @@ class TestPositionStopCalibration:
     """有持仓止损校准（A股统一 -11%；021AL 港股统一 -16%）。"""
 
     def test_a_stock_uniform(self):
-        # 建议减仓分档 -4%，A股校准覆盖为 -11%
+        # 建议减仓分档 -4%，A股校准覆盖为 -11%；2026-09-18 成本底线：max(89.0, 98×0.92=90.16) → 底线生效
         a = pb._gen_with_position(100.0, 98.0, '建议减仓', 105.0, 108.0, 2.0, 'a_stock')
-        assert a['stop_loss'] == pytest.approx(89.0, abs=0.01)
-        # 强烈推荐买入分档 -8%，同样被 -11% 覆盖
+        assert a['stop_loss'] == pytest.approx(90.16, abs=0.01)
+        # 强烈推荐买入分档 -8%，同样被 -11% 覆盖，再被成本底线抬到 90.16
         b = pb._gen_with_position(100.0, 98.0, '强烈推荐买入', 105.0, 108.0, 2.0, 'a_stock')
-        assert b['stop_loss'] == pytest.approx(89.0, abs=0.01)
+        assert b['stop_loss'] == pytest.approx(90.16, abs=0.01)
 
     def test_hk_uniform_16(self):
-        # 021AL：港股统一 -16%（持有观望分档 -5% 实测触发 40% → 校准）
+        # 021AL：港股统一 -16%（100×0.84=84.0）；成本底线 98×0.86=84.28 略高 → 底线生效
         a = pb._gen_with_position(100.0, 98.0, '持有观望', 105.0, 108.0, 2.0, 'hk_stock')
-        assert a['stop_loss'] == pytest.approx(84.0, abs=0.01)
+        assert a['stop_loss'] == pytest.approx(84.28, abs=0.01)
         b = pb._gen_with_position(100.0, 98.0, '强烈建议卖出', 105.0, 108.0, 2.0, 'hk_stock')
-        assert b['stop_loss'] == pytest.approx(84.0, abs=0.01)
+        assert b['stop_loss'] == pytest.approx(84.28, abs=0.01)
 
 
 class TestModuleSync:
@@ -103,6 +103,8 @@ class TestModuleSync:
     def test_constants_equal(self):
         assert pa.TARGET_CAP == pb.TARGET_CAP
         assert pa.POSITION_STOP_PCT == pb.POSITION_STOP_PCT
+        assert pa.POSITION_COST_FLOOR_PCT == pb.POSITION_COST_FLOOR_PCT  # 2026-09-18 A 方向
+        assert pa.TP_RATCHET_WINDOW_DAYS == pb.TP_RATCHET_WINDOW_DAYS
 
     def test_no_position_outputs_match(self):
         for market in ('a_stock', 'hk_stock'):

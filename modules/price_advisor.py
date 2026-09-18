@@ -15,6 +15,7 @@
 仅依赖标准库（sqlite3/math/re/datetime），无新 pip 依赖（零代码约束）。
 """
 
+import json
 import logging
 import os
 import re
@@ -80,6 +81,16 @@ TARGET_CAP = {'a_stock': 0.075, 'hk_stock': 0.11}        # 无持仓目标价距
 POSITION_STOP_PCT = {'a_stock': 0.11, 'hk_stock': 0.16}  # 有持仓止损距离（覆盖评级分档）
 # 样本提醒：港股真实样本仅 28 条（持仓侧 5 条）——常数为波动率推算初值，
 # 样本积累后（≥100 条）应复核（A股 125 条标定同样需随数据滚动复核）。
+
+# 2026-09-18（A 方向，用户拍板）：堵"止盈追涨上移/止损无底线下移"两个动态失真
+# ① 止损成本底线：止损价不低于 成本×(1-底线比例)——浮亏有固定最大亏损锁定，
+#    A股 -8%（宽于日常波幅不洗出、紧于 -11% 现价锚）；港股波幅 1.5 倍取 -14%。
+#    深亏中现价已破底线 → 止损线高于现价 → 状态机 S4 建议清仓（特性而非 bug）
+POSITION_COST_FLOOR_PCT = {'a_stock': 0.08, 'hk_stock': 0.14}
+# ② 止盈棘轮（滚动窗口）：止盈价 = max(公式值, 近N天历史报告最高止盈)——
+#    价格在持有周期内只升不降，堵"每天按新现价重画、永远差一口气"的追逐失真；
+#    滚动窗口（10 自然日）而非永久棘轮——长熊中老高位逐步过期，止盈温和回落可成交
+TP_RATCHET_WINDOW_DAYS = 10
 
 
 def _norm_market(market):
@@ -237,6 +248,53 @@ def _build_reduce_range(close, rating, atr, cost_price):
 # ================================================================
 # 数据读取辅助（005基线，保留不动）
 # ================================================================
+
+
+def _ratchet_take_profit(stock_id, formula_tp, today):
+    """止盈棘轮（滚动窗口，2026-09-18 A 方向）。
+
+    取近 TP_RATCHET_WINDOW_DAYS 天历史报告快照（has_position 口径）的最高止盈，
+    与公式值取大——止盈价在持有周期内只升不降，堵"每日按新现价重画、
+    永远差一口气"的追逐失真；窗口外的老高位自然过期，长熊中温和回落可成交。
+
+    Returns:
+        (ratcheted_tp, tp_base)：棘轮后止盈价、棘轮基数（无历史时为 None）
+    """
+    try:
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        cutoff = (_dt.strptime(str(today)[:10], '%Y-%m-%d') - _td(days=TP_RATCHET_WINDOW_DAYS)).strftime('%Y-%m-%d')
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT price_advice FROM daily_reports
+                   WHERE stock_id = ? AND status = 'ok' AND report_type = 'daily'
+                   AND report_date >= ? AND report_date < ?
+                   AND price_advice IS NOT NULL
+                   ORDER BY report_date DESC""",
+                (stock_id, cutoff, str(today)[:10]),
+            )
+            hist_max = None
+            for (paj,) in cur.fetchall():
+                try:
+                    pa = json.loads(paj) if paj else {}
+                except (ValueError, TypeError):
+                    continue
+                if pa.get('has_position') and pa.get('take_profit'):
+                    try:
+                        v = float(pa['take_profit'])
+                    except (TypeError, ValueError):
+                        continue
+                    hist_max = v if hist_max is None else max(hist_max, v)
+        finally:
+            conn.close()
+        if hist_max is not None:
+            return max(formula_tp, hist_max), hist_max
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f'[price-advisor] 止盈棘轮查询失败 stock_id={stock_id}: {e}')
+    return formula_tp, None
 
 
 def _calc_atr(stock_id, period=14):
@@ -1049,12 +1107,19 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr, cap
 
 
 def _gen_with_position(close, cost_price, rating, ma60, boll_upper, atr, capital_signal=None,
-                       market='a_stock'):
+                       market='a_stock', stock_id=None, ref_date=None):
     """有持仓：状态机 / 动态止盈 / 网格 / 操作建议 / 浮盈
 
     020P：止盈/止损锚定现价（与成本解耦）——市场不看个人成本，
     目标与止损只由 评级档位 + 现价 + 技术阻力 决定；
     成本仅用于浮盈浮亏展示与网格回本位。
+
+    2026-09-18（A 方向）：两个稳定锚定修正——
+    ① 止损成本底线：stop_loss = max(现价×(1-止损比例), 成本×(1-底线比例))，
+       浮亏有固定最大亏损锁定，不再无底线下移；深亏破底线时止损线高于现价，
+       状态机判 S4 建议清仓（特性）。
+    ② 止盈棘轮（滚动窗口）：take_profit = max(公式值, 近N天历史最高止盈)，
+       持有期内只升不降，堵"每日重画、永远差一口气"的追逐失真。
     """
 
     target_gain = RATING_TARGET_GAIN.get(rating, 0.12)
@@ -1078,8 +1143,20 @@ def _gen_with_position(close, cost_price, rating, ma60, boll_upper, atr, capital
     min_tp = close * (1 + min_target_gain)
     take_profit = max(min_tp, min(fixed_tp, resistance))
 
-    # ---- 020P：止损价锚定现价（评级止损比例）----
+    # ---- 2026-09-18：止盈棘轮（滚动窗口）——持有期内只升不降 ----
+    tp_ratchet_base = None
+    if stock_id is not None:
+        take_profit, tp_ratchet_base = _ratchet_take_profit(
+            stock_id, take_profit, ref_date or datetime.now().strftime('%Y-%m-%d')
+        )
+
+    # ---- 020P：止损价锚定现价（评级止损比例）+ 2026-09-18 成本绝对底线 ----
     stop_loss = close * (1 - stop_loss_pct)
+    floor_pct = POSITION_COST_FLOOR_PCT.get(_norm_market(market), 0.08)
+    stop_cost_floor = None
+    if cost_price and cost_price > 0:
+        stop_cost_floor = cost_price * (1 - floor_pct)
+        stop_loss = max(stop_loss, stop_cost_floor)
 
     # ---- 009新增：操作建议状态机 ----
     state, state_name, action_suggestion = _determine_action_by_state(
@@ -1121,6 +1198,9 @@ def _gen_with_position(close, cost_price, rating, ma60, boll_upper, atr, capital
         'action_suggestion': action_suggestion,
         'grid': grid,
         'reduce_range': reduce_range,  # 021AS：减仓/清仓评级的建议减仓区间
+        # 2026-09-18 A 方向：稳定锚定元数据（前端展示"棘轮来源/成本底线"用）
+        'tp_ratchet_base': round(tp_ratchet_base, 2) if tp_ratchet_base else None,
+        'stop_cost_floor': round(stop_cost_floor, 2) if stop_cost_floor else None,
         'capital_signal': capital_signal,
         'disclaimer': _DISCLAIMER,
     }
@@ -1192,7 +1272,9 @@ def generate_price_advice(stock_id, advice_result):
         if has_position and cost_price and cost_price > 0:
             result = _gen_with_position(
                 close, cost_price, rating, ma60, boll_upper, atr, capital_signal,
-                market=advice_market
+                market=advice_market,
+                stock_id=stock_id,
+                ref_date=advice_result.get('rating_date') or datetime.now().strftime('%Y-%m-%d'),
             )
             # 009新增：交易流水分析
             result['trade_analysis'] = _analyze_trade_records(stock_id)

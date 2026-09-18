@@ -266,7 +266,7 @@ def _prev_report_snapshot(stock_id, before_date):
         try:
             cur = conn.cursor()
             cur.execute(
-                """SELECT report_date, total_score, rating, key_factors
+                """SELECT report_date, total_score, rating, key_factors, price_advice
                    FROM daily_reports
                    WHERE stock_id = ? AND report_type = 'daily' AND status = 'ok'
                    AND report_date < ?
@@ -277,6 +277,7 @@ def _prev_report_snapshot(stock_id, before_date):
             if not row:
                 return None
             dims = {}
+            price_lines = {}
             try:
                 kf = _json.loads(row['key_factors']) if row['key_factors'] else {}
                 for dk in ('kline', 'fundamental', 'capital_flow', 'news'):
@@ -285,11 +286,22 @@ def _prev_report_snapshot(stock_id, before_date):
                         dims[dk] = info['score']
             except (ValueError, TypeError):
                 pass
+            # 2026-09-18 A 方向：上一轮止盈/止损（价格建议卡对比展示）
+            try:
+                _pa = _json.loads(row['price_advice']) if row['price_advice'] else {}
+                if isinstance(_pa, dict) and _pa.get('has_position'):
+                    if _pa.get('take_profit') is not None:
+                        price_lines['take_profit'] = _pa['take_profit']
+                    if _pa.get('stop_loss') is not None:
+                        price_lines['stop_loss'] = _pa['stop_loss']
+            except (ValueError, TypeError):
+                pass
             return {
                 'report_date': row['report_date'],
                 'total_score': row['total_score'],
                 'rating': row['rating'],
                 'dims': dims,
+                'price_lines': price_lines,
             }
         finally:
             conn.close()

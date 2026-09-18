@@ -822,6 +822,17 @@
         // 2. 评分卡 + 雷达图 + 价格建议卡（020R-7：价格建议与网格计划独立卡片，雷达图右侧）
         // 先构建价格建议卡片 HTML（后面插入 top-grid）
         var paSideHtml = '';
+        // 2026-09-18 A 方向：上一轮价格线对比小字（棘轮/底线的连续性可视化）
+        function _prevLine(prevR, key, curVal) {
+            if (!prevR || !prevR.price_lines || prevR.price_lines[key] == null) return '';
+            var pv = Number(prevR.price_lines[key]);
+            var diff = curVal - pv;
+            var color = diff > 0 ? '#e74c3c' : diff < 0 ? '#27ae60' : 'var(--text-3,#999)';
+            return ' <span style="font-size:10px;font-weight:400;color:var(--text-3,#999);">上轮 ' +
+                pv.toFixed(2) + ' <span style="color:' + color + ';font-weight:600;">' +
+                (diff > 0 ? '+' : '') + diff.toFixed(2) + '</span></span>';
+        }
+        var _prevR = adviseData.prev_report;
         if (adviseData.price_advice) {
             var pa = adviseData.price_advice;
             // 009: 状态/网格/资金面颜色映射
@@ -875,9 +886,9 @@
                     paSideHtml += '<div class="pa-kv-row"><span class="pa-kv-label">状态</span><span class="pa-kv-value ' + stateCls + '">' +
                             (pa.state_name || '') + '</span></div>';
                     paSideHtml += '<div class="pa-kv-row"><span class="pa-kv-label">止盈价</span><span class="pa-kv-value pa-up">' +
-                            pa.take_profit.toFixed(2) + '</span></div>';
+                            pa.take_profit.toFixed(2) + (_prevLine(_prevR, 'take_profit', pa.take_profit)) + '</span></div>';
                     paSideHtml += '<div class="pa-kv-row"><span class="pa-kv-label">止损价</span><span class="pa-kv-value pa-down">' +
-                            pa.stop_loss.toFixed(2) + '</span></div>';
+                            pa.stop_loss.toFixed(2) + (_prevLine(_prevR, 'stop_loss', pa.stop_loss)) + '</span></div>';
                     // 021AP：与回测中心口径对齐——补仓区间/持有区间
                     // 021AS：减仓/清仓评级给出建议减仓区间
                     if (pa.reduce_range && pa.reduce_range.low != null) {
@@ -964,7 +975,6 @@
         html += '<div class="score-value" style="color:' + scoreColor + ';">' +
                 (adviseData.total_score != null ? adviseData.total_score.toFixed(1) : '--') + '</div>';
         // 2026-09-09：上一轮评分对比行（总分 + 日期），涨红跌绿
-        var _prevR = adviseData.prev_report;
         if (_prevR && _prevR.total_score != null && adviseData.total_score != null) {
             var _diff = adviseData.total_score - _prevR.total_score;
             var _dColor = _diff > 0 ? '#e74c3c' : _diff < 0 ? '#27ae60' : 'var(--text-3,#999)';

@@ -57,6 +57,11 @@ RATING_STOP_LOSS = {
     '强烈建议卖出': 0.03,
 }
 
+# 2026-09-18（A 方向）同步：止损成本底线（与 price_advisor.py 同步，修改时需双向同步）
+POSITION_COST_FLOOR_PCT = {'a_stock': 0.08, 'hk_stock': 0.14}
+# 止盈棘轮滚动窗口天数（与 price_advisor.py 同步）
+TP_RATCHET_WINDOW_DAYS = 10
+
 RATING_ACTION_SUGGESTION = {
     '强烈推荐买入': '加仓20%',
     '推荐买入': '加仓20%',
@@ -238,7 +243,7 @@ def _gen_no_position(close, rating, ma20, ma60, boll_upper, boll_lower, atr, mar
 
 
 def _gen_with_position(close, cost_price, rating, ma60=None, boll_upper=None, atr=None,
-                       market='a_stock'):
+                       market='a_stock', tp_ratchet_base=None):
     """有持仓：止盈价 / 止损价 / 补仓价位（020P 现价锚定版）
 
     与 price_advisor._gen_with_position 逻辑一致，修改时需双向同步。
@@ -247,6 +252,11 @@ def _gen_with_position(close, cost_price, rating, ma60=None, boll_upper=None, at
     021AJ：A股止损距离校准为统一 -11%（评级分档 -3~8% 实测 T+20 触发 66%）。
     补仓价位与 price_advisor._build_grid 补仓一档一致（S4 已破止损时不设；
     021AQ：网格另有补仓二档，回测补仓区间口径锚定首档，此公式勿改）。
+
+    2026-09-18（A 方向，与 price_advisor 同步）：
+    - 止损成本底线：stop_loss = max(现价锚, 成本×(1-底线比例))——固定最大亏损
+    - 止盈棘轮：take_profit = max(公式值, tp_ratchet_base)——重放序列内只升不降
+      （基数由重放循环维护的滚动窗口传入；None 时退化为纯公式值）
     """
     target_gain = RATING_TARGET_GAIN.get(rating, 0.12)
     min_target_gain = MIN_TARGET_GAIN.get(rating, 0.04)
@@ -262,9 +272,14 @@ def _gen_with_position(close, cost_price, rating, ma60=None, boll_upper=None, at
     resistance = _calc_resistance(close, ma60, boll_upper)
     min_tp = close * (1 + min_target_gain)
     take_profit = max(min_tp, min(fixed_tp, resistance))
+    if tp_ratchet_base is not None:
+        take_profit = max(take_profit, tp_ratchet_base)
 
-    # ---- 止损价（020P：锚定现价，评级比例）----
+    # ---- 止损价（020P：锚定现价，评级比例）+ 2026-09-18 成本绝对底线 ----
     stop_loss = close * (1 - stop_loss_pct)
+    floor_pct = POSITION_COST_FLOOR_PCT.get(_norm_market(market), 0.08)
+    if cost_price and cost_price > 0:
+        stop_loss = max(stop_loss, cost_price * (1 - floor_pct))
 
     # ---- 补仓价位（网格补仓位，与 price_advisor._build_grid 同公式）----
     add_price = None
@@ -287,7 +302,8 @@ def _gen_with_position(close, cost_price, rating, ma60=None, boll_upper=None, at
     }
 
 
-def _gen_price_advice_at_date(indicators, rating, cost_price, market='a_stock'):
+def _gen_price_advice_at_date(indicators, rating, cost_price, market='a_stock',
+                              tp_ratchet_base=None):
     """在指定日期生成价格建议
 
     Args:
@@ -295,6 +311,7 @@ def _gen_price_advice_at_date(indicators, rating, cost_price, market='a_stock'):
         rating: 当前最新评级
         cost_price: 持仓成本价（None表示无持仓）
         market: 'a_stock'/'hk_stock'（021AJ：目标封顶/止损校准按市场）
+        tp_ratchet_base: 止盈棘轮基数（2026-09-18 A 方向，重放序列滚动窗口 max）
 
     Returns:
         dict: 价格建议字典
@@ -312,7 +329,8 @@ def _gen_price_advice_at_date(indicators, rating, cost_price, market='a_stock'):
     # 有持仓模式（传递 ma60/boll_upper 用于动态止盈计算）
     if cost_price and cost_price > 0:
         return _gen_with_position(
-            close, cost_price, rating, ma60, boll_upper, indicators['atr'], market=market
+            close, cost_price, rating, ma60, boll_upper, indicators['atr'], market=market,
+            tp_ratchet_base=tp_ratchet_base,
         )
 
     # 无持仓模式
@@ -773,6 +791,11 @@ def run_price_backtest(market=None, force=False):
         )
         all_trades = [dict(r) for r in cursor.fetchall()]
 
+        # 2026-09-18（A 方向）：止盈棘轮滚动窗口（与 price_advisor 同步）——
+        # 回放序列内逐点维护"近N天最高止盈"，模拟实盘棘轮的时间连续性；
+        # 持仓中断（清仓段）时清空窗口，重新建仓后棘轮从头积累
+        tp_window = []  # [(date_str, tp_float)]
+
         for bt_idx in bt_indices:
             total += 1
             bt_date = all_kline[bt_idx]['trade_date']
@@ -807,10 +830,27 @@ def run_price_backtest(market=None, force=False):
 
                 has_pos_hist, cost_hist = _historical_position_state(all_trades, bt_date)
 
+                # 2026-09-18：棘轮窗口维护——过期弹出、无持仓清空；有持仓取窗口 max 传入
+                cutoff = (
+                    __import__('datetime').datetime.strptime(str(bt_date)[:10], '%Y-%m-%d')
+                    - __import__('datetime').timedelta(days=TP_RATCHET_WINDOW_DAYS)
+                ).strftime('%Y-%m-%d')
+                tp_window = [(d, v) for (d, v) in tp_window if d >= cutoff]
+                tp_ratchet_base = None
+                if has_pos_hist and cost_hist:
+                    vals = [v for (_, v) in tp_window]
+                    tp_ratchet_base = max(vals) if vals else None
+                else:
+                    tp_window.clear()
+
                 # 5. 生成价格建议（021AJ 市场校准；021AU 历史评级+历史持仓成本）
                 advice = _gen_price_advice_at_date(
-                    indicators, replay_rating, cost_hist, market=stock_market
+                    indicators, replay_rating, cost_hist, market=stock_market,
+                    tp_ratchet_base=tp_ratchet_base,
                 )
+                # 有持仓且可用 → 记入棘轮窗口（供后续回测点使用）
+                if advice.get('available') and advice.get('has_position') and advice.get('take_profit'):
+                    tp_window.append((str(bt_date)[:10], float(advice['take_profit'])))
 
                 if not advice.get('available'):
                     errors += 1
