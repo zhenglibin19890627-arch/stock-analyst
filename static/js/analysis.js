@@ -196,6 +196,7 @@
         html += '<span class="big-rating">' + data.rating + '</span>';
         html += '<div class="score-label">' + (data.rating_label || '') + ' | 评级日期: ' + data.rating_date + '</div>';
         html += '<div style="margin-top:8px;"><span class="action-badge ' + actionClass + '">' + data.action_advice + '</span></div>';
+        html += '<div id="posNoteBox"></div>';  // 2026-09-18 回测提升②：位置标注容器（generateAdvice 末尾异步填充）
         if (data.previous_score !== null && data.previous_score !== undefined) {
             const diff = data.total_score - data.previous_score;
             const sign = diff >= 0 ? '+' : '';
@@ -1304,6 +1305,9 @@
 
         // 趋势罗盘异步填充（不阻塞报告主体渲染）；传入 adviseData 供评级×罗盘调和提示
         loadTrendCompass(stockId, adviseData);
+
+        // 2026-09-18 回测提升②：评级位置标注异步填充（分化可信才显示，404 静默）
+        loadPositionNote(stockId);
 
         // 操盘手建议异步填充（2026-09-18，只读端点，不阻塞主体）
         loadTraderAdvice(stockId);
