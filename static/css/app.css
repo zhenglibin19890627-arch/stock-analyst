@@ -618,6 +618,7 @@ html[data-theme='warm'] {
         .alert-item-type.rating_change { background: #fff3e0; color: #e65100; }
         .alert-item-type.score_below { background: #ffebee; color: #c62828; }
         .alert-item-type.capital_outflow { background: #e8f5e9; color: #2e7d32; }
+        .alert-item-type.tech_signal { background: #e3f2fd; color: #1565c0; }
         .alert-item-msg {
             font-size: 13px;
             color: #333;

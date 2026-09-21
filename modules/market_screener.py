@@ -627,6 +627,129 @@ def detect_signals(kline_rows, wanted=None, window=3):
 
 
 # ================================================================
+# 自选股信号离线复算（021BP 决策闭环 项1）
+#   复用上方信号纯函数（detect_signals/detect_resonances），输入改为
+#   自选股已采集的库内 K 线（raw_kline / raw_kline_weekly），零网络。
+#   口径：与在线扫描同为"快照参考"——结果截止最新已采集K线（kline_upto），
+#   不入库、不写评分/评级表（只产候选展示，与扫描器同一边界）。
+# ================================================================
+
+# 日K读取上限：KLINE_DAYS 全量口径。评分路径 _read_kline_data 的 limit=60
+# 仅够共振③(60根)/④(50根)下限，指标预热长度不足——本处自读 250 根，
+# 与评分读取完全解耦、互不影响。
+_WATCHLIST_DAILY_LIMIT = 250
+
+
+def _rows_to_screener_klines(rows):
+    """raw_kline* 行 → screener kline 行（trade_date→date 唯一改名映射）。
+
+    OHLC 任一缺失的行剔除（评分适配层同口径），volume 缺失按 0 处理。"""
+    out = []
+    for row in rows:
+        d = dict(row)
+        if any(d.get(k) is None for k in ('open', 'close', 'high', 'low')):
+            continue
+        out.append({
+            'date': str(d['trade_date']),
+            'open': float(d['open']),
+            'close': float(d['close']),
+            'high': float(d['high']),
+            'low': float(d['low']),
+            'volume': float(d['volume'] or 0.0),
+        })
+    return out
+
+
+def _read_watchlist_klines(cursor, stock_id, daily_limit=_WATCHLIST_DAILY_LIMIT):
+    """自选股已采集K线 → screener 行格式（时间正序，零网络）。
+
+    日K取最近 daily_limit 根；周K取 raw_kline_weekly 全量（周线共振用）。
+    传入外部 cursor（预警扫描/巡检端点各自持有连接，避免二次连接锁竞争）。
+    Returns: (daily_rows, weekly_rows)
+    """
+    cursor.execute(
+        'SELECT trade_date, open, close, high, low, volume '
+        'FROM raw_kline WHERE stock_id=? ORDER BY trade_date DESC LIMIT ?',
+        (stock_id, daily_limit),
+    )
+    daily = _rows_to_screener_klines(reversed(cursor.fetchall()))
+    cursor.execute(
+        'SELECT trade_date, open, close, high, low, volume '
+        'FROM raw_kline_weekly WHERE stock_id=? ORDER BY trade_date ASC',
+        (stock_id,),
+    )
+    weekly = _rows_to_screener_klines(cursor.fetchall())
+    return daily, weekly
+
+
+def compute_watchlist_signal_result(kline_rows, weekly_rows=None, wanted=None, window=3):
+    """单只股票离线复算：信号 + 共振（纯函数包装，不触库不触网）。
+
+    Returns: {'matches', 'resonances', 'kline_upto', 'kline_count'}；
+    K线不足 35 根时 matches 为空列表（detect_signals 门槛），kline_upto 仍回报
+    供调用方判断数据新鲜度。
+    """
+    matches = detect_signals(kline_rows, wanted=wanted, window=window)
+    resonances = detect_resonances(matches, kline_rows, weekly_rows)
+    return {
+        'matches': matches,
+        'resonances': resonances,
+        'kline_upto': str(kline_rows[-1]['date']) if kline_rows else None,
+        'kline_count': len(kline_rows),
+    }
+
+
+def scan_watchlist_signals(stock_ids=None, signals=None, window=3,
+                           daily_limit=_WATCHLIST_DAILY_LIMIT):
+    """自选股买点信号巡检（只读离线复算，零网络）。
+
+    stock_ids 缺省 = 全部 active 自选股（≤100 只，纯读库+纯函数，毫秒级/只）。
+    与 run_signal_chunk（在线第②段）收录口径一致：仅收录有信号/共振命中的股票。
+
+    Returns: {
+        'scope': 'watchlist_offline',   # 快照参考口径标注（区别于在线扫描）
+        'stock_count': N,               # 巡检股票数
+        'results': [{stock_id, symbol, name, matches, resonances,
+                     kline_upto, kline_count}],
+        'errors': [{stock_id, error}],
+    }
+    """
+    wanted = list(signals) if signals else list(SIGNAL_LIBRARY.keys())
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, symbol, name FROM stocks WHERE status='active' ORDER BY id")
+        stocks = [dict(r) for r in cursor.fetchall()]
+        if stock_ids:
+            wanted_ids = {int(s) for s in stock_ids}
+            stocks = [s for s in stocks if s['id'] in wanted_ids]
+
+        results = []
+        errors = []
+        for s in stocks:
+            try:
+                daily, weekly = _read_watchlist_klines(cursor, s['id'], daily_limit=daily_limit)
+                item = compute_watchlist_signal_result(daily, weekly, wanted=wanted, window=window)
+                if item['matches'] or item['resonances']:
+                    results.append({
+                        'stock_id': s['id'],
+                        'symbol': s['symbol'] or '',
+                        'name': s['name'] or '',
+                        **item,
+                    })
+            except Exception as e:  # noqa: BLE001 —— 单只失败不阻塞巡检（与 run_signal_chunk 同型）
+                errors.append({'stock_id': s['id'], 'error': str(e)[:120]})
+        return {
+            'scope': 'watchlist_offline',
+            'stock_count': len(stocks),
+            'results': results,
+            'errors': errors,
+        }
+    finally:
+        conn.close()
+
+
+# ================================================================
 # 快照存取 + 筛选引擎
 # ================================================================
 

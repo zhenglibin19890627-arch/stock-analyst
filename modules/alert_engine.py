@@ -1,19 +1,23 @@
 """
 P3-B 智能预警模块 (Alert Engine)
 
-基于监理批准的 3 类预警规则（G1-G3）：
+基于监理批准的 3 类预警规则（G1-G3）+ 021BP 决策闭环新增信号类规则：
   1. rating_change  评级跨档变化（升级/降级）
   2. score_below    评分跌破阈值（默认65）
   3. capital_outflow 主力资金连续净流出（默认3天）
+  4. tech_signal    自选股买点技术信号（021BP 项2：复用 market_screener
+                    信号纯函数对已采集K线离线复算，零网络；阈值语义=共振
+                    星级门槛，选填）
 
-设计要点（架构师评审 review_alert_P3B_20260727.md）：
-  - scan_once() 每日日报后调用 1 次（G3）
+设计要点（架构师评审 review_alert_P3B_20260727.md + 021BP 方案）：
+  - scan_once() 每日日报后调用 1 次（G3；15:54 窗3 收盘批次，收盘后触发）
   - 双层异常隔离：外层整体 try/except，内层单只股票失败不阻塞其他
   - 幂等：alert_history 表 (rule_id, stock_id, trigger_date) 唯一约束 + INSERT OR IGNORE
   - 规则优先级：个股规则(stock_id匹配) > 全局规则(stock_id IS NULL)
   - 评级跨档必须复用 scoring_engine.normalize_rating（D4，不重新实现）
   - 连续净流出取最近 N 个"有数据"的交易日（D3，缺失跳过不中断，窗口含今天）
-  - 只读消费 ratings_history / analysis_results / raw_capital_flow，不回写引擎源表（V8）
+  - 只读消费 ratings_history / analysis_results / raw_capital_flow / raw_kline*，
+    不回写引擎源表（V8；tech_signal 同样只读K线，不产候选入库）
 """
 
 import json
@@ -41,8 +45,8 @@ RATING_ORDER = {
     '强烈建议卖出': 1,
 }
 
-# 合法规则类型白名单（API 校验用）
-VALID_RULE_TYPES = ('rating_change', 'score_below', 'capital_outflow')
+# 合法规则类型白名单（API 校验用；与 blueprints/alerts.py _VALID_ALERT_TYPES 同步）
+VALID_RULE_TYPES = ('rating_change', 'score_below', 'capital_outflow', 'tech_signal')
 
 
 # ================================================================
@@ -235,6 +239,67 @@ def check_capital_outflow(cursor, stock_id, n_days=3):
 
 
 # ================================================================
+# 规则4：自选股买点技术信号（021BP 决策闭环 项2）
+#   复用 market_screener 信号纯函数对已采集K线离线复算（零网络，R5 不涉）；
+#   只读 raw_kline/raw_kline_weekly（V8 只读消费，不产候选入库）；
+#   不涉评级映射（R7 天然规避）。
+# ================================================================
+
+
+def check_tech_signal(cursor, stock_id, min_stars=None, window=3):
+    """检查自选股最新交易日是否出现买点技术信号（离线复算，零网络）。
+
+    判定口径（"今日出现"才提醒——每日巡检幂等，不重复轰炸）：
+      - 信号：仅认触发日 == 最新已采集K线日（kline_upto）的金叉命中；
+        窗口内的历史命中不计（前一日巡检已覆盖，同日重复由 UNIQUE 约束去重）
+      - 共振：由检测窗口内全部命中推导（星级/双指标系同窗判定需要窗口上下文），
+        随当日信号一并列出
+      - min_stars（规则阈值，选填）：共振星级门槛——设 3/4/5 时，仅当出现
+        不低于该星级的共振组合才提醒；留空=任意买点信号都提醒
+
+    数据不足（<35 根日K）静默跳过，不报错不提醒。
+
+    Returns:
+        dict: {'signals': [{signal,label,trigger_date}], 'resonances': [{key,label,stars}],
+               'kline_upto', 'kline_count'}
+        None: 无信号 / 数据不足 / 未达星级门槛
+    """
+    # 延迟导入：信号库在同仓 market_screener 模块（含网络函数，避免无关导入开销）
+    from modules.market_screener import (
+        _read_watchlist_klines,
+        compute_watchlist_signal_result,
+    )
+
+    daily_rows, weekly_rows = _read_watchlist_klines(cursor, stock_id)
+    item = compute_watchlist_signal_result(daily_rows, weekly_rows, window=window)
+    kline_upto = item['kline_upto']
+    if not kline_upto:
+        return None  # 无已采集K线
+
+    hits_today = [h for h in item['matches'] if h['trigger_date'] == kline_upto]
+    resonances = item['resonances']
+    if min_stars is not None:
+        resonances = [r for r in resonances if r['stars'] >= int(min_stars)]
+
+    if not hits_today:
+        return None
+    if min_stars is not None and not resonances:
+        return None
+
+    return {
+        'signals': [
+            {'signal': h['signal'], 'label': h['label'], 'trigger_date': h['trigger_date']}
+            for h in hits_today
+        ],
+        'resonances': [
+            {'key': r['key'], 'label': r['label'], 'stars': r['stars']} for r in resonances
+        ],
+        'kline_upto': kline_upto,
+        'kline_count': item['kline_count'],
+    }
+
+
+# ================================================================
 # 消息格式化
 # ================================================================
 
@@ -263,6 +328,15 @@ def _format_message(alert_type, stock_info, detail):
             f'累计流出 {detail["total_outflow"]:.2f} 万元'
             f'（基于最近{detail["consecutive_days"]}个有数据交易日）'
         )
+    if alert_type == 'tech_signal':
+        # 021BN 教训：会被前端渲染的文案禁止裸 '<' 字符（本分支全部用文字描述）
+        labels = '、'.join(s['label'] for s in detail['signals'])
+        msg = f'{name}({symbol}) 今日出现买点信号：{labels}'
+        if detail.get('resonances'):
+            res_str = '、'.join(f"{r['label']}（{r['stars']}星）" for r in detail['resonances'])
+            msg += f'；共振组合：{res_str}'
+        msg += f'（基于截至{detail["kline_upto"]}的已采集K线离线复算）'
+        return msg
     return f'{name}({symbol}) 触发 {alert_type} 预警'
 
 
@@ -278,6 +352,11 @@ _RULE_CHECKERS = {
     ),
     'capital_outflow': lambda cur, rule, sid: check_capital_outflow(
         cur, sid, n_days=(int(rule['threshold']) if rule['threshold'] is not None else 3)
+    ),
+    # 阈值语义=共振星级门槛（选填；None=任意买点信号都提醒）
+    'tech_signal': lambda cur, rule, sid: check_tech_signal(
+        cur, sid,
+        min_stars=(int(rule['threshold']) if rule['threshold'] is not None else None),
     ),
 }
 

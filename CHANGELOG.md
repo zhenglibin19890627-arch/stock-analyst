@@ -1,5 +1,14 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-09-21] 021BP 决策闭环项1+项2：自选股每日买点信号巡检 → 智能预警
+
+让自选股每天收盘后自动跑一遍买点信号巡检，命中写预警——用户打开页面即可看到"你的自选股 X 今日出现 XX 买点信号"。全链路零网络（读库+纯函数）、零新表、零新依赖、零红线触碰。
+
+- **项1 信号离线复算**（`modules/market_screener.py`）：新增 `scan_watchlist_signals()` / `compute_watchlist_signal_result()` / `_read_watchlist_klines()`——复用既有信号纯函数（`detect_signals`/`detect_resonances`，零改动）对自选股已采集K线（`raw_kline`/`raw_kline_weekly`，`trade_date→date` 映射）离线复算。日K自读 **250 根**（与评分路径 limit=60 完全解耦；共振③60根/④50根门槛外还留足指标预热长度）；周K全量（周线共振无需补拉腾讯周K）。新增端点 `GET /api/market/scan/watchlist-signals`（`?window=3&stock_ids=`），响应带 `"scope": "watchlist_offline"` 快照参考口径标注；100 只毫秒级/只完成，对比在线拉K（腾讯 0.25s/只）是净收益。
+- **项2 买点信号预警**（`modules/alert_engine.py`）：新增规则类型 `tech_signal`（第4类）。检查器 `check_tech_signal` 判定口径："今日出现"才提醒（信号触发日==最新已采集K线日，前日巡检已覆盖的历史命中不计，天然防重复轰炸）；共振组合由窗口内全部命中推导、随当日信号一并列出（星级标注）；规则阈值语义=**共振星级门槛**（选填 3/4/5，留空=任意买点信号都提醒）。写入走既有 `INSERT OR IGNORE + UNIQUE(rule_id, stock_id, trigger_date)` 幂等路径，**调度零新增**——巡检随 `scan_once()` 既有挂载点每日 15:54 收盘批次（`daily_report._run_full_report_flow`）触发，双层异常隔离复用，021BN-c 实例唯一性守卫不受影响。全局默认规则种子（`database/_db/_schema_alerts.py`）按 WHERE NOT EXISTS 幂等模式新增 `('tech_signal', None)`——存量库下次启动自动生效，可在预警规则 UI 停用。
+- **白名单五处同步**（缺一即漏）：`alert_engine.VALID_RULE_TYPES` / `_RULE_CHECKERS` / `_format_message`（文案无裸 `'<'`，021BN 教训）+ `blueprints/alerts.py._VALID_ALERT_TYPES` + `static/js/alerts.js` 两个标签 map + `templates/index.html` 规则类型下拉 + `app.css` 徽标配色。
+- **测试**：新增 `tests/test_tech_signal_alert.py` 14 例（合成K线形态实机校准：45根深跌+横盘+缺口大阳，交叉确定落在最新一根；覆盖离线复算全链/幂等写入/新鲜度门槛/星级门槛/数据不足静默降级/suspended 不巡检/种子幂等/白名单同步）；`test_routes.py` +2 例（巡检端点冒烟 + tech_signal 规则创建/白名单外 400）。终验 fast **926 passed** + ruff 绿 + mypy 54 文件 0 错 + 红线 **28/28**。
+
 ## [2026-09-08] 021BN-c：行业资金流断连自愈——双实例僵尸根治 + 历史接口自动回补
 
 用户报"今天的行业资金流向没有获取到"。排查结论：**东财对本机 IP 动态风控**——实时 clist 接口自 09-07 16:48 起间歇拒绝（RemoteDisconnected），09-08 全天 16:10/16:27/20:45 多轮 12 连击全灭，09-08 快照缺失（09-07 的 200 条是旧口径落库的截断快照）。参数变体/换主机/直连代理实测均被拒，指数 K 线（push2his kline）同期正常，最终 push2his fflow 历史接口也在高频重试后被临时拉黑——封锁是 IP 级且动态扩大的，等待自愈是唯一正解，硬闯会延长封锁。排查中发现并根治三类系统性缺陷：

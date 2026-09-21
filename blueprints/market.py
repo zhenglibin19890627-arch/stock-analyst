@@ -179,3 +179,45 @@ def api_market_scan_status():
     return jsonify({'success': True, 'has_snapshot': True,
                     'snapshot_at': snap['snapshot_at'], 'stale': snap['stale'],
                     'universe': len(snap['rows'])})
+
+
+# ============================================================
+# 021BP 决策闭环 项1: 自选股买点信号巡检（离线复算，零网络）
+# ============================================================
+
+
+@bp.route('/api/market/scan/watchlist-signals', methods=['GET'])
+def api_market_watchlist_signals():
+    """自选股买点信号巡检：对已采集K线（raw_kline/raw_kline_weekly）离线复算。
+
+    零网络——复用 market_screener 信号纯函数读库计算，100 只毫秒级完成。
+    Query: ?window=3（触发窗口1~10）&stock_ids=1,2,3（缺省=全部 active 自选股）
+    响应 scope=watchlist_offline：结果属"快照参考"口径，截止最新已采集K线
+    （kline_upto），与第②段在线扫描（腾讯K线）存在 EMA 预热长度差异。
+    """
+    try:
+        from modules.market_screener import scan_watchlist_signals
+
+        try:
+            window = int(request.args.get('window') or 3)
+        except (TypeError, ValueError):
+            window = 3
+        window = min(max(window, 1), 10)
+
+        raw_ids = (request.args.get('stock_ids') or '').strip()
+        stock_ids = None
+        if raw_ids:
+            stock_ids = []
+            for part in raw_ids.split(','):
+                try:
+                    stock_ids.append(int(part))
+                except ValueError:
+                    continue
+            if not stock_ids:
+                stock_ids = None
+
+        result = scan_watchlist_signals(stock_ids=stock_ids, window=window)
+        return jsonify({'success': True, **result})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({'success': False, 'error': f'{e!s}',
+                        'scope': 'watchlist_offline', 'results': [], 'errors': []}), 500

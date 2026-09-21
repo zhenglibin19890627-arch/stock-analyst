@@ -304,6 +304,27 @@ def test_alerts_endpoints(client):
         _assert_ok(client.get(path))
 
 
+def test_alert_rule_create_tech_signal(client):
+    """021BP 项2：新预警类型 tech_signal 可创建（blueprint 白名单已同步）"""
+    resp = client.post('/api/alerts/rules', json={'rule_type': 'tech_signal'})
+    assert resp.status_code == 200, resp.data[:300]
+    assert resp.get_json()['success'] is True
+    # 白名单外类型仍拒绝
+    resp2 = client.post('/api/alerts/rules', json={'rule_type': 'nope'})
+    assert resp2.status_code == 400
+
+
+def test_watchlist_signals_endpoint(client):
+    """021BP 项1：自选股信号巡检端点（空库 200 + 快照参考口径标注）"""
+    resp = client.get('/api/market/scan/watchlist-signals')
+    _assert_ok(resp)
+    body = resp.get_json()
+    assert body['success'] is True
+    assert body['scope'] == 'watchlist_offline'
+    assert body['results'] == []
+    assert body['errors'] == []
+
+
 def test_export_endpoints(client_with_stock):
     """导出端点(空库下应返回 200 + 空报表,不落盘到工作区)"""
     client, stock_id = client_with_stock
