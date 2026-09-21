@@ -1254,8 +1254,9 @@
     var _dashSortState = {};    // 排序状态
 
     // OPT-8（2026-09-07）：数据源健康度卡片（红/黄/绿，近 7 天，只读）
+    // 021BN：灰灯=已停更维度（不计入告警）；成功率剔除 skipped；新增"说明"列（接口口径）
     function _srcHealthDot(level) {
-        var c = level === 'red' ? '#e74c3c' : (level === 'yellow' ? '#f39c12' : '#27ae60');
+        var c = level === 'red' ? '#e74c3c' : (level === 'yellow' ? '#f39c12' : (level === 'grey' ? '#bbb' : '#27ae60'));
         return '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + c + ';margin-right:6px;"></span>';
     }
     function loadSourceHealth() {
@@ -1267,13 +1268,24 @@
             html += '<div style="margin-bottom:6px;">整体：' + _srcHealthDot(d.overall_level) +
                     '<b>' + (d.overall_level === 'red' ? '异常' : (d.overall_level === 'yellow' ? '注意' : '正常')) + '</b>' +
                     '<span style="color:var(--text-3,#888);font-size:12px;margin-left:8px;">近 ' + d.window_days + ' 天 · ' + d.generated_at + '</span></div>';
+            html += '<div style="color:var(--text-3,#888);font-size:11.5px;margin-bottom:6px;">' +
+                    '成功率已剔除"跳过"（节流/维度不适用，如港股无快报、当日重复采集）；' +
+                    '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#bbb;margin:0 2px;"></span>灰=数据源已停更，不计入告警</div>';
             if (d.dimensions.length) {
                 html += '<table style="width:100%;border-collapse:collapse;font-size:12.5px;">';
-                html += '<tr style="color:var(--text-3,#888);text-align:left;"><th style="padding:3px 8px 3px 0;">维度</th><th>7天成功率</th><th>最后成功</th><th>连续失败</th></tr>';
+                html += '<tr style="color:var(--text-3,#888);text-align:left;"><th style="padding:3px 8px 3px 0;">维度</th>' +
+                        '<th style="text-align:left;font-weight:normal;">说明</th><th>7天成功率</th><th>跳过</th><th>最后成功</th><th>连续失败</th></tr>';
                 d.dimensions.forEach(function(x) {
-                    var rate = x.success_rate != null ? (x.success_rate * 100).toFixed(0) + '%' : '—';
-                    html += '<tr><td style="padding:2px 8px 2px 0;">' + _srcHealthDot(x.level) + x.dimension + '</td>' +
-                            '<td>' + rate + '</td><td>' + (x.last_ok || '—') + '</td><td>' +
+                    var rate = x.success_rate != null ? (x.success_rate * 100).toFixed(0) + '%' : (x.discontinued ? '停更' : '—');
+                    var nameHtml = _srcHealthDot(x.level) + (x.label || x.dimension);
+                    if (x.discontinued) {
+                        nameHtml += ' <span style="background:var(--bg-light,#eee);color:#888;padding:0 6px;border-radius:8px;font-size:11px;">已停更</span>';
+                    }
+                    html += '<tr><td style="padding:2px 8px 2px 0;white-space:nowrap;">' + nameHtml + '</td>' +
+                            '<td style="color:var(--text-3,#888);font-size:12px;">' + (x.desc || '') + '</td>' +
+                            '<td>' + rate + '</td>' +
+                            '<td style="color:var(--text-3,#888);text-align:center;">' + (x.skipped > 0 ? x.skipped : '—') + '</td>' +
+                            '<td>' + (x.last_ok || '—') + '</td><td>' +
                             (x.consecutive_failures > 0 ? '<span style="color:#e74c3c;">' + x.consecutive_failures + '</span>' : '0') + '</td></tr>';
                 });
                 html += '</table>';
