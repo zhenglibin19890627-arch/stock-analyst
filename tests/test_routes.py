@@ -325,6 +325,19 @@ def test_watchlist_signals_endpoint(client):
     assert body['errors'] == []
 
 
+def test_dashboard_action_list(client):
+    """021BP 项3：今日行动清单聚合端点（空库 200 + 结构完整）"""
+    resp = client.get('/api/dashboard/action-list')
+    _assert_ok(resp)
+    body = resp.get_json()
+    assert body['success'] is True
+    assert body['items'] == []
+    assert body['overview'] == []
+    assert body['failed_stocks'] == []
+    assert body['stats']['active_count'] == 0
+    assert body['date']
+
+
 def test_export_endpoints(client_with_stock):
     """导出端点(空库下应返回 200 + 空报表,不落盘到工作区)"""
     client, stock_id = client_with_stock

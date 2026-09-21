@@ -1,5 +1,14 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-09-21] 021BP 决策闭环项3：总览看板"今日行动清单"——四路只读聚合 + 30 秒决策入口
+
+新增 `GET /api/dashboard/action-list` 只读聚合端点 + 看板"🎯 今日行动清单"卡，聚合四路现成数据，按"今日应做"排序（**评级升降 > 买点共振≥4星 > 预警未读 > 超时缺报股**），用户打开总览看板 30 秒看完"今天该关注什么"。**R9 合规：纯只读聚合，不写 daily_reports/评分/评级/预警任何表，不动任何写入路径。**
+
+- **聚合层**（新模块 `modules/action_list.py`）：`get_action_list()` DB 四路取数 + `build_action_list()` 纯函数装配（单测友好）。路1 daily_reports 最近两期（`ROW_NUMBER() OVER (PARTITION BY stock_id)` 取 rn=1/2，评级跨档对比消费 `alert_engine.RATING_ORDER` 既有顺序表判升降方向，R7 合规不重实现）+ 操盘手摘要（key_factors.trader 预计算零重算）；路2 t2 信号复算（`scan_watchlist_signals`，只认触发日==最新采集日的"今日出现"命中，失败降级为空不阻塞清单）；路3 alert_history 当日未读。**§4.4 可见性缺口补齐**：今日 `status='failed'` 超时股在 `failed_stocks` 显式列出（此前只进 POST 响应 JSON、概览表看不到）；无今日报告计入 `missing_today` 统计。
+- **端点**（新蓝图 `blueprints/dashboard.py`，注册进 ALL_BLUEPRINTS）：只读，异常时 500 + 空 items 不阻塞前端其余卡片。
+- **前端**（`portfolio.js` 总览看板）：loadDashboard 并行第三请求（失败静默降级）；新"🎯 今日行动清单"卡置于概览卡片之后、操作建议卡之前——统计行（自选/已报/失败/缺报/评级变动/买点信号/未读预警）+ 行动项列表（徽标红升绿降，遵循看板红涨绿跌惯例；点击行 `viewReport` 直达个股报告）+ 缺报提示引导"生成今日报告"。
+- **测试**：新增 `tests/test_action_list.py` 11 例（纯函数排序契约/今日门槛/失败股显式列出/trader 摘要透出/无裸 `'<'` 断言/临时库全链：升级+信号+未读预警三类齐出）；`test_routes.py` +1（行动清单端点冒烟）。终验 fast **938 passed** + ruff 绿 + mypy 55 文件 0 错 + 红线 **28/28**。
+
 ## [2026-09-21] 021BP 决策闭环项1+项2：自选股每日买点信号巡检 → 智能预警
 
 让自选股每天收盘后自动跑一遍买点信号巡检，命中写预警——用户打开页面即可看到"你的自选股 X 今日出现 XX 买点信号"。全链路零网络（读库+纯函数）、零新表、零新依赖、零红线触碰。

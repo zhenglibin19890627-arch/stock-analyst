@@ -1310,21 +1310,24 @@
         var container = document.getElementById('dashboardContent');
         container.innerHTML = '<div class="report-loading">正在加载总览看板...</div>';
 
-        // 并行请求 summary + watchlist-scores
+        // 并行请求 summary + watchlist-scores + action-list
         // 021E：no-store 规避服务端 ETag 304 空响应导致的静默失败（同 refreshDashboardData）
         // 021O：移除 index-ratings 请求——大盘指数移至市场行情页查看，看板聚焦持仓/自选
         var summaryPromise = fetch('/api/portfolio/summary', {cache: 'no-store'}).then(function(r) { return safeJson(r); });
         var scoresPromise  = fetch('/api/portfolio/watchlist-scores', {cache: 'no-store'}).then(function(r) { return safeJson(r); });
+        // 021BP 项3：今日行动清单（四路只读聚合；失败静默降级不阻塞看板）
+        var actionPromise  = fetch('/api/dashboard/action-list', {cache: 'no-store'}).then(function(r) { return safeJson(r); });
 
-        Promise.all([summaryPromise, scoresPromise])
+        Promise.all([summaryPromise, scoresPromise, actionPromise])
             .then(function(results) {
                 var summary = results[0];
                 var scores = results[1];
+                var actionList = results[2];
                 if (!scores.success) {
                     container.innerHTML = '<div class="report-empty"><p style="color:#e74c3c;">加载失败</p></div>';
                     return;
                 }
-                _dashData = { summary: summary, stocks: scores.stocks || [], reportDate: scores.report_date, reportDateMin: scores.report_date_min, generatedAt: scores.generated_at };
+                _dashData = { summary: summary, stocks: scores.stocks || [], reportDate: scores.report_date, reportDateMin: scores.report_date_min, generatedAt: scores.generated_at, actionList: (actionList && actionList.success) ? actionList : null };
                 renderDashboard(_dashData);
             })
             .catch(function(e) {
@@ -1380,6 +1383,9 @@
         var engStats = s.engine_stats || {};
         html += '<div class="dash-sub"><span style="color:#1a73e8;">v5:' + (engStats.v5 || 0) + '</span> <span style="color:var(--text-3,#888);margin-left:8px;">历史:' + (engStats.history || 0) + '</span></div></div>';
         html += '</div>'; // /dash-grid
+
+        // ---- 1.2 今日行动清单（021BP 项3：四路只读聚合，30 秒看完今天该关注什么） ----
+        html += renderActionListCard(data.actionList);
 
         // ---- 1.5 操作建议卡片（评级×持仓盈亏 自动生成） ----
         html += '<div class="card" style="margin-bottom:20px;">';
@@ -1505,6 +1511,55 @@
         });
         tbody.innerHTML = html;
         dashUpdateFilterCount(stocks.length, _dashData ? _dashData.stocks.length : stocks.length);
+    }
+
+    /**
+     * 🎯 今日行动清单卡（021BP 决策闭环 项3）：消费 GET /api/dashboard/action-list。
+     * 后端已按"今日应做"排序：评级升降 > 买点共振≥4星 > 预警未读 > 超时缺报股；
+     * 本函数只做渲染：徽标配色（红升绿降，与看板红涨绿跌惯例一致）+ 统计行 + 点击行看报告。
+     * 聚合接口失败时返回空串静默跳过，不阻塞看板其余卡片。
+     */
+    function renderActionListCard(al) {
+        if (!al || !al.items) return '';
+        var html = '<div class="card" style="margin-bottom:20px;">';
+        html += '<div class="card-title">🎯 今日行动清单 <span style="font-size:13px;color:var(--text-3,#888);font-weight:normal;">（' + escapeHtml(al.date || '') + ' · 按今日应做排序，点击行查看个股报告）</span></div>';
+        var st = al.stats || {};
+        html += '<div style="display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px;color:var(--text-3,#888);margin-bottom:8px;">';
+        html += '<span>自选 <b>' + (st.active_count || 0) + '</b> 只</span>';
+        html += '<span>今日已报 <b>' + (st.reported_ok_today || 0) + '</b></span>';
+        if (st.failed_today > 0) html += '<span style="color:#e74c3c;">生成失败 <b>' + st.failed_today + '</b></span>';
+        if (st.missing_today > 0) html += '<span>今日缺报 <b>' + st.missing_today + '</b></span>';
+        if (st.rating_moves > 0) html += '<span style="color:#e65100;">评级变动 <b>' + st.rating_moves + '</b></span>';
+        if (st.signal_hits > 0) html += '<span style="color:#1565c0;">买点信号 <b>' + st.signal_hits + '</b>（共振4星以上 ' + (st.resonance_hits || 0) + '）</span>';
+        if (st.unread_alerts_today > 0) html += '<span style="color:#2e7d32;">未读预警 <b>' + st.unread_alerts_today + '</b></span>';
+        html += '</div>';
+        if (!al.items.length) {
+            html += '<div style="padding:14px 0;font-size:13px;color:var(--text-3,#999);">今日暂无待办行动项——评级平稳、无新买点信号、预警全部已读</div>';
+        } else {
+            html += '<div style="max-height:340px;overflow-y:auto;">';
+            al.items.forEach(function(it) {
+                var bg, fg, label;
+                if (it.kind === 'rating_upgrade') { bg = '#fdecea'; fg = '#c62828'; label = '评级升级'; }
+                else if (it.kind === 'rating_downgrade') { bg = '#e8f5e9'; fg = '#2e7d32'; label = '评级降级'; }
+                else if (it.kind === 'rating_change') { bg = '#fff3e0'; fg = '#e65100'; label = '评级变动'; }
+                else if (it.kind === 'tech_signal') { bg = '#e3f2fd'; fg = '#1565c0'; label = '买点信号'; }
+                else if (it.kind === 'alert_unread') { bg = '#fff8e1'; fg = '#b26a00'; label = '预警未读'; }
+                else { bg = 'var(--bg-light,#f0f0f0)'; fg = '#888'; label = '缺报补数'; }
+                html += '<div onclick="viewReport(' + it.stock_id + ')" style="display:flex;align-items:flex-start;gap:8px;padding:8px 4px;border-bottom:1px solid var(--border-light,#f0f0f0);cursor:pointer;">';
+                html += '<span style="background:' + bg + ';color:' + fg + ';font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;white-space:nowrap;margin-top:1px;">' + label + '</span>';
+                html += '<div style="flex:1;font-size:13px;line-height:1.5;">';
+                html += '<b>' + escapeHtml(it.name || '') + '</b> <span style="color:var(--text-3,#888);">' + escapeHtml(it.symbol || '') + '</span>';
+                html += '<div style="color:var(--text-2,#555);">' + escapeHtml(it.reason || '') + '</div>';
+                html += '</div></div>';
+            });
+            html += '</div>';
+        }
+        if ((st.missing_today || 0) > 0) {
+            html += '<div style="margin-top:10px;font-size:12px;color:var(--text-3,#aaa);">另有 ' + st.missing_today + ' 只今日尚无有效报告（生成失败的已在上方列出）——可点下方「🚀 生成今日报告」补齐。</div>';
+        }
+        html += '<div style="margin-top:8px;font-size:12px;color:var(--text-3,#aaa);">买点信号为离线快照参考口径（基于已采集K线复算，截止最新采集日），不构成投资建议。</div>';
+        html += '</div>';
+        return html;
     }
 
     /**
