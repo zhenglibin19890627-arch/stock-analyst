@@ -296,10 +296,12 @@
         btns.forEach(function(b) { b.disabled = true; });
         var okCount = 0;
         var failCount = 0;
+        var failReasons = [];  // 021BO：失败原因去重收集——"失败N只"不说原因，用户无从处置（实测：上限50只拦截只报失败）
         var seq = function(idx) {
             if (idx >= checked.length) {
                 btns.forEach(function(b) { b.disabled = false; });
                 alert('加入完成：成功 ' + okCount + ' 只' + (failCount ? '，失败 ' + failCount + ' 只' : '') +
+                    (failReasons.length ? '\n失败原因：' + failReasons.join('；') : '') +
                     '。请到「自选股」页执行「批量分析+评级」获取真评级。');
                 return;
             }
@@ -309,7 +311,12 @@
                 body: JSON.stringify({ symbol: el.getAttribute('data-code'), market: 'a_stock',
                                        name: el.getAttribute('data-name') })
             }).then(function(r) { return r.json(); }).then(function(d) {
-                if (d.success) { okCount++; el.checked = false; } else { failCount++; }
+                if (d.success) { okCount++; el.checked = false; }
+                else {
+                    failCount++;
+                    var msg = d.message || '未知原因';
+                    if (failReasons.indexOf(msg) < 0) failReasons.push(msg);
+                }
                 seq(idx + 1);
             }).catch(function() { failCount++; seq(idx + 1); });
         };
