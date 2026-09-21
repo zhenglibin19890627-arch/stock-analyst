@@ -338,6 +338,13 @@ def test_dashboard_action_list(client):
     assert body['date']
 
 
+def test_batch_analyze_over_limit_rejected(client):
+    """021BP 项4：>20 只直接 400（R16 契约边界——前端拆批依赖单次 ≤20，不放宽）"""
+    resp = client.post('/api/batch-analyze', json={'stock_ids': list(range(1, 22))})
+    assert resp.status_code == 400
+    assert '20' in resp.get_json()['message']
+
+
 def test_export_endpoints(client_with_stock):
     """导出端点(空库下应返回 200 + 空报表,不落盘到工作区)"""
     client, stock_id = client_with_stock

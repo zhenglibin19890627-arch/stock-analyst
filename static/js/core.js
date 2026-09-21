@@ -13,6 +13,47 @@
         return resp.json();
     }
 
+    /**
+     * 021BP 项4：通用分批顺序驱动器（自 market.js msStartSignals 的 chunk 模式泛化，
+     * 公共逻辑收口本文件——批量分析 watchlist.batchAnalyze（≤100 只自动拆 5×20）
+     * 与后续同型需求（t5）复用，不复制两份）。
+     *
+     * 顺序执行（无并发）：单批完成才发下一批，与后端"单写者/采集限频"约束匹配。
+     *
+     * @param {Array} items 全量条目
+     * @param {number} chunkSize 单批大小（= 后端单次上限，如 20=BATCH_OPERATION_LIMIT，
+     *        R16 风控阈值——拆批只发生在前端多次调用，单次仍 ≤20，合规）
+     * @param {function(Array, number, number): Promise} runChunk 单批执行器
+     *        (chunkItems, chunkIndex, chunkCount) → Promise；批内失败请自行降级为
+     *        失败记录返回，不要让 Promise 进入 rejected（驱动器会吞掉并继续下一批）
+     * @param {function(number, number): void} [onProgress] (doneChunks, chunkCount)
+     *        每批开始前回调（doneChunks=已完成批数；最后一轮 doneChunks=chunkCount，
+     *        可用于把进度刷到 100%）
+     * @returns {Promise<number>} 完成的批数（恒等于 ceil(items.length / chunkSize)）
+     */
+    function runChunked(items, chunkSize, runChunk, onProgress) {
+        var chunks = [];
+        for (var i = 0; i < items.length; i += chunkSize) {
+            chunks.push(items.slice(i, i + chunkSize));
+        }
+        var done = 0;
+        return new Promise(function(resolve) {
+            var runNext = function() {
+                if (typeof onProgress === 'function') onProgress(done, chunks.length);
+                if (done >= chunks.length) { resolve(done); return; }
+                var idx = done;
+                Promise.resolve()
+                    .then(function() { return runChunk(chunks[idx], idx, chunks.length); })
+                    .catch(function() {})   // 单批异常不阻塞后续批次（与 msStartSignals 同语义）
+                    .then(function() {
+                        done++;
+                        runNext();
+                    });
+            };
+            runNext();
+        });
+    }
+
     // ========== 021BD：多主题皮肤 ==========
     var _THEMES = ['light', 'dark', 'green', 'warm'];
 

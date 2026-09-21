@@ -1612,7 +1612,16 @@ def _build_markdown_summary(report_date, results):
     md += '\n'
 
     if failed_results:
-        md += f'\n> ⚠️ {len(failed_results)} 只股票生成失败\n'
+        # 021BP 项4（§4.4 可见性缺口）：超时/失败股此前只报数量，名字与原因埋在
+        # POST 响应 JSON 里——概览表现在显式列出"哪些股被跳过及原因"。
+        # 仅追加 markdown 内容，不动任何写库路径（R9 合规）；看板侧由行动清单
+        # 卡消费 daily_reports status='failed' 行（t3 action-list）。
+        md += f'\n> ⚠️ {len(failed_results)} 只股票生成失败（采集超时或数据异常被跳过，明细如下）\n\n'
+        md += '| 股票 | 代码 | 失败原因 |\n'
+        md += '|:---|:---|:---|\n'
+        for r in failed_results:
+            error_text = str(r.get('error') or '未知原因').replace('<', '&lt;')
+            md += f'| {r["name"]} | {r["symbol"]} | {error_text} |\n'
 
     # 重点关注
     md += '\n## 二、重点关注\n\n'

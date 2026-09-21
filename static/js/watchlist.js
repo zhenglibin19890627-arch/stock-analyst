@@ -321,48 +321,78 @@
             alert('请先勾选要分析的股票');
             return;
         }
-        if (ids.length > 20) {
-            alert('单次最多批量处理20只股票（后端限制），请分批勾选');
-            return;
-        }
 
         var area = document.getElementById('collectArea');
         var total = ids.length;
         var startTime = Date.now();
 
-        // 020R-61：改走后端 /api/batch-analyze（采集+分析+评级+资金面批量预取+行业补取），
-        // 删除原前端手写"仅分析"串行循环；逐只执行中无实时进度，用静态进度 UI 说明
+        // 021BP 项4（自选股 100 只新规模适配）：前端自动拆批顺序执行——
+        // 单次 POST 仍 ≤20（R16 BATCH_OPERATION_LIMIT 合规，不放宽），拆批只发生在
+        // 前端多次调用；真实进度 = 已完成批数×批大小/总数（替代原假进度动画）；
+        // 后端零改动、无并发化（SQLite 单写者 + 采集限频约束不变）。
+        var BATCH_CHUNK = 20;
+        var chunkCount = Math.ceil(total / BATCH_CHUNK);
+        // 跨批合并结果（renderBatchResults 消费的成功/失败/总数三件套）
+        var merged = { success: true, total: total, success_count: 0, fail_count: 0, results: [] };
+
+        function renderProgress(doneChunks, totalChunks) {
+            var doneItems = Math.min(doneChunks * BATCH_CHUNK, total);
+            var pct = total > 0 ? Math.round(doneItems / total * 100) : 0;
+            var bar = document.getElementById('batchProgressBar');
+            var pctEl = document.getElementById('batchProgressPct');
+            if (bar) bar.style.width = pct + '%';
+            if (pctEl) {
+                pctEl.textContent = doneChunks >= totalChunks
+                    ? '✅ 全部批次执行完成，正在汇总结果…'
+                    : '⏳ 已完成 ' + doneItems + '/' + total + ' 只（第 ' + (doneChunks + 1) + '/' + totalChunks + ' 批执行中，含数据采集，可能需要数分钟）…';
+            }
+        }
+
         area.innerHTML = '<div class="card"><div class="card-title">⚡ 批量分析与评级</div>' +
-            '<div style="margin:16px 0 8px;font-size:14px;color:var(--text,#333);">正在处理 ' + total + ' 只股票（含数据采集，逐只执行，可能需要数分钟）...</div>' +
+            '<div style="margin:16px 0 8px;font-size:14px;color:var(--text,#333);">正在处理 ' + total + ' 只股票' +
+            (chunkCount > 1 ? '（自动拆 ' + chunkCount + ' 批 × ≤' + BATCH_CHUNK + ' 只顺序执行）' : '（含数据采集，逐只执行，可能需要数分钟）') +
+            '...</div>' +
             '<div style="width:100%;height:22px;background:#e0e0e0;border-radius:11px;overflow:hidden;position:relative;">' +
-            '<div id="batchProgressBar" style="width:30%;height:100%;background:repeating-linear-gradient(90deg,#43a047,#66bb6a 20px,#43a047 40px);border-radius:11px;"></div>' +
+            '<div id="batchProgressBar" style="width:0%;height:100%;background:repeating-linear-gradient(90deg,#43a047,#66bb6a 20px,#43a047 40px);border-radius:11px;transition:width .3s;"></div>' +
             '</div>' +
-            '<div style="margin-top:6px;font-size:12px;color:var(--text-3,#888);" id="batchProgressPct">⏳ 逐只执行中，完成后自动显示结果</div>' +
+            '<div style="margin-top:6px;font-size:12px;color:var(--text-3,#888);" id="batchProgressPct">⏳ 准备开始…</div>' +
             '</div>';
         area.scrollIntoView({ behavior: 'smooth' });
 
-        fetch('/api/batch-analyze', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ stock_ids: ids })
-        })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                var elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-                if (data.success) {
-                    renderBatchResults(data, elapsed);
-                } else {
-                    area.innerHTML = '<div class="card"><div class="alert alert-error">批量分析失败：' +
-                        (data.message || '未知错误') + '</div></div>';
-                }
+        runChunked(ids, BATCH_CHUNK, function(chunkIds) {
+            return fetch('/api/batch-analyze', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ stock_ids: chunkIds })
             })
-            .catch(function(err) {
-                area.innerHTML = '<div class="card"><div class="alert alert-error">请求失败：' + err + '</div></div>';
-            })
-            .finally(function() {
-                loadStocks();  // 完成后同步列表评分/价格
-                refreshDashboardIfLoaded();  // 同步看板批量评分表
-            });
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data && data.success && data.results) {
+                        merged.success_count += data.success_count || 0;
+                        merged.fail_count += data.fail_count || 0;
+                        data.results.forEach(function(x) { merged.results.push(x); });
+                    } else {
+                        // 整批被拒（如后端校验失败）：批内股票全部记为失败，保留"哪些股没跑成"的可见性
+                        var msg = (data && data.message) || '批次请求失败';
+                        merged.fail_count += chunkIds.length;
+                        chunkIds.forEach(function(sid) {
+                            merged.results.push({ stock_id: sid, status: 'failed', error: msg });
+                        });
+                    }
+                })
+                .catch(function(err) {
+                    merged.fail_count += chunkIds.length;
+                    chunkIds.forEach(function(sid) {
+                        merged.results.push({ stock_id: sid, status: 'failed', error: '请求失败：' + err });
+                    });
+                });
+        }, renderProgress).then(function() {
+            var elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+            renderBatchResults(merged, elapsed);
+        }).finally(function() {
+            loadStocks();  // 完成后同步列表评分/价格
+            refreshDashboardIfLoaded();  // 同步看板批量评分表与行动清单
+        });
     }
 
     function renderBatchResults(data, elapsed) {

@@ -1,5 +1,14 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-09-21] 021BP 决策闭环项4：自选股 100 只规模适配——批量分析前端自动拆批 + 超时股可见性补齐
+
+**后端采集/分析链路零改动**（不做并发化、不做后端超时增强——SQLite 单写者 + 采集限频约束不变；R19 两个超时锚定值 90/1800 数值未动；R16 `BATCH_OPERATION_LIMIT=20` 未放宽——拆批只发生在前端多次调用，单次 POST 仍 ≤20）。
+
+- **通用分批驱动器**（`static/js/core.js` 新增 `runChunked(items, chunkSize, runChunk, onProgress)`）：自 market.js `msStartSignals` 的 chunk 顺序驱动模式泛化收口到 core.js，批量分析与后续同型需求（t5）复用，不复制两份；顺序执行（单批完成才发下一批），单批异常吞掉继续（与 msStartSignals 同语义）。
+- **批量分析改造**（`static/js/watchlist.js batchAnalyze()`）：删除"≤20 弹窗请分批勾选"限制——全选 ≤100 只自动拆 5×20 顺序 POST `/api/batch-analyze`；假进度动画（固定 30% 条 + "逐只执行中"）改为**真实进度**（已完成批数×批大小/总数，进度条 + "已完成 N/总数 只（第 x/y 批执行中）"）；跨批合并 success_count/fail_count/results 后一次性 `renderBatchResults`；整批被拒/网络失败时批内股票显式记为 failed 行（保留"哪些股没跑成"可见性）。
+- **§4.4 超时股可见性补齐**（`daily_report._build_markdown_summary`，仅 markdown 内容、零写库路径改动）：失败/超时股此前只有一行计数（名字埋在 POST 响应 JSON），概览区现显式列出失败明细表（股票/代码/失败原因，`<` 转义 `&lt;` 防 marked 吞字）；看板侧展示由 t3 行动清单卡消费 `daily_reports status='failed'` 行，不重复造轮子。
+- **测试**：新增 `tests/test_daily_report_summary.py` 3 例（失败股显式列出/`<` 转义/全成功无失败小节）+ `test_routes.py` +1（batch-analyze >20 → 400 的 R16 契约边界锁定——前端拆批依赖该边界）；前端无 JS 测试设施，`node --check core.js/watchlist.js` 语法验证兜底。终验 fast **942 passed** + ruff 绿 + mypy 55 文件 0 错 + 红线 **28/28**。
+
 ## [2026-09-21] 021BP 决策闭环项3：总览看板"今日行动清单"——四路只读聚合 + 30 秒决策入口
 
 新增 `GET /api/dashboard/action-list` 只读聚合端点 + 看板"🎯 今日行动清单"卡，聚合四路现成数据，按"今日应做"排序（**评级升降 > 买点共振≥4星 > 预警未读 > 超时缺报股**），用户打开总览看板 30 秒看完"今天该关注什么"。**R9 合规：纯只读聚合，不写 daily_reports/评分/评级/预警任何表，不动任何写入路径。**
