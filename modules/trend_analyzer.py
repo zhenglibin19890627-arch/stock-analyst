@@ -14,8 +14,15 @@
     score >= +2.5 → up（上涨）；score <= -2.5 → down（下跌）；其间 → sideways（震荡）
     置信度：|score| >= 4 强；>= 3 中；>= 2.5 弱。
 
-综合（overall）：按 月2 : 周1.5 : 日1 加权汇总可用周期的分数，同一阈值三分类；
+综合（overall，021BN 重设计：月线定方向，分歧做注记）：
+    月线方向明确（up/down）时，综合方向整体采纳月线判定（trend/score/strength，
+    强度已含 MACD 零轴诚实化封顶），分歧周期给白话注记；
+    月线震荡或数据不足时，退回 月2:周1.5:日1 加权平均，同一阈值三分类。
     三个周期同为 up/down 时给 resonance（多周期共振）提示。
+
+    旧版为纯加权平均，存在结构性矛盾：月线满分贡献 2×5/4.5=2.22 < 阈值2.5，
+    数学上月线独自再空也判不出"下跌"，与文案"以月线方向为主参考"互相矛盾
+    （实测中国中免：月线下跌·强、日线上涨 → 综合"震荡"，用户无所适从）。
 
 颜色惯例（A股习惯，前端映射）：上涨=红、下跌=绿、震荡=黄、数据不足=灰。
 纯函数、只读：不写库、不发网络请求；字段缺失的周期返回 na（数据不足），不影响其他周期。
@@ -37,7 +44,8 @@ TIMEFRAME_LABELS = {
     'monthly': '长期（月线）',
 }
 
-# 综合判断的周期权重（长期权重最高：月线定方向，周线定波段，日线找买卖点）
+# 综合判定的周期权重：仅在月线方向不明（震荡/数据不足）时用于加权回退；
+# 月线方向明确时综合直接采纳月线判定（021BN：月线定方向，见 analyze_trends 注释）
 _OVERALL_WEIGHTS = {'daily': 1.0, 'weekly': 1.5, 'monthly': 2.0}
 
 
@@ -144,7 +152,7 @@ def analyze_trends(data: StockData) -> dict:
         ),
     }
 
-    # 综合：可用周期按权重加权（na 不参与），同一阈值三分类
+    # 综合（021BN：月线定方向，分歧做注记；规则见文件头 docstring）
     weighted_sum = 0.0
     weight_total = 0.0
     for key, r in timeframes.items():
@@ -162,26 +170,53 @@ def analyze_trends(data: StockData) -> dict:
             'resonance': '',
         }
     else:
-        oscore = round(weighted_sum / weight_total, 2)
-        otrend = UP if oscore >= 2.5 else (DOWN if oscore <= -2.5 else SIDEWAYS)
+        monthly = timeframes['monthly']
         trender = {UP: '上涨', DOWN: '下跌', SIDEWAYS: '震荡'}
-        known = [t for t in timeframes.values() if t['trend'] != NA]
-        all_same = all(r['trend'] == otrend for r in known) and len(known) >= 2
-        reasons = []
-        if all_same and len(known) == 3:
-            reasons.append(f'短/中/长三个周期共振{trender[otrend]}，{trender[otrend]}方向较为扎实')
+        parts_str = '、'.join(
+            f"{TIMEFRAME_LABELS[k].split('（')[0]}{trender[r['trend']]}"
+            for k, r in timeframes.items()
+            if r['trend'] != NA
+        )
+
+        if monthly['trend'] in (UP, DOWN):
+            # 规则1：月线定方向——综合直接采纳月线判定，分歧周期白话注记
+            otrend = monthly['trend']
+            oscore = monthly['score']
+            strength = monthly['strength']
+            known = [t for t in timeframes.values() if t['trend'] != NA]
+            all_same = all(r['trend'] == otrend for r in known) and len(known) >= 2
+            if all_same and len(known) == 3:
+                reasons = [f'短/中/长三个周期共振{trender[otrend]}，{trender[otrend]}方向较为扎实']
+                resonance = f'三周期共振{trender[otrend]}'
+            else:
+                reasons = [parts_str + f'，综合方向随月线（{trender[otrend]}，长期权重最高）']
+                if timeframes['daily']['trend'] not in (NA, otrend):
+                    reasons.append(
+                        '日线反弹属修复，未获月线确认' if otrend == DOWN else '日线走弱未改月线上行'
+                    )
+                if timeframes['weekly']['trend'] == SIDEWAYS:
+                    reasons.append('周线方向待选择')
+                elif timeframes['weekly']['trend'] not in (NA, otrend):
+                    reasons.append('周线走强与月线相悖' if otrend == DOWN else '周线走弱与月线相悖')
+                resonance = ''
         else:
-            parts = [
-                f"{TIMEFRAME_LABELS[k].split('（')[0]}{trender[r['trend']]}"
-                for k, r in timeframes.items()
-                if r['trend'] != NA
-            ]
-            reasons.append('、'.join(parts) + '，各周期方向不完全一致，以月线方向为主参考')
-        resonance = f'三周期共振{trender[otrend]}' if all_same else ''
+            # 规则2：月线方向不明（震荡/缺数据）→ 加权平均三分类，文案如实描述口径
+            oscore = round(weighted_sum / weight_total, 2)
+            otrend = UP if oscore >= 2.5 else (DOWN if oscore <= -2.5 else SIDEWAYS)
+            strength = '强' if abs(oscore) >= 4 else ('中' if abs(oscore) >= 3 else '弱')
+            known = [t for t in timeframes.values() if t['trend'] != NA]
+            all_same = all(r['trend'] == otrend for r in known) and len(known) >= 2
+            if all_same and len(known) == 3:
+                reasons = [f'短/中/长三个周期共振{trender[otrend]}，{trender[otrend]}方向较为扎实']
+                resonance = f'三周期共振{trender[otrend]}'
+            else:
+                reasons = [parts_str + '，各周期方向不一致，按月2:周1.5:日1加权取综合']
+                resonance = ''
+
         overall = {
             'trend': otrend,
             'score': oscore,
-            'strength': '强' if abs(oscore) >= 4 else ('中' if abs(oscore) >= 3 else '弱'),
+            'strength': strength,
             'reasons': reasons,
             'resonance': resonance,
         }

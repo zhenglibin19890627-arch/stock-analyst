@@ -16,9 +16,12 @@ advisor.py 聚焦单元测试
 
 import pytest
 
+from database import db_manager
 from modules.advisor import (
     DIM_NAMES,
     _build_detail_text,
+    _build_fund_trend,
+    _build_markdown_single,
     _build_position_advice,
     _describe_dimension,
     _detect_risks,
@@ -526,3 +529,178 @@ class TestDimNames:
             action = _determine_action(rating, False, False)
             assert isinstance(action, str)
             assert len(action) > 0
+
+
+# ============================================================
+# 七、单股 Markdown 构建 _build_markdown_single（021BN）
+# ============================================================
+
+
+class TestBuildMarkdownSingle:
+    """降级提示列明细 + 分数变动标签诚实化"""
+
+    @staticmethod
+    def _advice():
+        return {
+            'stock_code': '601888',
+            'stock_name': '中国中免',
+            'engine_version': 'v5',
+            'total_score': 47.5,
+            'rating': '建议减仓',
+            'rating_label': '建议减仓',
+            'action_advice': '考虑减仓',
+            'data_warnings': ['基本面: 股东人数缺失', '消息面: 新闻情绪缺失'],
+        }
+
+    def test_degradation_lines_listed_not_counted(self):
+        """021BN：降级提示必须列出每条规则内容，而非只给计数"""
+
+        md = _build_markdown_single(self._advice(), prev_score=None)
+        assert '2条降级规则触发' in md
+        assert '- 基本面: 股东人数缺失' in md
+        assert '- 消息面: 新闻情绪缺失' in md
+
+    def test_degradation_truncation_note(self):
+        """021BN：超过6条时展示前6条并注明剩余条数"""
+
+        advice = self._advice()
+        advice['data_warnings'] = [f'降级规则{i}' for i in range(8)]
+        md = _build_markdown_single(advice, prev_score=None)
+        assert '- 降级规则5' in md
+        assert '- 降级规则6' not in md
+        assert '…其余2条略' in md
+
+    def test_no_warnings_no_section(self):
+        """无降级时不输出降级提示段"""
+
+        advice = self._advice()
+        advice['data_warnings'] = []
+        md = _build_markdown_single(advice, prev_score=None)
+        assert '降级提示' not in md
+
+    def test_score_change_label_is_previous_report(self):
+        """021BN：对比基准是上一份有效报告（可能是上周五），标签不再写「较昨日」"""
+
+        md = _build_markdown_single(self._advice(), prev_score=52.5)
+        assert '较前次报告 ↓ 5.0' in md
+        assert '较昨日' not in md
+
+
+# ============================================================
+# 八、基本面趋势判定 _build_fund_trend（021BN 诚实化）
+# ============================================================
+
+
+def _insert_fund_rows(conn, rows):
+    """rows: (report_date, gross_margin, net_margin, debt_ratio, current_ratio, quick_ratio)"""
+    for rd, gm, nm, dr, cr, qr in rows:
+        conn.execute(
+            'INSERT INTO raw_fundamental '
+            '(stock_id, report_date, gross_margin, net_margin, debt_ratio, current_ratio, quick_ratio) '
+            'VALUES (1, ?, ?, ?, ?, ?, ?)',
+            (rd, gm, nm, dr, cr, qr),
+        )
+    conn.commit()
+
+
+class TestBuildFundTrend:
+    """计数化汇总 + 按|Δ|降序证据 + 方向标记"""
+
+    @pytest.fixture
+    def fund_db(self, tmp_path, monkeypatch):
+        db_file = tmp_path / 'fundtrend.db'
+        monkeypatch.setattr(db_manager, 'DB_PATH', str(db_file))
+        monkeypatch.setattr(db_manager, 'BACKUP_DIR', str(tmp_path / 'backups'))
+        db_manager.init_database()
+        conn = db_manager.get_connection()
+        yield conn
+        conn.close()
+
+    def test_worsen_summary_counts_flat_items(self, fund_db):
+        """中国中免实测口径：1项恶化 + 4项平稳 → 摘要必须如实计数，而非笼统"恶化\""""
+        _insert_fund_rows(
+            fund_db,
+            [
+                ('2026-03-31', 33.63, 14.02, 25.54, 2.0, 1.5),
+                ('2026-06-30', 33.90, 11.01, 25.66, 2.1, 1.6),
+            ],
+        )
+        summary, details, direction = _build_fund_trend(1)
+        assert direction == 'worsen'
+        assert summary.startswith('基本面较上期偏弱：1项恶化、0项改善、4项平稳')
+        assert '毛利率较上期平稳(33.63%→33.90%)' in summary
+        assert details[0].startswith('净利率较上期恶化')
+
+    def test_evidence_sorted_by_magnitude(self, fund_db):
+        """|Δ| 最大的指标排证据首位，而非按指标固定顺序"""
+        _insert_fund_rows(
+            fund_db,
+            [
+                ('2026-03-31', 33.63, 14.02, 25.54, 2.0, 1.5),
+                ('2026-06-30', 33.90, 11.01, 25.66, 6.0, 1.5),
+            ],
+        )
+        summary, details, direction = _build_fund_trend(1)
+        assert direction == 'flat'  # 1改善(流动比率+4.0) vs 1恶化(净利率-3.01)
+        assert summary.startswith('基本面较上期涨跌互现：1项改善、1项恶化、3项平稳')
+        assert details[0].startswith('流动比率较上期改善')
+        assert details[1].startswith('净利率较上期恶化')
+
+    def test_all_flat_no_counts_change(self, fund_db):
+        _insert_fund_rows(
+            fund_db,
+            [
+                ('2026-03-31', 33.63, 14.02, 25.54, 2.0, 1.5),
+                ('2026-06-30', 33.90, 14.10, 25.60, 2.05, 1.55),
+            ],
+        )
+        summary, details, direction = _build_fund_trend(1)
+        assert direction == 'flat'
+        assert summary == '基本面较上期平稳（5项指标均无实质变化）'
+
+    def test_insufficient_history(self, fund_db):
+        summary, details, direction = _build_fund_trend(1)
+        assert direction == 'insufficient'
+        assert '历史数据不足' in summary
+        assert details == []
+
+
+class TestFundTrendRiskGate:
+    """_detect_risks 的基本面趋势触发：结构化方向标记优先，旧摘要前缀兼容"""
+
+    def test_worsen_flag_triggers(self):
+        dims = {
+            'fundamental': {
+                'factors': {
+                    'fund_trend': '基本面较上期偏弱：1项恶化、0项改善、4项平稳（…）',
+                    '_fund_trend_dir': 'worsen',
+                }
+            }
+        }
+        risks = _detect_risks(dims)
+        assert any('基本面趋势转弱' in r for r in risks)
+
+    def test_flat_mixed_flag_no_risk(self):
+        """涨跌互现（1改善 vs 1恶化）不得触发趋势风险——旧关键词匹配会误报"""
+        dims = {
+            'fundamental': {
+                'factors': {
+                    'fund_trend': '基本面较上期涨跌互现：1项改善、1项恶化、3项平稳（…）',
+                    '_fund_trend_dir': 'flat',
+                }
+            }
+        }
+        risks = _detect_risks(dims)
+        assert not any('趋势' in r for r in risks)
+
+    def test_legacy_summary_prefix_still_triggers(self):
+        """旧快照/手工入参无方向标记时，按旧摘要前缀「基本面较上期恶化」兼容触发"""
+        dims = {
+            'fundamental': {
+                'factors': {
+                    'fund_trend': '基本面较上期恶化（净利率较上期恶化(14.02%→11.01%)）'
+                }
+            }
+        }
+        risks = _detect_risks(dims)
+        assert any('基本面趋势转弱' in r for r in risks)

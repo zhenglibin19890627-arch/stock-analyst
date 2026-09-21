@@ -975,14 +975,26 @@ def _build_data_freshness(stock_id):
             if bg and bg.get('main_net') is not None:
                 yi = abs(bg['main_net']) / 1e8
                 direction = '流入' if bg['main_net'] > 0 else '流出'
+                # 021BN：streak=±1 时"连续"语义不成立，改为"今日转入"
                 streak_txt = ''
-                if bg.get('streak_days', 0) > 0:
-                    streak_txt = f"，连续流入{bg['streak_days']}日"
-                elif bg.get('streak_days', 0) < 0:
-                    streak_txt = f"，连续流出{abs(bg['streak_days'])}日"
+                sd = bg.get('streak_days', 0)
+                if sd > 1:
+                    streak_txt = f"，连续流入{sd}日"
+                elif sd == 1:
+                    streak_txt = "，今日转入净流入"
+                elif sd < -1:
+                    streak_txt = f"，连续流出{abs(sd)}日"
+                elif sd == -1:
+                    streak_txt = "，今日转入净流出"
+                # 021BN：排名为同级别板块内口径（一/二/三级分开排），二/三级显式标注，
+                # 避免"一级社会服务"与"三级子行业"跨级对比的误导
+                lv = bg.get('level')
+                rank_txt = f"第{bg['rank']}/{bg['total']}名"
+                if lv in ('Ⅱ', 'Ⅲ'):
+                    rank_txt = f"{'二级' if lv == 'Ⅱ' else '三级'}板块内 {rank_txt}"
                 lines.append(
                     f"行业资金背景：{bg['board']} 主力净{direction} {yi:.1f}亿"
-                    f"（第{bg['rank']}/{bg['total']}名{streak_txt}）"
+                    f"（{rank_txt}{streak_txt}）"
                 )
     except Exception as e:  # noqa: BLE001
         logger.warning(f'[020R-54] 行业资金背景读取失败 stock_id={stock_id}: {e}')
@@ -1575,7 +1587,7 @@ def _build_markdown_summary(report_date, results):
 
     # 概览表
     md += '## 一、概览\n\n'
-    md += '| 股票 | 代码 | 引擎 | 总分 | 评级 | 较昨日 |\n'
+    md += '| 股票 | 代码 | 引擎 | 总分 | 评级 | 较前次 |\n'
     md += '|:---|:---|:---:|:---:|:---:|:---:|\n'
     for r in ok_results:
         engine_tag = '🚀' if r.get('engine') == 'v5' else '⚙️'

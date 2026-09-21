@@ -410,10 +410,17 @@ def _detect_risks(dimensions):
     if '亏损' in roe_val:
         risks.append(f'ROE{roe_val}，公司处于亏损状态')
 
-    # 019P：基本面趋势恶化 → 追加恶化提示（风险提示；仅展示不进评分）
+    # 019P：基本面趋势恶化 → 追加提示（风险提示；仅展示不进评分）
+    # 021BN：优先消费结构化方向标记 _fund_trend_dir；无标记时（旧快照/手工入参）
+    # 回退按旧摘要前缀判断——新摘要含分项计数（如"涨跌互现：1项改善、1项恶化"），
+    # 关键词匹配会误报，故不能直接查"恶化"字样。
     fund_trend = fund_factors.get('fund_trend', '')
-    if fund_trend and '恶化' in fund_trend:
-        risks.append(f'基本面趋势恶化：{fund_trend}')
+    trend_dir = fund_factors.get('_fund_trend_dir')
+    trend_worsen = trend_dir == 'worsen' or (
+        trend_dir is None and fund_trend.startswith('基本面较上期恶化')
+    )
+    if fund_trend and trend_worsen:
+        risks.append(f'基本面趋势转弱：{fund_trend}')
 
     # 资金面风险
     cap = dimensions.get('capital_flow', {})
@@ -544,12 +551,13 @@ def _build_markdown_single(advice_result, prev_score):
 
     md = f'### {name} ({code}) — {engine_tag}\n\n'
 
-    # 评分行
+    # 评分行（021BN：prev_score 取的是"上一份有效报告"，与当日未必相邻，
+    # 周一/节假日缺口时"较昨日"会名不副实，改为"较前次报告"）
     score_change_str = ''
     if prev_score is not None:
         change = total - prev_score
         arrow = '↑' if change > 0 else ('↓' if change < 0 else '→')
-        score_change_str = f'（较昨日 {arrow} {abs(change):.1f}）'
+        score_change_str = f'（较前次报告 {arrow} {abs(change):.1f}）'
     # 021AR：v5 中文5档 key=label 恒等，标签与评级相同时不再重复拼接
     label_suffix = f' · {rating_label}' if rating_label and rating_label != rating else ''
     md += f'- **综合评分**：{total:.1f}（{rating}级{label_suffix}）{score_change_str}\n'
@@ -592,10 +600,15 @@ def _build_markdown_single(advice_result, prev_score):
             f'消息{int(dq.get("news", 0) * 100)}%\n'
         )
 
-    # 降级提示
+    # 降级提示（021BN：列明细而非只给计数——只有计数时用户无法判断影响面）
     warnings = advice_result.get('data_warnings', [])
     if warnings:
         md += f'- **降级提示**：{len(warnings)}条降级规则触发\n'
+        shown = warnings[:6]
+        for w in shown:
+            md += f'  - {w}\n'
+        if len(warnings) > len(shown):
+            md += f'  - …其余{len(warnings) - len(shown)}条略\n'
 
     # 风险提示
     risks = advice_result.get('risk_warnings', [])
@@ -1192,7 +1205,10 @@ def _build_fund_trend(stock_id):
 
     latest = rows[0]
     latest_date = str(latest.get('report_date') or '')[:10]
-    details = []
+    # 021BN：收集 (|Δ|, 文案)，输出前按幅度降序——证据截取优先展示变化最大的项，
+    # 而非指标固定顺序（旧 details[:3] 可能截掉真正触发"恶化"的指标）。
+    # 注：|Δ| 跨指标类型（比率/百分点）量纲不同，仅用于排序展示，不参与判定。
+    detail_items: list[tuple[float, str]] = []
     improve_cnt = 0
     worsen_cnt = 0
 
@@ -1220,7 +1236,7 @@ def _build_fund_trend(stock_id):
             improve_cnt += 1
         elif state == '恶化':
             worsen_cnt += 1
-        details.append(f'{label}较上期{state}({_fmt(prev)}%→{_fmt(cur)}%)')
+        detail_items.append((abs(delta), f'{label}较上期{state}({_fmt(prev)}%→{_fmt(cur)}%)'))
 
     # ---- 2. ROE 仅同比（累计型禁止环比 R-5）----
     roe_cur = latest.get('roe')
@@ -1235,12 +1251,13 @@ def _build_fund_trend(stock_id):
             for r in rows:
                 if str(r.get('report_date') or '')[:10] == target and r.get('roe') is not None:
                     prev_roe = float(r['roe'])
-                    state = _fund_trend_state(float(roe_cur) - prev_roe, False)
+                    roe_delta = float(roe_cur) - prev_roe
+                    state = _fund_trend_state(roe_delta, False)
                     if state == '改善':
                         improve_cnt += 1
                     elif state == '恶化':
                         worsen_cnt += 1
-                    details.append(f'ROE同比{state}({_fmt(prev_roe)}%→{_fmt(roe_cur)}%)')
+                    detail_items.append((abs(roe_delta), f'ROE同比{state}({_fmt(prev_roe)}%→{_fmt(roe_cur)}%)'))
                     break
 
     # ---- 3. 增速指标（营收/净利增长）：表述"增速加快/放缓"（比较相邻两期增速）----
@@ -1264,23 +1281,30 @@ def _build_fund_trend(stock_id):
                 improve_cnt += 1
             else:
                 worsen_cnt += 1
-        details.append(f'{label}{state}({_fmt(prev)}%→{_fmt(cur)}%)')
+        detail_items.append((abs(delta), f'{label}{state}({_fmt(prev)}%→{_fmt(cur)}%)'))
 
-    if not details:
+    if not detail_items:
         return '历史数据不足，暂无趋势判断', [], 'insufficient'
 
-    # ---- 4. 汇总（多数投票 + 阈值）----
-    if improve_cnt > worsen_cnt:
-        direction = 'improve'
-        summary = '基本面较上期改善'
-    elif worsen_cnt > improve_cnt:
+    # ---- 4. 汇总（021BN 诚实化：计数化措辞，平稳计数如实展示，不再"1项恶化定全局"）----
+    detail_items.sort(key=lambda x: x[0], reverse=True)
+    details = [text for _, text in detail_items]
+    total_n = len(details)
+    flat_cnt = total_n - improve_cnt - worsen_cnt
+    if worsen_cnt > improve_cnt:
         direction = 'worsen'
-        summary = '基本面较上期恶化'
+        summary = f'基本面较上期偏弱：{worsen_cnt}项恶化、{improve_cnt}项改善、{flat_cnt}项平稳'
+    elif improve_cnt > worsen_cnt:
+        direction = 'improve'
+        summary = f'基本面较上期向好：{improve_cnt}项改善、{worsen_cnt}项恶化、{flat_cnt}项平稳'
+    elif worsen_cnt > 0:
+        direction = 'flat'
+        summary = f'基本面较上期涨跌互现：{improve_cnt}项改善、{worsen_cnt}项恶化、{flat_cnt}项平稳'
     else:
         direction = 'flat'
-        summary = '基本面较上期平稳'
+        summary = f'基本面较上期平稳（{total_n}项指标均无实质变化）'
 
-    if details and direction in ('improve', 'worsen'):
+    if direction != 'flat' or worsen_cnt > 0 or improve_cnt > 0:
         summary += '（' + '、'.join(details[:3]) + '）'
     return summary, details, direction
 
@@ -1331,9 +1355,13 @@ def _build_fundamental_factors(factors, stock_data, stock_id):
     # 019P（M-3/A-2）：趋势因子（仅展示不进评分）
     # 数据源：raw_fundamental 多期行（abstract 写 8 期 + 存量回补后天然具备）
     try:
-        trend_summary, trend_details, _trend_dir = _build_fund_trend(stock_id)
+        trend_summary, trend_details, trend_dir = _build_fund_trend(stock_id)
         if trend_summary:
             factors['fund_trend'] = trend_summary
+            # 021BN：结构化方向标记（improve/worsen/flat/insufficient）。
+            # 前缀 _ 的因子键按约定不进前端因子卡（analysis.js factors 渲染跳过 _ 开头键），
+            # _detect_risks 据此判定风险提示，替代对摘要文案的关键词匹配。
+            factors['_fund_trend_dir'] = trend_dir
             if trend_details:
                 factors['fund_trend_detail'] = '；'.join(trend_details[:3])
     except Exception as e:

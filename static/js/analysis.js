@@ -1326,16 +1326,41 @@
             na:       { c: '#bbb',    label: '数据不足' }
         };
         var m = map[trend] || map.na;
-        var s = strength ? '·' + strength : '';
-        return '<span style="display:inline-block;min-width:86px;text-align:center;padding:2px 10px;' +
+        // 021BN：震荡不叠强度字——"震荡·弱"易被误读为"弱势震荡（偏空）"，
+        // 实际语义是"方向未选择、判定信心低"，改为悬停提示
+        var isSideways = trend === 'sideways';
+        var s = (strength && !isSideways) ? '·' + strength : '';
+        var title = isSideways && strength ? (' title="方向未选择（判定信心：' + strength + '）"') : '';
+        return '<span' + title + ' style="display:inline-block;min-width:86px;text-align:center;padding:2px 10px;' +
                'border-radius:12px;background:' + m.c + ';color:#fff;font-weight:600;font-size:13px;">' +
                m.label + s + '</span>';
     }
 
-    function loadTrendCompass(stockId) {
+    // 021BN：评级 × 罗盘调和提示——页面同时给出"短期反弹/长期方向"与"操作建议"时，
+    // 显式说明两者的关系，避免用户自行拼装矛盾信号
+    function _tcReconcileHint(rating, o, tf) {
+        var reduce = (rating === '建议减仓' || rating === '强烈建议卖出');
+        var buy = (rating === '强烈推荐买入' || rating === '推荐买入');
+        var monthly = (tf && tf.monthly) || {};
+        var daily = (tf && tf.daily) || {};
+        var overall = o || {};
+        if (reduce && daily.trend === 'up' && (monthly.trend === 'down' || overall.trend === 'down')) {
+            return '短期反弹未获月线（下跌）确认：反弹宜视为调仓窗口，而非趋势反转。';
+        }
+        if (buy && monthly.trend === 'down') {
+            return '月线方向仍为下跌：买入信号建议以波段视角对待，控制仓位、设好止损。';
+        }
+        if (buy && daily.trend === 'down' && monthly.trend === 'up') {
+            return '长期方向向上、短期回调：可关注月线支撑附近的分批机会。';
+        }
+        return '';
+    }
+
+    function loadTrendCompass(stockId, advise) {
         var body = document.getElementById('trendCompassBody');
         if (!body) return;
         body.textContent = '加载中...';
+        var rating = (advise && (advise.action_advice || advise.rating)) || '';
         fetch('/api/stocks/' + stockId + '/trend', { cache: 'no-store' })
             .then(function(r) { return safeJson(r); })
             .then(function(d) {

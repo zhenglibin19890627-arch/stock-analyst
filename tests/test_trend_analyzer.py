@@ -4,7 +4,7 @@
 覆盖：
 - 五信号打分的三分类边界（上涨/下跌/震荡）与置信度
 - 数据不足 → na 且不影响其他周期
-- 多周期加权综合 + 三周期共振
+- 月线定方向的综合判定（方向随月线 + 加权回退） + 三周期共振
 - GET /api/stocks/<id>/trend 端点（隔离库，monkeypatch 适配器，不触网）
 """
 
@@ -115,8 +115,9 @@ def test_resonance_when_all_timeframes_agree():
     assert any('共振' in x for x in o['reasons'])
 
 
-def test_monthly_outweighs_daily_in_overall():
-    # 日线强空(-5)、月线强多(+5)：加权 (−5*1 + 5*2)/3 = +1.67 → 震荡（长期定方向）
+def test_monthly_direction_decides_overall():
+    # 021BN 月线定方向：日线强空(-5)、月线强多(+5) → 综合随月线上涨
+    # （旧加权逻辑 (−5*1 + 5*2)/3 = +1.67 会判"震荡"，与"长期定方向"意图矛盾）
     r = analyze_trends(
         _stock(
             close=8.0, ma5=9.0, ma20=10.0, macd_dif=-0.5, macd_dea=-0.3,
@@ -126,7 +127,70 @@ def test_monthly_outweighs_daily_in_overall():
     )
     assert r['timeframes']['daily']['trend'] == DOWN
     assert r['timeframes']['monthly']['trend'] == UP
-    assert r['overall']['trend'] == SIDEWAYS
+    o = r['overall']
+    assert o['trend'] == UP
+    assert o['score'] == 5.0
+    assert any('随月线' in x for x in o['reasons'])
+    assert any('日线走弱未改月线上行' in x for x in o['reasons'])
+    assert o['resonance'] == ''
+
+
+def test_cnmi_monthly_bearish_overall_down_despite_daily_rebound():
+    """中国中免实测形态回归（021BN）：月线下跌·强 + 周线震荡 + 日线反弹 → 综合必须为下跌。
+
+    旧加权逻辑：(−5×2 + 1×1.5 + 4×1)/4.5 ≈ −1.0 → 综合"震荡·弱"，
+    与文案"以月线方向为主参考"（月线=下跌）自相矛盾。
+    """
+    r = analyze_trends(
+        _stock(
+            close=12.0, ma5=11.0, ma20=10.0, macd_dif=-0.1, macd_dea=-0.3,  # 日线 上涨·中（反弹）
+            weekly_ma10=11.0, weekly_ma20=11.5,
+            weekly_macd_dif=0.2, weekly_macd_dea=0.1,                       # 周线 震荡
+            monthly_ma5=13.0, monthly_ma10=14.0,
+            monthly_macd_dif=-0.4, monthly_macd_dea=-0.2,                   # 月线 下跌·强
+        )
+    )
+    tf = r['timeframes']
+    assert tf['daily']['trend'] == UP and tf['daily']['strength'] == '中'
+    assert tf['weekly']['trend'] == SIDEWAYS
+    assert tf['monthly']['trend'] == DOWN and tf['monthly']['strength'] == '强'
+    o = r['overall']
+    assert o['trend'] == DOWN
+    assert o['strength'] == '强'
+    assert o['score'] == -5.0
+    assert any('随月线' in x for x in o['reasons'])
+    assert any('未获月线确认' in x for x in o['reasons'])
+    assert any('周线方向待选择' in x for x in o['reasons'])
+    assert o['resonance'] == ''
+
+
+def test_monthly_sideways_falls_back_to_weighted():
+    # 月线震荡（0 分）→ 退回加权平均：日线强多(+5,权重1)、月线0(权重2)、周线缺(权重1.5)
+    # → (0×2 + 5×1)/3 ≈ +1.67 → 震荡，理由应说明加权口径
+    r = analyze_trends(
+        _stock(
+            monthly_ma5=8.0, monthly_ma10=8.0,
+            monthly_macd_dif=-0.2, monthly_macd_dea=0.1,
+        )
+    )
+    assert r['timeframes']['monthly']['trend'] == SIDEWAYS
+    o = r['overall']
+    assert o['trend'] == SIDEWAYS
+    assert any('加权' in x for x in o['reasons'])
+
+
+def test_no_misleading_monthly_reference_phrase():
+    """旧文案「以月线方向为主参考」已废弃——月线定方向时直说"随月线"，回退时说明加权口径。"""
+    r_directional = analyze_trends(_stock())
+    r_weighted = analyze_trends(
+        _stock(
+            monthly_ma5=8.0, monthly_ma10=8.0,
+            monthly_macd_dif=-0.2, monthly_macd_dea=0.1,
+        )
+    )
+    for r in (r_directional, r_weighted):
+        flat = ' '.join(r['overall']['reasons'])
+        assert '以月线方向为主参考' not in flat
 
 
 @pytest.fixture()
