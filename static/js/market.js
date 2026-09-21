@@ -296,13 +296,28 @@
         btns.forEach(function(b) { b.disabled = true; });
         var okCount = 0;
         var failCount = 0;
+        var addedIds = [];     // 021BP 项5：成功加入的 stock_id（一键衔接批量分析用）
         var failReasons = [];  // 021BO：失败原因去重收集——"失败N只"不说原因，用户无从处置（实测：上限50只拦截只报失败）
         var seq = function(idx) {
             if (idx >= checked.length) {
                 btns.forEach(function(b) { b.disabled = false; });
-                alert('加入完成：成功 ' + okCount + ' 只' + (failCount ? '，失败 ' + failCount + ' 只' : '') +
-                    (failReasons.length ? '\n失败原因：' + failReasons.join('；') : '') +
-                    '。请到「自选股」页执行「批量分析+评级」获取真评级。');
+                var summary = '加入完成：成功 ' + okCount + ' 只' + (failCount ? '，失败 ' + failCount + ' 只' : '') +
+                    (failReasons.length ? '\n失败原因：' + failReasons.join('；') : '');
+                if (okCount > 0) {
+                    // 021BP 项5：消除"扫描→加自选→自己跑去自选股页手动批量分析"的断点——
+                    // 确认后立即衔接批量分析链路（复用 watchlist.js runBatchAnalysis，
+                    // 分批驱动在 core.js runChunked；异步顺序执行，不阻塞本页）。
+                    // 确认后切到自选股视图，真实分批进度与结果表在 collectArea 呈现。
+                    if (confirm(summary + '。\n\n是否立即执行「批量分析+评级」？' +
+                        '\n（新加自选股需采集全维度数据，自动拆批顺序执行，可能需要数分钟；期间可正常浏览其他页面）')) {
+                        runBatchAnalysis(addedIds);
+                        navigateTo('#watchlist');
+                    } else {
+                        alert('已跳过。可稍后在「自选股」页勾选后点「批量分析+评级」。');
+                    }
+                } else {
+                    alert(summary + '。请到「自选股」页执行「批量分析+评级」获取真评级。');
+                }
                 return;
             }
             var el = checked[idx];
@@ -311,14 +326,20 @@
                 body: JSON.stringify({ symbol: el.getAttribute('data-code'), market: 'a_stock',
                                        name: el.getAttribute('data-name') })
             }).then(function(r) { return r.json(); }).then(function(d) {
-                if (d.success) { okCount++; el.checked = false; }
+                if (d.success) { okCount++; addedIds.push(d.stock_id); el.checked = false; }
                 else {
                     failCount++;
                     var msg = d.message || '未知原因';
                     if (failReasons.indexOf(msg) < 0) failReasons.push(msg);
                 }
                 seq(idx + 1);
-            }).catch(function() { failCount++; seq(idx + 1); });
+            }).catch(function(err) {
+                // 7ea701b 教训：不吞 message——网络异常也透出原因
+                failCount++;
+                var msg = '网络异常：' + ((err && err.message) ? err.message : String(err));
+                if (failReasons.indexOf(msg) < 0) failReasons.push(msg);
+                seq(idx + 1);
+            });
         };
         seq(0);
     }

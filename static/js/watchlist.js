@@ -321,7 +321,17 @@
             alert('请先勾选要分析的股票');
             return;
         }
+        runBatchAnalysis(ids);
+    }
 
+    /**
+     * 021BP 项5：批量分析核心（显式传入 stock_ids）——两个入口复用同一链路：
+     *   ① 自选页 batchAnalyze()（勾选框收集 ids）；
+     *   ② 市场扫描「加自选后立即批量分析」（market.js msAddSelected，新加自选的 ids）。
+     * 分批驱动复用 core.js runChunked（单批 ≤20 = R16 上限，拆批只在前端多次调用），
+     * 异步顺序执行不阻塞页面；进度/结果渲染在自选页 collectArea。
+     */
+    function runBatchAnalysis(ids) {
         var area = document.getElementById('collectArea');
         var total = ids.length;
         var startTime = Date.now();
