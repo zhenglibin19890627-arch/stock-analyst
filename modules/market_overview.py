@@ -98,6 +98,24 @@ def _request_page_robust(page_no):
     raise last_err if last_err else RuntimeError('行业资金流请求失败')
 
 
+def _log_source_error(message):
+    """021BN-c：数据源级失败写入 error_logs，使其在"数据源健康度"卡片可见。
+
+    此前行业资金流刷新失败只进日志文件，用户在看板看不到"今天为什么没数据"。
+    """
+    try:
+        conn = get_connection()
+        conn.execute(
+            'INSERT INTO error_logs (stock_id, module, error_type, error_message, dimension) '
+            "VALUES (0, 'modules.market_overview', 'fetch_failed', ?, NULL)",
+            (str(message)[:500],),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:  # noqa: BLE001 —— 日志落库失败不影响采集主流程
+        pass
+
+
 def _mark_failure():
     """记录一次刷新失败时间（内存 + 落盘双写，021C：重启不清零）。"""
     global _last_failure_at
@@ -133,7 +151,12 @@ def refresh_in_cooldown():
 
 
 def fetch_industry_fund_flow():
-    """抓取东财行业资金流全部页 → (items, updated_at)。部分页失败时保留已获取部分。"""
+    """抓取东财行业资金流全部页 → (items, updated_at, expected_total)。
+
+    021BN：附带接口声明的全集数 expected_total（部分页失败时保留已获取部分，
+    但截断快照交由 save_industry_fund_flow 完整性校验拦截——实测截断快照
+    曾使排名分母逐日在 200/300/496 间漂移）。
+    """
     first = _request_page_robust(1)
     data = first.get('data') or {}
     total = int(data.get('total') or 0)
@@ -174,11 +197,23 @@ def fetch_industry_fund_flow():
         )
     if not items:
         raise RuntimeError('东财行业资金流返回空数据')
-    return items, updated_at
+    return items, updated_at, total
 
 
-def save_industry_fund_flow(items, trade_date):
-    """按交易日幂等覆盖快照。"""
+def save_industry_fund_flow(items, trade_date, expected_total=None):
+    """按交易日幂等覆盖快照。
+
+    021BN：expected_total（东财接口声明的全集数）传入时做完整性校验——
+    部分页失败产生的截断快照拒绝落库（保留当日已有快照或前一交易日完整快照），
+    避免"第x/y名"的分母逐日漂移、跨日不可比。
+    返回 True=已落库；False=完整性校验未过，未写库。
+    """
+    if expected_total and len(items) < expected_total:
+        logger.warning(
+            '[行业资金流] 快照不完整（%s/%s），拒绝覆盖 %s 快照',
+            len(items), expected_total, trade_date,
+        )
+        return False
     conn = get_connection()
     try:
         cursor = conn.cursor()
@@ -195,19 +230,32 @@ def save_industry_fund_flow(items, trade_date):
             )
         conn.commit()
         logger.info('[行业资金流] 快照已保存: %s 共 %d 条', trade_date, len(items))
+        return True
     finally:
         conn.close()
 
 
 def refresh_industry_fund_flow():
-    """抓取并落库 → (items, trade_date, updated_at)；失败记录冷却时间后抛出。"""
+    """抓取并落库 → (items, trade_date, updated_at)；失败记录冷却时间后抛出。
+
+    021BN：截断快照（部分页失败）经完整性校验拒绝落库，此时返回的 items
+    仅代表本次抓取结果，当日快照维持原状（保留已有完整快照）。
+    """
     try:
-        items, updated_at = fetch_industry_fund_flow()
-    except Exception:  # noqa: BLE001
+        items, updated_at, expected_total = fetch_industry_fund_flow()
+    except Exception as e:  # noqa: BLE001
         _mark_failure()
+        _log_source_error(f'东财行业资金流实时接口刷新失败: {e}')
+        # 021BN-c：实时接口被风控/断连时，立即改走 push2his 历史接口后台回补
+        #（两路接口独立，实测实时 clist 被拒期间历史 daykline 仍可用）；
+        # 回补进行中/无缺口时内部自动跳过，不会循环触发。
+        try:
+            maybe_backfill_gap_async()
+        except Exception:  # noqa: BLE001
+            pass
         raise
     trade_date = updated_at[:10] if updated_at else datetime.now(_CN_TZ).strftime('%Y-%m-%d')
-    save_industry_fund_flow(items, trade_date)
+    save_industry_fund_flow(items, trade_date, expected_total=expected_total or None)
     return items, trade_date, updated_at
 
 
@@ -302,22 +350,40 @@ def _request_fflow_hist_robust(code):
     raise last_err if last_err else RuntimeError('历史资金流请求失败')
 
 
-def backfill_industry_fund_flow(trade_date):
-    """回补指定交易日的行业资金流快照（历史接口逐行业）。
+def _backfill_base_codes():
+    """021BN-c：回补基准行业清单 = 近 10 个交易日快照的 code 并集。
 
-    探针先行：第 1 个行业的历史中无该日（休市日）则跳过全部，避免 496 次空跑。
-    连续失败超限即中止（东财整体不可达时快速放弃，冷却由调用方处理）。
-    Returns: {'ok', 'count'/'skipped'/'error', 'trade_date'}
+    旧口径只取最新一日快照——若最新快照本身是截断的（如 09-07 实测仅 200 条），
+    回补结果跟着残缺；并集口径用历史完整日（如 09-03 共 496 条）补齐缺行。
     """
     conn = get_connection()
     try:
         cursor = conn.cursor()
         cursor.execute(
-            'SELECT code, name FROM industry_fund_flow WHERE trade_date = '
-            '(SELECT MAX(trade_date) FROM industry_fund_flow) GROUP BY code, name')
-        codes = [(r['code'], r['name']) for r in cursor.fetchall()]
+            'SELECT DISTINCT trade_date FROM industry_fund_flow ORDER BY trade_date DESC LIMIT 10'
+        )
+        dates = [r['trade_date'] for r in cursor.fetchall()]
+        if not dates:
+            return []
+        qmarks = ','.join('?' * len(dates))
+        cursor.execute(
+            f'SELECT DISTINCT code, name FROM industry_fund_flow WHERE trade_date IN ({qmarks})',
+            dates,
+        )
+        return [(r['code'], r['name']) for r in cursor.fetchall()]
     finally:
         conn.close()
+
+
+def backfill_industry_fund_flow(trade_date):
+    """回补指定交易日的行业资金流快照（历史接口逐行业）。
+
+    探针先行：第 1 个行业的历史中无该日（休市日）则跳过全部，避免 496 次空跑。
+    连续失败超限即中止（东财整体不可达时快速放弃，冷却由调用方处理）。
+    021BN-c：基准行业清单改为近 10 交易日并集（见 _backfill_base_codes）。
+    Returns: {'ok', 'count'/'skipped'/'error', 'trade_date'}
+    """
+    codes = _backfill_base_codes()
     if not codes:
         return {'ok': False, 'error': '无行业代码基准（先成功刷新一次）', 'trade_date': trade_date}
 
@@ -392,6 +458,47 @@ def _previous_weekday(date_str):
     return d.strftime('%Y-%m-%d')
 
 
+def _next_weekday(date_str):
+    """021BN-c：date_str 的下一个工作日（周五跳到周一）。"""
+    d = datetime.strptime(date_str, '%Y-%m-%d').date()
+    d += timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d.strftime('%Y-%m-%d')
+
+
+def _compute_gap_dates(latest, raw_max, have):
+    """021BN-c（纯函数，离线可测）：待回补交易日列表，时间正序。
+
+    - 往前：从快照最新日 latest 起最多 10 个工作日的连续历史缺口（021BJ 原逻辑）；
+    - 往后（新增）：latest 之后至个股K线最新日 raw_max 之间的每个工作日
+      ——覆盖"实时接口断连的当日"（收盘后历史接口即含当日数据）。
+      此前缺口检测只向前看，实时接口断连当天永远不在回补清单里。
+    have: 已有快照的交易日集合。
+    """
+    gaps = []
+    if not latest:
+        return gaps
+    latest = str(latest)[:10]
+    probe = latest
+    for _ in range(10):
+        probe = _previous_weekday(probe)
+        if probe in have:
+            break           # 从最新日向前连续无缺口即止
+        gaps.append(probe)
+    gaps.reverse()          # 时间正序
+    if raw_max:
+        raw_max = str(raw_max)[:10]
+        nxt = latest
+        steps = 0
+        while nxt < raw_max and steps < 10:
+            nxt = _next_weekday(nxt)
+            steps += 1
+            if nxt <= raw_max and nxt not in have:
+                gaps.append(nxt)
+    return gaps
+
+
 def maybe_backfill_gap_async():
     """刷新成功后检测近期工作日缺口（最多回看 10 个日历日），后台线程回补。
 
@@ -418,13 +525,10 @@ def maybe_backfill_gap_async():
                     ((datetime.strptime(str(latest)[:10], '%Y-%m-%d')
                       - timedelta(days=10)).strftime('%Y-%m-%d'),))
                 have = {str(r['trade_date'])[:10] for r in cursor.fetchall()}
-                probe = str(latest)[:10]
-                for _ in range(10):
-                    probe = _previous_weekday(probe)
-                    if probe in have:
-                        break           # 从最新日向前连续无缺口即止
-                    gap_dates.append(probe)
-                gap_dates.reverse()     # 时间正序逐日补
+                # 021BN-c：raw_max（个股K线最新交易日）之后的"未来缺口"一并纳入
+                raw = cursor.execute('SELECT MAX(trade_date) AS d FROM raw_kline').fetchone()
+                raw_max = raw['d'] if raw else None
+                gap_dates = _compute_gap_dates(latest, raw_max, have)
         finally:
             conn.close()
         if not gap_dates:
@@ -629,10 +733,28 @@ def get_industry_flow_summary(trade_date):
         conn.close()
 
 
+def _board_level(name):
+    """板块级别判定（021BN）：申万口径后缀 Ⅰ/Ⅱ/Ⅲ，无后缀视为一级。
+
+    背景：东财行业资金流快照中一/二/三级板块混排（如 银行 与 银行Ⅱ/证券Ⅲ 同在），
+    跨级比主力净流入是宽窄口径错配——一级"社会服务"与三级"数字芯片设计"同场排名
+    无可比性，排名/分母必须同级内计算。
+    """
+    n = str(name or '')
+    for suf in ('Ⅲ', 'Ⅱ', 'Ⅰ'):
+        if n.endswith(suf):
+            return suf
+    return 'Ⅰ'
+
+
+_LEVEL_TAG = {'Ⅰ': '一级', 'Ⅱ': '二级', 'Ⅲ': '三级'}
+
+
 def get_industry_flow_bg_map(trade_date=None):
     """020R-54：最新（或指定）交易日全部板块的资金背景字典 {板块名: bg}。
 
-    bg: {board, trade_date, main_net, main_pct, pct_change, rank, total, streak_days}
+    bg: {board, trade_date, main_net, main_pct, pct_change, rank, total, level, streak_days}
+    021BN：rank/total 为**同级别板块内**排名（一/二/三级分开算），level 为板块级别。
     供个股行业背景批量关联（自选股看板/建议/每日报告共用，一次计算全板块）。
     """
     conn = get_connection()
@@ -649,18 +771,25 @@ def get_industry_flow_bg_map(trade_date=None):
         ).fetchall()
         if not rows:
             return {}
-        total = len(rows)
         streaks = compute_streaks(trade_date)
+        level_total: dict = {}
+        for r in rows:
+            lv = _board_level(r['name'])
+            level_total[lv] = level_total.get(lv, 0) + 1
+        level_rank: dict = {}
         bg_map = {}
-        for i, r in enumerate(rows):
+        for r in rows:
+            lv = _board_level(r['name'])
+            level_rank[lv] = level_rank.get(lv, 0) + 1
             bg_map[r['name']] = {
                 'board': r['name'],
                 'trade_date': trade_date,
                 'main_net': r['main_net'],
                 'main_pct': r['main_pct'],
                 'pct_change': r['pct_change'],
-                'rank': i + 1,
-                'total': total,
+                'rank': level_rank[lv],
+                'total': level_total[lv],
+                'level': lv,
                 'streak_days': streaks.get(r['code'], 0),
             }
         return bg_map

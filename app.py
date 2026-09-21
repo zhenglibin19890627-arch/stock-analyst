@@ -137,6 +137,29 @@ def main():
     logging.getLogger(__name__).info(f'===== Stock Analyst 启动 PID={os.getpid()} =====')
     # === 012-A END ===
 
+    # === 021BN-c：实例唯一性守卫 ===
+    # 实测缺陷（2026-09-08）：start.bat 与每分钟巡检的 watchdog 在"杀旧进程→绑定端口"
+    # 的间隙撞车，各拉起一份 app.py；输掉绑定竞争的实例带着全套调度器变僵尸，
+    # 所有采集双倍触发（日志成对）、浪费东财接口配额加剧风控。守卫：端口已有健康
+    # 实例时本进程立即退出；app.run 绑定失败也显式退出（不再带调度器苟活）。
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            f'http://127.0.0.1:{FLASK_PORT}/api/health', timeout=2
+        ) as _resp:
+            import json as _json
+
+            if _json.loads(_resp.read().decode('utf-8')).get('status') == 'running':
+                logging.getLogger(__name__).warning(
+                    '===== 端口 %s 已有运行实例，本进程 PID=%s 退出（防双实例双倍采集）=====',
+                    FLASK_PORT, os.getpid(),
+                )
+                print(f'[提示] 端口 {FLASK_PORT} 已有 Stock Analyst 实例在运行，本进程退出。')
+                sys.exit(0)
+    except Exception:  # noqa: BLE001 —— 探测失败=端口无服务，正常继续启动（绑定仍会仲裁）
+        pass
+
     print('=' * 60)
     print('  Stock Analyst 智能个股分析与评级系统')
     print('  正在初始化数据库...')
@@ -185,7 +208,15 @@ def main():
     print('  ============================================================')
     print()
 
-    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=FLASK_DEBUG, threaded=True)
+    # 021BN-c：绑定失败（输给并起实例）必须显式退出——调度器已启动的进程
+    # 若在此苟活，就成了无端口但持续采集的僵尸实例（当日实测根源）。
+    try:
+        app.run(host=FLASK_HOST, port=FLASK_PORT, debug=FLASK_DEBUG, threaded=True)
+    except OSError as e:
+        logging.getLogger(__name__).error(
+            '===== 端口 %s 绑定失败（已有实例运行？）：%s → 本进程退出 =====', FLASK_PORT, e
+        )
+        sys.exit(1)
 
 
 if __name__ == '__main__':
