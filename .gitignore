@@ -34,3 +34,6 @@ _tmp_*.py
 
 # DSH 视觉工具产物（会话级，不入库）
 .dsh-vision-router/
+
+# AgentTeams 团队运行态（staged/审批/邮箱，不入库）
+.agent-teams/
