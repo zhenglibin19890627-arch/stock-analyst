@@ -31,6 +31,18 @@ def _read_bytes(rel_path):
         return f.read()
 
 
+def _read_db_sources():
+    """021BO（2026-09-21）：db_manager 拆分为 facade + database/_db/ 实现包后，
+    「数据库层源码」的读取面 = facade + 全部实现子模块拼接。
+    各红线断言内容不变，仅扩展读取范围（WAL/备份/迁移 SQL 锚点现居 _db/ 子模块）。"""
+    parts = [_read('database/db_manager.py')]
+    impl_dir = os.path.join(BASE_DIR, 'database', '_db')
+    for name in sorted(os.listdir(impl_dir)):
+        if name.endswith('.py') and name != '__init__.py':
+            parts.append(_read(f'database/_db/{name}'))
+    return '\n'.join(parts)
+
+
 _CHECK_FUNCS = []
 
 
@@ -223,7 +235,7 @@ def net_calls_via_timeout_wrapper():
 @_check('R9')
 def daily_reports_unique_constraint():
     """013：daily_reports 三列唯一约束 (report_date, stock_id, report_type)"""
-    src = _read('database/db_manager.py')
+    src = _read_db_sources()
     ok = 'UNIQUE(report_date, stock_id, report_type)' in src
     return ok, ('三列唯一约束存在' if ok else '三列唯一约束缺失')
 
@@ -247,7 +259,7 @@ def ratings_history_replace():
 @_check('R11')
 def backup_before_destructive():
     """破坏性操作前备份机制存在（db_manager.backup_database）"""
-    src = _read('database/db_manager.py')
+    src = _read_db_sources()
     ok = 'def backup_database' in src and 'source.backup(dest)' in src
     return ok, ('在线热备份机制存在' if ok else '备份机制缺失')
 
@@ -286,7 +298,7 @@ def stockdata_contract_defined():
 @_check('R11')
 def backup_failure_aborts_destructive():
     """破坏性操作前备份失败必须中止（021B 起：调用点检查返回值）"""
-    src = _read('database/db_manager.py')
+    src = _read_db_sources()
     checked = src.count('if backup_database(') >= 2
     ok = checked and '备份失败，中止' in src
     return ok, ('备份失败中止守卫存在' if ok else '备份返回值未检查（工程债）')
@@ -295,7 +307,7 @@ def backup_failure_aborts_destructive():
 @_check('R12')
 def db_pragmas():
     """WAL + busy_timeout=10s + foreign_keys=OFF（应用层手动级联）配置锚点"""
-    src = _read('database/db_manager.py')
+    src = _read_db_sources()
     ok = (
         'PRAGMA journal_mode=WAL' in src
         and 'PRAGMA busy_timeout=10000' in src

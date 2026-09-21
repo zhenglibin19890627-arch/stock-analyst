@@ -292,7 +292,6 @@ def position_note_for(stock_id, rating):
     own_key = 'low' if pos < 0.4 else ('high' if pos >= 0.7 else 'mid')
     if own_key == 'mid':
         return None  # 中位带不标（分化不显著）
-    opp_key = 'high' if own_key == 'low' else 'low'
     n_own = n_opp = c_own = c_opp = 0
     for r in rows:
         if r['rating'] != rating:
