@@ -37,10 +37,10 @@
 | 入口 | 路径 | 说明 |
 |------|------|------|
 | **Flask 主应用** | `app.py` | 应用入口（约 130 行）：环境初始化、蓝图注册、首页路由、启动逻辑。启动后监听 `127.0.0.1:5000`。 |
-| **路由蓝图** | `blueprints/` | API 路由按业务域拆分（自 2026-08-13）：`watchlist`（自选股/分组/采集）、`analysis`（分析/评级/v5）、`portfolio`（持仓/流水/成本）、`report`（日报）、`system`（健康/统计）、`backtest`（回测/优化）、`export`（导出）、`index_ratings`（指数）、`alerts`（预警）；共享展示层工具在 `_utils.py`。 |
+| **路由蓝图** | `blueprints/` | API 路由按业务域拆分（自 2026-08-13）：`watchlist`（自选股/分组/采集）、`analysis`（分析/评级/v5）、`portfolio`（持仓/流水/成本）、`report`（日报）、`system`（健康/统计）、`backtest`（回测/优化）、`export`（导出）、`index_ratings`（指数）、`alerts`（预警）；共享展示层工具在 `_utils.py`。`portfolio` 自 021BO（2026-09-21）拆为**包**：`portfolio/__init__.py` 为 facade（bp + config 风控常量 + 再导出），路由子模块按域分文件（_scope 账户助手 / accounts / holdings / watchlist_scores / trades / controls / market）；config 风控常量在调用点经 facade 取值，测试 `monkeypatch.setattr(blueprints.portfolio, 'TRADE_T1_LOCK_ENABLED', ...)` 语义保持。 |
 | **全局配置** | `config.py` | 路径、采集参数、评分权重、评级档位、风控阈值、Flask 配置。 |
 | **权重热加载** | `config_weights.json` | 评分权重，运行时可修改无需重启。 |
-| **数据库管理** | `database/db_manager.py` | 建表、连接、WAL/锁配置。 |
+| **数据库管理** | `database/db_manager.py` | **facade**（021BO，2026-09-21）：常量（DB_PATH/BACKUP_DIR/MAX_BACKUPS）+ 全量再导出；实现拆在 `database/_db/` 包（连接/WAL、备份、分域建表、迁移、init 编排）。约定：调用方只 `from database.db_manager import X`；可变配置在调用点经 facade 动态取值，测试 `monkeypatch.setattr(db_manager, 'DB_PATH', ...)` 语义保持。 |
 | **业务模块** | `modules/` | 采集、评分、建议、报告、回测、预警等。 |
 
 ### 关键 API 端点（app.py）
@@ -204,10 +204,11 @@ stock_analyst/
 ├── requirements.txt
 ├── start.bat / start.sh    # 一键启动脚本
 ├── stock_analyst.db        # SQLite 数据库（运行产物）
-├── database/               # 数据库管理
-│   └── db_manager.py
+├── database/               # 数据库管理（021BO：db_manager.py 为 facade，实现拆 _db/ 包）
+│   ├── db_manager.py       # facade：DB_PATH/BACKUP_DIR 常量 + 全量再导出（唯一导入面）
+│   └── _db/                # 实现：_connection(WAL) · _backup(备份) · _schema_*(分域建表) · _migrations · _init
 ├── modules/                # 业务模块（见模块地图）
-├── blueprints/             # API 路由蓝图（按业务域拆分）
+├── blueprints/             # API 路由蓝图（按业务域拆分；portfolio/ 021BO 起为包：facade + 7 个域子模块）
 ├── templates/              # Flask 页面模板（仅 index.html 骨架）
 ├── static/                 # 前端静态资源（css/ + js/ 八文件按业务域加载：core→watchlist→analysis→portfolio→backtest→alerts→market→boot，OPT-4；vendor/ 本地化三方库，OPT-7）
 ├── scripts/                # 运维脚本（托盘 tray.py / 服务安装 / 看门狗 watchdog.py / check_redlines.py / cleanup_backups.py）
