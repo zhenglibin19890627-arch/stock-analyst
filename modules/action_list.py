@@ -36,6 +36,12 @@ _CN_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
 # res_week_daily·res_bottom_reverse·res_zero_relay 5星，跨日双金叉3星）
 _TOP_RESONANCE_STARS = 4
 
+# 021BP 修订（实测五粮液案例）：信号与这些评级并存时视为"相悖"——下跌趋势中的
+# MACD 水下金叉等属超跌反弹型买点，裸标"买点信号"会让用户以为系统翻多，与个股
+# 报告"建议减仓"、操盘手"强下跌"自相矛盾（AGENTS.md §9.6：判定标准是真实操作
+# 路径下的端到端表现，契约层自洽 ≠ 用户体验正确）。
+_CONFLICT_RATINGS = ('建议减仓', '强烈建议卖出')
+
 
 def get_action_list():
     """聚合四路现成数据并装配今日行动清单（只读，不写任何表）。
@@ -204,6 +210,19 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result):
             if resonances:
                 res_str = '、'.join(f"{r['label']}（{r['stars']}星）" for r in resonances)
                 reason += f'；共振组合：{res_str}'
+            # 评级相悖调和（021BP 修订）：最新评级为减仓/卖出档时显式标注，
+            # detail.rating_conflict 供前端徽标转琥珀色"反弹信号·与评级相悖"
+            latest = latest_by_stock.get(s['stock_id'])
+            conflict_rating = None
+            if latest and latest.get('status') == 'ok' and latest.get('rating') in _CONFLICT_RATINGS:
+                conflict_rating = latest.get('rating')
+                score = latest.get('total_score')
+                score_txt = f'（{score:.1f}分）' if isinstance(score, (int, float)) else ''
+                reason += (
+                    f'。当前综合评级「{conflict_rating}」{score_txt}：'
+                    '此为下跌趋势中的超跌反弹信号，未获趋势确认——'
+                    '仅作调仓窗口/短线波段参考，非趋势反转买入'
+                )
             items.append({
                 'priority': 2,
                 'priority_label': '买点信号',
@@ -222,6 +241,7 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result):
                     ],
                     'top_stars': top_stars,
                     'kline_upto': kline_upto,
+                    'rating_conflict': conflict_rating,
                 },
             })
 

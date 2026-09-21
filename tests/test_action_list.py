@@ -205,6 +205,53 @@ class TestBuildActionListDetails:
         assert result['stats']['reported_ok_today'] == 1
 
 
+class TestSignalRatingConflict:
+    """021BP 修订（实测五粮液案例）：信号与最新评级相悖时的调和标注。
+
+    用户实测矛盾：行动清单标五粮液"买点信号"（MACD水下金叉），个股报告却是
+    "建议减仓"、操盘手判"强下跌"——下跌趋势中的超跌反弹信号裸标"买点"会
+    让用户以为系统翻多。相悖时必须显式调和，不得让用户自行拼装矛盾信号。
+    """
+
+    def test_conflicted_signal_annotated(self):
+        """减仓档 + 今日买点信号 → reason 附调和说明，detail.rating_conflict 置档位"""
+        stocks = [_stock(1, '000858', '五粮液')]
+        rows = [
+            _report(1, _TODAY, '建议减仓', rn=1, total_score=46.8,
+                    code='000858', name='五粮液'),
+        ]
+        result = build_action_list(_TODAY, stocks, rows, [], _sig_result([1]))
+        sig = [it for it in result['items'] if it['kind'] == 'tech_signal'][0]
+        assert sig['detail']['rating_conflict'] == '建议减仓'
+        assert '当前综合评级「建议减仓」（46.8分）' in sig['reason']
+        assert '未获趋势确认' in sig['reason']
+        assert '非趋势反转买入' in sig['reason']
+
+    def test_strong_sell_conflict_annotated(self):
+        """强烈建议卖出档同样视为相悖"""
+        stocks = [_stock(1)]
+        rows = [_report(1, _TODAY, '强烈建议卖出', rn=1, total_score=25.0)]
+        result = build_action_list(_TODAY, stocks, rows, [], _sig_result([1]))
+        sig = [it for it in result['items'] if it['kind'] == 'tech_signal'][0]
+        assert sig['detail']['rating_conflict'] == '强烈建议卖出'
+
+    def test_aligned_signal_not_annotated(self):
+        """持有观望/买入档 + 信号 → 方向一致不标相悖"""
+        stocks = [_stock(1)]
+        rows = [_report(1, _TODAY, '持有观望', rn=1)]
+        result = build_action_list(_TODAY, stocks, rows, [], _sig_result([1]))
+        sig = [it for it in result['items'] if it['kind'] == 'tech_signal'][0]
+        assert sig['detail']['rating_conflict'] is None
+        assert '未获趋势确认' not in sig['reason']
+
+    def test_no_report_signal_not_annotated(self):
+        """无报告可判（缺报股）→ 无法判定当前评级，不标相悖"""
+        stocks = [_stock(1)]
+        result = build_action_list(_TODAY, stocks, [], [], _sig_result([1]))
+        sig = [it for it in result['items'] if it['kind'] == 'tech_signal'][0]
+        assert sig['detail']['rating_conflict'] is None
+
+
 # ---------------- 集成：临时库全链 ----------------
 
 def _deep_v_gap_closes():

@@ -1542,7 +1542,12 @@
                 if (it.kind === 'rating_upgrade') { bg = '#fdecea'; fg = '#c62828'; label = '评级升级'; }
                 else if (it.kind === 'rating_downgrade') { bg = '#e8f5e9'; fg = '#2e7d32'; label = '评级降级'; }
                 else if (it.kind === 'rating_change') { bg = '#fff3e0'; fg = '#e65100'; label = '评级变动'; }
-                else if (it.kind === 'tech_signal') { bg = '#e3f2fd'; fg = '#1565c0'; label = '买点信号'; }
+                else if (it.kind === 'tech_signal') {
+                    // 021BP 修订：与最新评级相悖（减仓/卖出档）的反弹信号 → 琥珀色徽标
+                    var rc = it.detail && it.detail.rating_conflict;
+                    bg = rc ? '#fff3e0' : '#e3f2fd'; fg = rc ? '#e65100' : '#1565c0';
+                    label = rc ? '反弹信号·与评级相悖' : '买点信号';
+                }
                 else if (it.kind === 'alert_unread') { bg = '#fff8e1'; fg = '#b26a00'; label = '预警未读'; }
                 else { bg = 'var(--bg-light,#f0f0f0)'; fg = '#888'; label = '缺报补数'; }
                 html += '<div onclick="viewReport(' + it.stock_id + ')" style="display:flex;align-items:flex-start;gap:8px;padding:8px 4px;border-bottom:1px solid var(--border-light,#f0f0f0);cursor:pointer;">';
