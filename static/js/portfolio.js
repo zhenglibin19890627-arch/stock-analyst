@@ -1530,6 +1530,7 @@
         if (st.failed_today > 0) html += '<span style="color:#e74c3c;">生成失败 <b>' + st.failed_today + '</b></span>';
         if (st.missing_today > 0) html += '<span>今日缺报 <b>' + st.missing_today + '</b></span>';
         if (st.rating_moves > 0) html += '<span style="color:#e65100;">评级变动 <b>' + st.rating_moves + '</b></span>';
+        if (st.stop_discipline_hits > 0) html += '<span style="color:#c0392b;font-weight:600;">止损已触发 <b>' + st.stop_discipline_hits + '</b></span>';
         if (st.signal_hits > 0) html += '<span style="color:#1565c0;">买点信号 <b>' + st.signal_hits + '</b>（共振4星以上 ' + (st.resonance_hits || 0) + '）</span>';
         if (st.sell_hits > 0) html += '<span style="color:#00695c;">卖点信号 <b>' + st.sell_hits + '</b>（共振4星以上 ' + (st.sell_resonance_hits || 0) + '）</span>';
         if (st.unread_alerts_today > 0) html += '<span style="color:#2e7d32;">未读预警 <b>' + st.unread_alerts_today + '</b></span>';
@@ -1540,7 +1541,8 @@
             html += '<div style="max-height:340px;overflow-y:auto;">';
             al.items.forEach(function(it) {
                 var bg, fg, label;
-                if (it.kind === 'rating_upgrade') { bg = '#fdecea'; fg = '#c62828'; label = '评级升级'; }
+                if (it.kind === 'stop_discipline') { bg = '#fdecea'; fg = '#c0392b'; label = '止损纪律·已触发'; }
+                else if (it.kind === 'rating_upgrade') { bg = '#fdecea'; fg = '#c62828'; label = '评级升级'; }
                 else if (it.kind === 'rating_downgrade') { bg = '#e8f5e9'; fg = '#2e7d32'; label = '评级降级'; }
                 else if (it.kind === 'rating_change') { bg = '#fff3e0'; fg = '#e65100'; label = '评级变动'; }
                 else if (it.kind === 'tech_signal') {

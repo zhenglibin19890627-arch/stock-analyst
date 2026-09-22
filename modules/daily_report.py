@@ -1120,10 +1120,14 @@ def _process_single_stock(stock, target_date, force, report_type='daily', skip_c
     # 看板「操作建议」卡零重算读取（portfolio._derive_trader_signal 派生展示）；
     # 只读函数不触碰 generate_advice（B24 红线），失败静默降级不阻塞报告
     # 021BQ：增量键 top_action（操作矩阵当前视角首行动作摘要，旧键零改动）
+    # 021BR t3：传入 price_advice_override——advisor 末尾已先插当日 price_advice=NULL
+    # 报告行，若 trader 摘要再读库会拿到 NULL 价位层 → top_action 恒为纪律线、
+    # 与报告行内 price_advice 止损同日双数值；传入第 2 步已算好的 price_advice
+    # 使 key_factors.trader.top_action 与报告行 price_advice 同源
     try:
         from modules.trader_advisor import generate_trader_advice
 
-        _ta = generate_trader_advice(stock_id)
+        _ta = generate_trader_advice(stock_id, price_advice_override=price_advice)
         if _ta.get('available'):
             key_factors['trader'] = {
                 'stage_name': _ta['stage'].get('name'),

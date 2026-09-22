@@ -1515,6 +1515,12 @@
                                 'border-left:3px solid #c0392b;border-radius:0 6px 6px 0;font-size:12.5px;' +
                                 'color:#7b1c12;line-height:1.7;font-weight:600;">🛑 ' + _taEsc(stt.text) + '</div>';
                     }
+                    // 021BR t3 现价源统一标注：矩阵现价 = raw_kline 日K收盘，与止损触发判定同源
+                    var ps = ops.price_source;
+                    if (ps && ps.desc) {
+                        html += '<div style="font-size:11px;color:var(--text-3,#999);margin-bottom:5px;">现价取数：' + _taEsc(ps.desc) +
+                                ' · 持仓页为盘中快照口径（price_cache），触发判定以日K收盘为准</div>';
+                    }
                     var sigs = ops.signals_today || [];
                     if (sigs.length) {
                         html += '<div style="display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 6px;">';

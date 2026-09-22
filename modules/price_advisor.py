@@ -342,28 +342,35 @@ def _calc_atr(stock_id, period=14):
 
 
 def _read_cost_price(stock_id):
-    """读取持仓成本价，优先 holdings 表，fallback positions 表"""
+    """读取持仓成本价，优先 holdings 表（账户无关聚合），fallback positions 表。
+
+    021BR t3（021W 残留收口）：holdings 改 021BQ 同款 SUM 聚合口径——
+    同股多账户分仓取数量汇总 + 加权平均成本（与 trader_advisor/action_list
+    三处同口径），修复旧「ORDER BY quantity DESC LIMIT 1」单行取最大账户成本
+    导致的止损位混基数（如中免 61.05 单账户 vs 57.53 聚合双数值并存）。
+    """
     try:
         conn = get_connection()
         cursor = conn.cursor()
 
         try:
             cursor.execute(
-                'SELECT cost_price, quantity FROM holdings '
-                "WHERE stock_id = ? AND status = 'active' "
-                'ORDER BY quantity DESC LIMIT 1',
+                'SELECT SUM(quantity) AS total_qty, '
+                'CASE WHEN SUM(quantity) > 0 '
+                'THEN SUM(quantity * cost_price) / SUM(quantity) END AS avg_cost '
+                'FROM holdings WHERE stock_id = ? AND quantity > 0',
                 (stock_id,),
             )
             row = cursor.fetchone()
             if (
                 row
-                and row['quantity']
-                and row['quantity'] > 0
-                and row['cost_price']
-                and row['cost_price'] > 0
+                and row['total_qty']
+                and row['total_qty'] > 0
+                and row['avg_cost']
+                and row['avg_cost'] > 0
             ):
                 conn.close()
-                return row['cost_price']
+                return row['avg_cost']
         except Exception:
             pass
 

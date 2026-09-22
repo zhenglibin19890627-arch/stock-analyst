@@ -12,9 +12,10 @@
   路3 alert_history 当日触发（未读）
   路4 （经路1 的 overview 行透出操盘手阶段/分歧，供卡片副表）
 
-排序约定（"今日应做"，021BQ 起卖侧插入 P2）：
-  P1 评级升降 > P2 卖出信号·持仓（风控优先）> P2 买点信号（共振≥4星优先）
-  > P2 卖出信号·空仓（回避信息垫底）> P3 预警未读 > P4 超时缺报股
+排序约定（"今日应做"，021BR 起持仓纪律置顶）：
+  P1 持仓纪律·止损已触发（纪律无条件最高）> P1 评级升降 > P2 卖出信号·持仓
+  （风控优先）> P2 买点信号（共振≥4星优先）> P2 卖出信号·空仓（回避信息垫底）
+  > P3 预警未读 > P4 超时缺报股
 
 红线合规：
   - R9：只读聚合，不写 daily_reports/评分/评级表，不动任何写入路径；
@@ -104,6 +105,11 @@ def get_action_list():
             r['stock_id']: {'total_qty': int(r['total_qty'] or 0), 'avg_cost': r['avg_cost']}
             for r in cursor.fetchall()
         }
+
+        # 021BR t3 路0：持仓纪律扫描（止损已触发的持仓股——诊断缺陷 F 静默缺口；
+        # 与操盘手矩阵同口径：有效止损 = max(聚合成本×0.92, 最新日报 price_advice
+        # .stop_loss)，现价 = raw_kline 最新日K收盘，触发判定同一价格源）
+        discipline_rows = _scan_stop_discipline(cursor, held_map)
     finally:
         conn.close()
 
@@ -129,11 +135,74 @@ def get_action_list():
         today=today, stocks=stocks, report_rows=report_rows,
         alerts_today=alerts_today, signal_result=signal_result,
         sell_result=sell_result, held_map=held_map,
+        discipline_rows=discipline_rows,
     )
 
 
+def _scan_stop_discipline(cursor, held_map):
+    """持仓纪律扫描（021BR t3 路0，只读）：止损已触发的持仓股逐只列出。
+
+    有效止损 = max(聚合成本×0.92 纪律线, 最新 ok 日报 price_advice.stop_loss)
+    （与 trader_advisor._stop_level 双源取高者同口径）；现价 = raw_kline 最新
+    日K收盘（与操盘手矩阵触发判定同一价格源）。任一数据缺失降级跳过。
+
+    Returns: [{'stock_id','total_qty','avg_cost','close','close_date',
+               'discipline_stop','pa_stop','effective_stop'}]（未触发的股不列出）
+    """
+    rows = []
+    for sid, info in (held_map or {}).items():
+        qty = int((info or {}).get('total_qty') or 0)
+        cost = (info or {}).get('avg_cost')
+        if not qty or not cost:
+            continue
+        try:
+            cursor.execute(
+                'SELECT trade_date, close FROM raw_kline '
+                'WHERE stock_id = ? ORDER BY trade_date DESC LIMIT 1',
+                (sid,),
+            )
+            k = cursor.fetchone()
+            if not k or not k['close']:
+                continue
+            close = float(k['close'])
+            cursor.execute(
+                "SELECT price_advice FROM daily_reports "
+                "WHERE stock_id = ? AND status = 'ok' AND report_type = 'daily' "
+                'ORDER BY report_date DESC LIMIT 1',
+                (sid,),
+            )
+            r = cursor.fetchone()
+            pa_stop = None
+            if r and r['price_advice']:
+                try:
+                    pa = json.loads(r['price_advice'])
+                    if isinstance(pa, dict) and pa.get('stop_loss') is not None:
+                        pa_stop = float(pa['stop_loss'])
+                except (TypeError, ValueError):
+                    pa_stop = None
+            disc = round(float(cost) * 0.92, 2)
+            candidates = [v for v in (disc, pa_stop) if v]
+            if not candidates:
+                continue
+            eff = max(candidates)
+            if close < eff:
+                rows.append({
+                    'stock_id': sid,
+                    'total_qty': qty,
+                    'avg_cost': float(cost),
+                    'close': close,
+                    'close_date': str(k['trade_date']),
+                    'discipline_stop': disc,
+                    'pa_stop': pa_stop,
+                    'effective_stop': round(eff, 2),
+                })
+        except Exception as e:  # noqa: BLE001 —— 单股失败不阻塞其余持仓
+            logger.warning(f'[行动清单] 持仓纪律扫描跳过 stock_id={sid}: {e}')
+    return rows
+
+
 def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
-                      sell_result=None, held_map=None):
+                      sell_result=None, held_map=None, discipline_rows=None):
     """纯逻辑装配今日行动清单（不触库不触网，全部输入由调用方给定）。
 
     Args:
@@ -147,10 +216,12 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
         sell_result: 021BQ scan_watchlist_sell_signals() 返回（None=卖点路降级）
         held_map: 021BQ 持仓标记 {stock_id: {'total_qty', 'avg_cost'}}
             （holdings 账户无关聚合；None=全部视为空仓）
+        discipline_rows: 021BR 持仓纪律扫描行（_scan_stop_discipline 输出；
+            None=未扫描，不产行动项）
 
     Returns: {
         'date', 'items'（排序后行动项）, 'overview'（今日有报告股概览+操盘手摘要）,
-        'failed_stocks'（今日失败股显式列出）, 'stats'（十项计数）
+        'failed_stocks'（今日失败股显式列出）, 'stats'（十一项计数）
     }
     """
     latest_by_stock = {}
@@ -170,6 +241,7 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
         'reported_ok_today': 0,
         'failed_today': 0,
         'missing_today': 0,
+        'stop_discipline_hits': 0,
         'rating_moves': 0,
         'signal_hits': 0,
         'resonance_hits': 0,
@@ -177,6 +249,40 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
         'sell_resonance_hits': 0,
         'unread_alerts_today': 0,
     }
+
+    # ---- 路0：持仓纪律·止损已触发（021BR t3，纪律无条件最高，置顶） ----
+    stock_by_id = {s['stock_id']: s for s in stocks}
+    for d in discipline_rows or []:
+        s = stock_by_id.get(d['stock_id'])
+        if s is None:
+            continue
+        stats['stop_discipline_hits'] += 1
+        stop_parts = []
+        if d.get('discipline_stop') is not None:
+            stop_parts.append(f"成本线 {d['discipline_stop']:.2f}")
+        if d.get('pa_stop'):
+            stop_parts.append(f"建议止损 {d['pa_stop']:.2f}")
+        items.append({
+            'priority': 1,
+            'priority_label': '持仓纪律',
+            'kind': 'stop_discipline',
+            'stock_id': s['stock_id'], 'symbol': s['symbol'], 'name': s['name'],
+            'reason': (
+                f"止损纪律已触发：现价 {d['close']:.2f}（{d['close_date']} 日K收盘）"
+                f"低于有效止损 {d['effective_stop']:.2f}"
+                f"（{' / '.join(stop_parts)} 取高者）"
+                f"，持仓 {d['total_qty']:,} 股——纪律无条件执行，不等评级、不等反抽"
+            ),
+            'detail': {
+                'close': d['close'],
+                'close_date': d['close_date'],
+                'stop_line': d['effective_stop'],
+                'discipline_stop': d['discipline_stop'],
+                'pa_stop': d.get('pa_stop'),
+                'total_qty': d['total_qty'],
+                'avg_cost': d['avg_cost'],
+            },
+        })
 
     # ---- 路1：每日报告（评级升降 / 超时缺报 / 概览+操盘手摘要） ----
     for s in stocks:
@@ -442,13 +548,17 @@ def _rating_move_item(prev_row, latest_row, trader):
 
 
 def _sort_key(item):
-    """"今日应做"排序：P1 评级升降（降级风控优先，再按评分变动幅度）>
+    """"今日应做"排序：P1 持仓纪律·止损已触发（021BR 纪律无条件最高）>
+    P1 评级升降（降级风控优先，再按评分变动幅度）>
     P2 卖出信号·持仓（风控优先）> P2 买点信号（共振≥4星优先）
     > P2 卖出信号·空仓（回避信息垫底）> P3 预警未读 > P4 缺报补数；类内按代码。"""
     p = item['priority']
     detail = item.get('detail') or {}
     if p == 1:
-        dir_rank = 0 if item['kind'] == 'rating_downgrade' else 1
+        if item['kind'] == 'stop_discipline':
+            dir_rank = -1  # 021BR：持仓纪律置顶于一切评级项
+        else:
+            dir_rank = 0 if item['kind'] == 'rating_downgrade' else 1
         chg = detail.get('score_change')
         magnitude = abs(chg) if isinstance(chg, (int, float)) else 0
         return (p, dir_rank, -magnitude, item['symbol'])

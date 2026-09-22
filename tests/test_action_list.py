@@ -489,3 +489,135 @@ def test_get_action_list_sell_chain(db):
     # 无周K → 无周线空头共振，但同日双死叉即 4 星（res_double_dead，不需要周K）
     assert result['stats']['sell_resonance_hits'] == 1
     assert item['detail']['top_stars'] == 4
+
+
+# ---------------- 021BR t3：持仓纪律路0（止损已触发置顶） ----------------
+
+class TestStopDisciplineRoute021BR:
+    """破止损持仓股双侧静默缺口（诊断 A3/缺陷F）：止损已触发 → P1 置顶行动项"""
+
+    def test_discipline_tops_rating_moves(self):
+        """持仓纪律置顶于评级变动（纪律无条件最高）；双源止损文案完整；无裸 <"""
+        stocks = [_stock(1, '600001', '甲'), _stock(2, '600002', '乙')]
+        rows = [
+            _report(2, _TODAY, '建议减仓', rn=1),
+            _report(2, _YDAY, '推荐买入', rn=2),
+        ]
+        disc = [{'stock_id': 1, 'total_qty': 2100, 'avg_cost': 57.53, 'close': 52.27,
+                 'close_date': '2026-09-22', 'discipline_stop': 52.93,
+                 'pa_stop': 56.16, 'effective_stop': 56.16}]
+        result = build_action_list(_TODAY, stocks, rows, [], None,
+                                   held_map={}, discipline_rows=disc)
+        kinds = [it['kind'] for it in result['items']]
+        assert kinds[0] == 'stop_discipline'
+        assert 'rating_downgrade' in kinds
+        item = result['items'][0]
+        assert item['priority'] == 1
+        assert item['priority_label'] == '持仓纪律'
+        assert '止损纪律已触发' in item['reason']
+        assert '现价 52.27（2026-09-22 日K收盘）' in item['reason']
+        assert '低于有效止损 56.16' in item['reason']
+        assert '成本线 52.93' in item['reason'] and '建议止损 56.16' in item['reason']
+        assert '持仓 2,100 股' in item['reason']
+        assert '不等评级' in item['reason']
+        assert item['detail']['stop_line'] == 56.16
+        assert result['stats']['stop_discipline_hits'] == 1
+        assert '<' not in json.dumps(result['items'], ensure_ascii=False)
+
+    def test_discipline_pa_only_and_none_cases(self):
+        """只有价格建议止损（pa_stop 单源）/ 缺 pa_stop（仅成本线）→ 文案降级不报错"""
+        stocks = [_stock(1)]
+        base = {'stock_id': 1, 'total_qty': 1000, 'avg_cost': 10.0, 'close': 8.0,
+                'close_date': '2026-09-22', 'discipline_stop': 9.20}
+        d_pa_only = dict(base, discipline_stop=None, pa_stop=9.8, effective_stop=9.8)
+        r1 = build_action_list(_TODAY, stocks, [], [], None, discipline_rows=[d_pa_only])
+        assert '建议止损 9.80' in r1['items'][0]['reason']
+        assert '成本线' not in r1['items'][0]['reason']
+        d_cost_only = dict(base, pa_stop=None, effective_stop=9.2)
+        r2 = build_action_list(_TODAY, stocks, [], [], None, discipline_rows=[d_cost_only])
+        assert '成本线 9.20' in r2['items'][0]['reason']
+        assert '建议止损' not in r2['items'][0]['reason']
+
+    def test_no_discipline_rows_no_items(self):
+        """未传/空扫描行 → 零持仓纪律项（既有五路行为不变，计数键存在）"""
+        stocks = [_stock(1)]
+        result = build_action_list(_TODAY, stocks, [], [], None)
+        assert not [it for it in result['items'] if it['kind'] == 'stop_discipline']
+        assert result['stats']['stop_discipline_hits'] == 0
+
+    def test_unknown_stock_skipped(self):
+        """扫描行股票不在活跃自选股（已移出自选）→ 跳过不报错"""
+        disc = [{'stock_id': 99, 'total_qty': 100, 'avg_cost': 10.0, 'close': 8.0,
+                 'close_date': '2026-09-22', 'discipline_stop': 9.2,
+                 'pa_stop': None, 'effective_stop': 9.2}]
+        result = build_action_list(_TODAY, [_stock(1)], [], [], None,
+                                   discipline_rows=disc)
+        assert result['stats']['stop_discipline_hits'] == 0
+        assert result['items'] == []
+
+
+def test_get_action_list_stop_discipline_chain(db):
+    """021BR 全链：破止损持仓股 → 持仓纪律行动项置顶（双源止损取高者，现价=日K收盘）"""
+    today = dt.date.today().isoformat()
+    conn = db_manager.get_connection()
+    try:
+        conn.execute(
+            """INSERT INTO daily_reports (report_date, stock_id, stock_code, stock_name,
+               total_score, rating, rating_label, score_change, status, report_type, price_advice)
+               VALUES (?, ?, '600519', '贵州茅台', 55.0, '持有观望', '持有观望', 0.0,
+                       'ok', 'daily', ?)""",
+            (today, db, json.dumps({'stop_loss': 9.8})),
+        )
+        conn.execute(
+            'INSERT INTO holdings (account_id, stock_id, cost_price, quantity) '
+            'VALUES (1, ?, 10.0, 1000)', (db,))
+        # 日K 最新收盘 7.5 低于 max(10×0.92=9.20, 9.8)=9.8 → 触发
+        for i in range(3):
+            d = (dt.date(2026, 9, 10) + dt.timedelta(days=i)).isoformat()
+            conn.execute(
+                'INSERT OR IGNORE INTO raw_kline (stock_id, trade_date, open, close, high, low, volume) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (db, d, 9.0, 9.5 - i, 9.8, 8.6, 1000.0),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = get_action_list()
+    assert result['stats']['stop_discipline_hits'] == 1
+    kinds = [it['kind'] for it in result['items']]
+    assert kinds[0] == 'stop_discipline'
+    item = result['items'][0]
+    assert item['detail']['stop_line'] == 9.8
+    assert item['detail']['pa_stop'] == 9.8
+    assert item['detail']['discipline_stop'] == 9.2
+    assert '现价 7.50' in item['reason']
+    assert '低于有效止损 9.80' in item['reason']
+
+
+def test_get_action_list_no_discipline_when_safe(db):
+    """持仓未破止损（价格远在纪律线上方）→ 零持仓纪律项（既有用例 021BQ 卖链不受影响）"""
+    today = dt.date.today().isoformat()
+    conn = db_manager.get_connection()
+    try:
+        conn.execute(
+            """INSERT INTO daily_reports (report_date, stock_id, stock_code, stock_name,
+               total_score, rating, rating_label, score_change, status, report_type)
+               VALUES (?, ?, '600519', '贵州茅台', 72.0, '推荐买入', '推荐买入', 1.0, 'ok', 'daily')""",
+            (today, db),
+        )
+        conn.execute(
+            'INSERT INTO holdings (account_id, stock_id, cost_price, quantity) '
+            'VALUES (1, ?, 14.0, 800)', (db,))
+        d = (dt.date(2026, 9, 20)).isoformat()
+        conn.execute(
+            'INSERT OR IGNORE INTO raw_kline (stock_id, trade_date, open, close, high, low, volume) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?)',
+            (db, d, 100.0, 101.0, 102.0, 99.0, 1000.0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    result = get_action_list()
+    assert result['stats']['stop_discipline_hits'] == 0
+    assert not [it for it in result['items'] if it['kind'] == 'stop_discipline']

@@ -246,12 +246,16 @@ def _read_signals(cur: Any, stock_id: int, window: int = 3) -> dict[str, Any]:
         return empty
 
 
-def _gather_inputs(stock_id: int) -> dict[str, Any] | None:
+def _gather_inputs(stock_id: int,
+                   price_advice_override: Any = None) -> dict[str, Any] | None:
     """汇总阶段判定所需的全部输入（契约数据 + K线结构 + 趋势 + 评级 + 持仓）。
 
     021BQ：①持仓读数改为账户无关聚合（SUM(quantity) + 加权平均成本）——
     修复多账户同股分仓时单行取（ORDER BY id LIMIT 1）失真的缺口（021W 约定）；
     ②新增短线信号层（买卖双侧离线复算）与价位层（最新日报 price_advice 零重算）。
+    021BR t3：③新增各账户分仓明细（accounts，供矩阵持仓行口径核对）；
+    ④price_advice_override——日报生成链传入当日已算好的价格建议（advisor 先插
+    price_advice=NULL 行的时序缺陷修正），None=走既有最新日报读取路径（向后兼容）。
     """
     from modules.data_adapter import load_stockdata_from_db
     from modules.trend_analyzer import analyze_trends
@@ -286,21 +290,42 @@ def _gather_inputs(stock_id: int) -> dict[str, Any] | None:
             (stock_id,),
         )
         hold = cur.fetchone()
+        # 021BR t3 分仓明细：逐账户行（LEFT JOIN accounts 取名称，账户无关不聚合）
+        cur.execute(
+            'SELECT h.account_id AS account_id, a.name AS account_name, '
+            'h.quantity AS quantity, h.cost_price AS cost_price '
+            'FROM holdings h LEFT JOIN accounts a ON a.id = h.account_id '
+            'WHERE h.stock_id = ? AND h.quantity > 0 ORDER BY h.account_id',
+            (stock_id,),
+        )
+        acct_rows = [dict(r) for r in cur.fetchall()]
         signals = _read_signals(cur, stock_id)
     finally:
         conn.close()
 
     vs = _volume_structure(rows)
     trends = analyze_trends(data)
+    accounts = [
+        {'account_id': int(r['account_id']) if r['account_id'] is not None else None,
+         'name': (r['account_name'] or f"账户{r['account_id']}"),
+         'qty': int(r['quantity'] or 0),
+         'cost': float(r['cost_price']) if r['cost_price'] is not None else None}
+        for r in acct_rows
+    ]
+    if price_advice_override is not None:
+        pa = _load_price_advice(price_advice_override)
+    else:
+        pa = _load_price_advice(rep['price_advice'] if rep else None)
     return {
         'data': data,
         'vs': vs,
         'trends': trends,
         'rating': rep['rating'] if rep else None,
         'total_score': rep['total_score'] if rep else None,
-        'price_advice': _load_price_advice(rep['price_advice'] if rep else None),
+        'price_advice': pa,
         'holding_qty': int(hold['total_qty'] or 0) if hold else 0,
         'cost_price': hold['avg_cost'] if hold else None,
+        'accounts': accounts,
         'signals': signals,
         # 021BR：近 60 根 (日期, 收盘) 旧→新——止损/破位触发日期回填用
         'kline_tail': [(str(r['trade_date']), float(r['close'])) for r in reversed(rows)],
@@ -784,9 +809,10 @@ def build_operations_matrix(
 
     Returns: {
         'view': 'held'|'empty',
-        'holding': {qty, cost, pnl_pct},
+        'holding': {qty, cost, pnl_pct, accounts:[{account_id,name,qty,cost}]},
         'status': None | {kind, close, stop_line, trigger_date, ma20_broken, text},
         'hierarchy_note': '纪律无条件执行 · 减仓听操盘手 · 加仓看评级',
+        'price_source': {close, date, source, desc},   # 现价源（与触发判定同源）
         'signals_today': [{signal,label,side,trigger_date}],
         'linkage': [信号×阶段联动解读...],
         'held_rows': [{action,trigger,level,level_value,source,note,layer,status}...],
@@ -847,6 +873,16 @@ def build_operations_matrix(
             'ma20_broken': True,
             'text': txt,
         }
+
+    # 021BR t3 现价源统一标注：矩阵「现价」= raw_kline 最新日K收盘，
+    # 与止损/破位触发判定同一价格源（持仓页盘中快照为另一口径，见持仓页说明）
+    close_date = kline_tail[-1][0] if kline_tail else None
+    price_source: dict[str, Any] = {
+        'close': round(close, 2),
+        'date': close_date,
+        'source': 'raw_kline 日K收盘',
+        'desc': f'{close:.2f}（{close_date} 日K收盘）' if close_date else f'{close:.2f}（日K收盘）',
+    }
 
     signals_today = (
         [{'signal': h['signal'], 'label': h['label'], 'side': 'buy',
@@ -939,9 +975,23 @@ def build_operations_matrix(
             source='技术信号', layer=LAYER_TACTICAL))
     if cost and qty:
         pnl = (close - cost) / cost * 100
+        row_txt = (f'持仓 {qty:,} 股 · 成本 {cost:.2f} · '
+                   f'浮动{"盈" if pnl >= 0 else "亏"} {pnl:+.1f}%')
+        # 021BR t3 分仓明细（口径核对）：多账户分仓时逐账户摆出数量与成本，
+        # 成本差异大时提示止损线以各账户实际成本为准（用户可对账券商 App）
+        accts = list((holding or {}).get('accounts') or [])
+        if len(accts) >= 2:
+            parts = ' + '.join(
+                f"{a.get('name') or '账户'} {int(a.get('qty') or 0):,}@{(a.get('cost') or 0):.2f}"
+                for a in accts)
+            row_txt += f'（{parts}，成本为加权摊薄口径）'
+            acct_costs = [float(a['cost']) for a in accts if a.get('cost')]
+            if acct_costs and cost and (max(acct_costs) - min(acct_costs)) / cost > 0.05:
+                row_txt += '——分仓成本差异大，止损线以各账户实际成本为准'
+        row_txt += f'——现价 {close:.2f} 为{"「" + str(close_date) + "」" if close_date else ""}日K收盘（触发判定同源）'
+        row_txt += f'——{HIERARCHY_NOTE}'
         held.append(_row(
-            '仓位纪律', f'持仓 {qty:,} 股 · 成本 {cost:.2f} · '
-            f'浮动{"盈" if pnl >= 0 else "亏"} {pnl:+.1f}%——{HIERARCHY_NOTE}',
+            '仓位纪律', row_txt,
             source='分域层级', layer=LAYER_STRATEGIC))
 
     # ---------- 空仓视角：回避/观望 → 买入触发/关注 → 等待信号（买入域评级门控不变） ----------
@@ -1016,9 +1066,11 @@ def build_operations_matrix(
     return {
         'view': view,
         'holding': {'qty': qty, 'cost': cost,
-                    'pnl_pct': round((close - cost) / cost * 100, 1) if cost and qty else None},
+                    'pnl_pct': round((close - cost) / cost * 100, 1) if cost and qty else None,
+                    'accounts': list((holding or {}).get('accounts') or [])},
         'status': status_line,
         'hierarchy_note': HIERARCHY_NOTE,
+        'price_source': price_source,
         'signals_today': signals_today,
         'linkage': signal_stage_linkage(stage['code'], rating, signals,
                                         close=close, stop_level=stop),
@@ -1033,10 +1085,16 @@ def build_operations_matrix(
 # ================================================================
 
 
-def generate_trader_advice(stock_id: int) -> dict[str, Any]:
-    """操盘手建议主入口：阶段 + 主力 + 对策 + 分歧（只读，失败返回 available=False）。"""
+def generate_trader_advice(stock_id: int,
+                           price_advice_override: Any = None) -> dict[str, Any]:
+    """操盘手建议主入口：阶段 + 主力 + 对策 + 分歧（只读，失败返回 available=False）。
+
+    021BR t3：price_advice_override——日报生成链（daily_report）在生成当日价格建议
+    后传入，避免 trader 摘要读到 advisor 刚插入的 price_advice=NULL 行导致价位层
+    降级（时序缺陷修正）；None=读最新日报已存 price_advice（既有路径，向后兼容）。
+    """
     try:
-        inputs = _gather_inputs(stock_id)
+        inputs = _gather_inputs(stock_id, price_advice_override)
         if inputs is None:
             return {'available': False, 'reason': '数据不足，请先采集数据'}
 
@@ -1055,7 +1113,8 @@ def generate_trader_advice(stock_id: int) -> dict[str, Any]:
         try:
             operations = build_operations_matrix(
                 data, stage, inputs['rating'],
-                {'qty': inputs['holding_qty'], 'cost': inputs['cost_price']},
+                {'qty': inputs['holding_qty'], 'cost': inputs['cost_price'],
+                 'accounts': inputs.get('accounts')},
                 float(data.close), inputs.get('signals'),
                 inputs.get('price_advice'), vs=inputs.get('vs'),
                 kline_tail=inputs.get('kline_tail'),

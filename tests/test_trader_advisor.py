@@ -824,3 +824,80 @@ class TestStageLeadDisagreement021BR:
         assert '评级尚未跟上' in text
         assert '加仓继续看评级' in text
         assert any('纪律优先' in w for w in pb['watch_signals'])
+
+
+class TestT3Consistency021BR:
+    """021BR t3：分仓明细口径可核对 + 现价源统一 + price_advice_override 时序"""
+
+    def test_multi_account_breakdown_row(self):
+        """矩阵持仓行附各账户分仓明细（用户可对账券商 App）+ 成本差异大提示；
+        operations.holding.accounts 逐账户透出"""
+        ops = build_operations_matrix(
+            _MkData(ma20=20.0), _STAGE_OK, '持有观望',
+            {'qty': 1000, 'cost': 14.0,
+             'accounts': [{'account_id': 1, 'name': '账户A', 'qty': 600, 'cost': 10.0},
+                          {'account_id': 2, 'name': '账户B', 'qty': 400, 'cost': 20.0}]},
+            15.0, _mk_signals(), _PA)
+        row = [r for r in ops['held_rows'] if r['action'] == '仓位纪律'][0]
+        assert '账户A 600@10.00 + 账户B 400@20.00' in row['trigger']
+        assert '成本为加权摊薄口径' in row['trigger']
+        assert '止损线以各账户实际成本为准' in row['trigger']
+        assert len(ops['holding']['accounts']) == 2
+
+    def test_single_account_no_breakdown(self):
+        """单账户（或无 accounts 输入）→ 不加分仓明细与差异提示（口径提示只在多仓时出现）"""
+        ops = build_operations_matrix(
+            _MkData(), _STAGE_OK, '持有观望',
+            {'qty': 1000, 'cost': 20.0,
+             'accounts': [{'account_id': 1, 'name': '账户A', 'qty': 1000, 'cost': 20.0}]},
+            21.0, _mk_signals(), _PA)
+        row = [r for r in ops['held_rows'] if r['action'] == '仓位纪律'][0]
+        assert '成本为加权摊薄口径' not in row['trigger']
+        assert '止损线以各账户实际成本为准' not in row['trigger']
+
+    def test_price_source_same_as_trigger(self):
+        """现价源标注与止损触发判定同一价格源（close 一致 + 日期=最新K线日）"""
+        tail = [('2026-09-18', 55.9), ('2026-09-21', 53.1), ('2026-09-22', 52.27)]
+        ops = build_operations_matrix(
+            _MkData(ma20=52.78), _STAGE_DECLINE, '持有观望',
+            {'qty': 2100, 'cost': 57.53}, 52.27,
+            _mk_signals(upto='2026-09-22'), {'stop_loss': 56.16}, kline_tail=tail)
+        ps = ops['price_source']
+        assert ps['close'] == 52.27
+        assert ps['date'] == '2026-09-22'
+        assert '日K收盘' in ps['desc']
+        st = ops['status']
+        assert st and st['close'] == ps['close']  # 触发判定与展示现价同源
+        row = [r for r in ops['held_rows'] if r['action'] == '仓位纪律'][0]
+        assert '触发判定同源' in row['trigger']
+
+    def test_price_advice_override_threading(self, client):
+        """端到端：日报 price_advice=NULL 行不再拖累价位层——override 传入即生效
+        （时序缺陷修正：key_factors.trader.top_action 与报告行 price_advice 同源）"""
+        sid = client._stock_id
+        _seed_kline(client, sid, [10 + i * 0.05 for i in range(60)])
+        _seed_rating(client, sid, '持有观望', 57.0)  # price_advice 列 NULL
+        conn = db_manager.get_connection()
+        try:
+            conn.execute("INSERT INTO accounts (name) VALUES ('账户A')")
+            conn.execute("INSERT INTO accounts (name) VALUES ('账户B')")
+            conn.execute(
+                'INSERT INTO holdings (account_id, stock_id, cost_price, quantity) '
+                'VALUES (1, ?, 10.0, 600)', (sid,))
+            conn.execute(
+                'INSERT INTO holdings (account_id, stock_id, cost_price, quantity) '
+                'VALUES (2, ?, 20.0, 400)', (sid,))
+            conn.commit()
+        finally:
+            conn.close()
+        # 无 override（旧路径）：读库 price_advice=NULL → 止损仅纪律线 12.88
+        r0 = generate_trader_advice(sid)
+        stop0 = [r for r in r0['operations']['held_rows'] if r['action'] == '止损'][0]
+        assert stop0['level_value'] == 12.88
+        # 有 override：当日已算好的价格建议止损 13.5 → 双源取高者 13.5
+        r1 = generate_trader_advice(sid, price_advice_override={'stop_loss': 13.5})
+        stop1 = [r for r in r1['operations']['held_rows'] if r['action'] == '止损'][0]
+        assert stop1['level_value'] == 13.5
+        assert stop1['source'] == '纪律/价格建议取高者'
+        # 分仓明细端到端透出
+        assert len(r1['operations']['holding']['accounts']) == 2
