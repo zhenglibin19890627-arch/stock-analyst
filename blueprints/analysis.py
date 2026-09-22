@@ -349,6 +349,26 @@ def _enrich_data_warnings(result, stock_id):
         logging.getLogger(__name__).warning(f'数据完整度行补充失败 stock_id={stock_id}: {e}')
 
 
+def _attach_score_tier_note(result):
+    """021BS P1-1：报告响应统一附加「分数×档位失配」持续注记（外层调和，B24 合规）。
+
+    评级本身不改（仍由 advisor.generate_advice 权威产出）；仅当总分所处档位
+    区间与评级不一致（021AG 迟滞保持态/存量报告旧口径）时附说明，前端评分卡
+    据此展示口径横幅。判定面与报告落库注记同源（rating_hysteresis 纯函数）。
+    失败静默——注记缺失不阻塞报告主流程。
+    """
+    try:
+        from modules.rating_hysteresis import score_tier_mismatch_note
+
+        result['score_tier_note'] = score_tier_mismatch_note(
+            result.get('total_score'),
+            result.get('rating'),
+            result.get('market') or 'a_stock',
+        ) or None
+    except Exception as e:  # noqa: BLE001 —— 注记属增强展示，失败不阻塞
+        logging.getLogger(__name__).warning(f'失配注记计算失败 stock_id={result.get("stock_id")}: {e}')
+
+
 @bp.route('/api/stocks/<int:stock_id>/analyze', methods=['POST'])
 def api_analyze_stock(stock_id):
     """执行四维分析引擎评分（统一走 advisor.generate_advice 入口，与每日报告一致）"""
@@ -370,6 +390,8 @@ def api_analyze_stock(stock_id):
             from modules.advisor import _build_markdown_single
 
             result['advice_detail'] = _build_markdown_single(result, result.get('previous_score'))
+            # 021BS P1-1：结构化失配注记（与 markdown 行同源）
+            _attach_score_tier_note(result)
         return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'message': f'分析失败: {e!s}'}), 500
@@ -445,6 +467,8 @@ def _enrich_advice_result(stock_id, result):
     _attach_scoring_subitems(stock_id, result)
     # 020R-54：行业资金背景
     result['industry_flow_bg'] = _industry_flow_bg_for_stock(stock_id)
+    # 021BS P1-1：结构化失配注记（与 markdown 行同源；实时路径评级为最终评级）
+    _attach_score_tier_note(result)
     # 2026-09-09：上一轮评分快照（总分+四维分对比展示）——实时路径当前报告日期=今天
     result['prev_report'] = _prev_report_snapshot(
         stock_id, datetime.now(_CN_TZ).strftime('%Y-%m-%d')
@@ -596,8 +620,14 @@ def api_get_report_latest(stock_id):
         pass
 
     # 从 key_factors 构建 dimensions 结构（兼容 renderFullReport）
+    # 021BS：只取四维规范键且值须为 dict——key_factors 亦可携带非维度注记键
+    # （trader 摘要 / score_tier_note），混入会使 dim_data.get 崩溃（字符串值）
+    # 或伪造成 0 分「维度」污染最强/最弱维度（字典值）
     dimensions = {}
-    for dim_key, dim_data in key_factors.items():
+    for dim_key in ('kline', 'fundamental', 'capital_flow', 'news'):
+        dim_data = key_factors.get(dim_key)
+        if not isinstance(dim_data, dict):
+            continue
         dimensions[dim_key] = {
             'status': 'ok',
             'score': dim_data.get('score', 0),
@@ -694,6 +724,21 @@ def api_get_report_latest(stock_id):
     except Exception as _e:
         logging.getLogger(__name__).warning(f'report-latest price_advice 实时计算失败: {_e}')
 
+    # 021BS P1-1：分数×档位失配持续注记——存量报告优先读落库注记
+    # （key_factors.score_tier_note），无则按同源纯函数现算补齐（读取路径
+    # 消费方门控，B24 合规；使 021BS 修复前生成的存量报告同样带说明）
+    _stored_note = (
+        key_factors.get('score_tier_note') if isinstance(key_factors, dict) else None
+    )
+    _note_src = {
+        'stock_id': stock_id,
+        'total_score': row['total_score'],
+        'rating': row['rating'],
+        'market': row['market'],
+    }
+    _attach_score_tier_note(_note_src)
+    score_tier_note = _stored_note or _note_src.get('score_tier_note')
+
     result = {
         'success': True,
         'stock_id': stock_id,
@@ -706,6 +751,8 @@ def api_get_report_latest(stock_id):
         'rating': row['rating'],
         'rating_label': row['rating_label'],
         'rating_date': latest_date,
+        # 021BS P1-1：失配口径注记（一致/无法判定为 None）
+        'score_tier_note': score_tier_note,
         # 评分变动
         'prev_score': row['prev_score'],
         'score_change': row['score_change'],

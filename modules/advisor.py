@@ -534,6 +534,22 @@ def _build_key_factors(advice_result):
                 'top_factors': _pick_top_factors(dim_key, d.get('factors', {})),
             }
 
+    # 021BS P1-1：分数×档位失配持续标注（结构化面）——与 markdown 行同源判定，
+    # 迟滞保持态/存量口径下分数区间与评级不一致时随每次报告落库（非仅压制当日）；
+    # 只增注不改评级（B24 合规）。消费方按需透出，未知键应忽略。
+    try:
+        from modules.rating_hysteresis import score_tier_mismatch_note
+
+        note = score_tier_mismatch_note(
+            advice_result.get('total_score'),
+            advice_result.get('rating'),
+            advice_result.get('market') or 'a_stock',
+        )
+        if note:
+            factors['score_tier_note'] = note
+    except Exception as e:  # noqa: BLE001 —— 注记属增强展示，失败不阻塞
+        logger.debug(f'[021BS] score_tier_note 构建失败: {e}')
+
     return factors
 
 
@@ -571,6 +587,22 @@ def _build_markdown_single(advice_result, prev_score):
         from modules.rating_hysteresis import hysteresis_note
 
         md += f'- **{hysteresis_note(hyst)}**\n'
+    else:
+        # 021BS P1-1：迟滞保持态/存量口径的持续标注——按「分数×档位失配」判定
+        # （非仅压制当日：刷新路径 md_source 不含 rating_hysteresis，压制说明会丢，
+        # 失配注记以共享纯函数同源判定兜底）；只增注不改评级（B24 合规）。
+        try:
+            from modules.rating_hysteresis import score_tier_mismatch_note
+
+            note = score_tier_mismatch_note(
+                advice_result.get('total_score'),
+                advice_result.get('rating'),
+                advice_result.get('market') or 'a_stock',
+            )
+            if note:
+                md += f'- **{note}**\n'
+        except Exception as e:  # noqa: BLE001 —— 注记属增强展示，失败不阻塞
+            logger.debug(f'[021BS] score_tier_note 标注失败: {e}')
 
     # 四维评分
     dims = advice_result.get('dimensions', {})

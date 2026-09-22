@@ -113,3 +113,66 @@ def hysteresis_note(info) -> str:
         f"但未达 ±{info['margin']:g} 分迟滞带，维持「{info['kept']}」"
         f"（原始映射：{info['raw']}）——评级仅在分数坚决越界时换挡，避免边界抖动"
     )
+
+
+def _tier_for_score(score: float, thresholds: dict) -> str | None:
+    """分数 → 档位区间判定（与 _map_rating 同源阈值表，仅区间归属判定）。
+
+    命中区间 [min, max] 返回档位名；不在任何区间（异常分数）返回 None。
+    """
+    for name, t in thresholds.items():
+        try:
+            if float(t['min']) <= score <= float(t['max']):
+                return name
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
+def score_tier_mismatch_note(score, rating, market='a_stock', margin=None) -> str:
+    """分数×档位失配的持续口径标注（021BS P1-1：迟滞保持态外层调和，B24 合规）。
+
+    背景（021BS 第一轮审计 P1-1，300229 拓尔思）：021AG 迟滞的 markdown 说明
+    只在「压制当日」生成；其后分数回到另一档区间但未越出迟滞带（保持态），
+    或存量报告为旧口径时，报告对「分数区间 × 评级」失配无任何持续说明，
+    用户按分数区间理解会得到另一档指令。
+
+    本函数按「总分所处档位区间 × 当前评级」判定失配并生成说明文字：
+      - 判定与 apply_hysteresis 同源（get_effective_thresholds：A股 80/65/50/30，
+        港股 021R overrides 热加载），不重实现边界映射（R7/D4 合规）；
+      - 只产出说明、不改评级——评级仍由 generate_advice 权威产出（B24 冻结），
+        消费方为报告组装/展示层（advisor 因子构建器 / 读取路径消费方门控）。
+
+    Returns:
+        str: 失配时的人类可读说明；一致或无法判定（分数/评级缺失、档位未知、
+        分数落在任何区间之外）返回 ''。文案不含裸字符 '<'（021BN 教训）。
+    """
+    if margin is None:
+        margin = RATING_HYSTERESIS_MARGIN
+    if score is None or not rating:
+        return ''
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        return ''
+    thresholds = get_effective_thresholds(market)
+    expected = _tier_for_score(score, thresholds)
+    if expected is None or expected not in thresholds or rating not in thresholds:
+        return ''
+    if expected == rating:
+        return ''
+    band = thresholds[expected]
+    cur = thresholds[rating]
+    # 换挡触发线：升档=目标档 min+margin；降档=原档 min−margin（与 apply_hysteresis 同式）
+    if float(band['min']) > float(cur['min']):
+        switch_line = float(band['min']) + float(margin)
+        switch_txt = f'分数持续站上 {switch_line:g} 分后，评级将在后续报告恢复「{expected}」'
+    else:
+        switch_line = float(cur['min']) - float(margin)
+        switch_txt = f'分数持续跌破 {switch_line:g} 分后，评级将在后续报告换至「{expected}」'
+    return (
+        f'评级口径说明：总分 {score:.1f} 位于「{expected}」档分数区间'
+        f'（{float(band["min"]):g}–{float(band["max"]):g} 分），当前评级「{rating}」与其不一致——'
+        f'通常为评级迟滞保持态（021AG）：评级仅在分数坚决越过档位边界'
+        f'（±{float(margin):g} 分迟滞带）时才换挡，避免边界抖动；{switch_txt}'
+    )

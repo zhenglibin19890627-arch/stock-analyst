@@ -423,8 +423,36 @@ def _rating_context_suffix(detail):
     return ''
 
 
+def _fmt_mmdd(date_str):
+    """'2026-09-21'（容忍带时间后缀）→ '09-21'；解析失败返回 None。"""
+    if not date_str:
+        return None
+    parts = str(date_str)[:10].split('-')
+    if len(parts) != 3:
+        return None
+    return f'{parts[1]}-{parts[2]}'
+
+
+def _data_cutoff_note(date_str, label='数据', extra=''):
+    """数据时点标注（021BS P2②）：统一「（数据截至 MM-DD 收盘）」尾部注记。
+
+    021BS 审计 F04：预警判定面与报告展示面的数据日期可能相差一个交易日
+    （报告在扫描后被重算/数据未更新），「预警说卖出、报告分数已另一口径」
+    式时点差困惑——消息必须自带数据时点。date_str 为该类型判定的数据截止日
+    （rating_date / analysis_date / 最新交易日 / kline_upto）；解析失败返回
+    ''（不阻塞消息），文案不含裸 '<'（021BN 教训）。
+    """
+    mmdd = _fmt_mmdd(date_str)
+    if not mmdd:
+        return ''
+    inner = f'{label}截至 {mmdd} 收盘'
+    if extra:
+        inner += f'，{extra}'
+    return f'（{inner}）'
+
+
 def _format_message(alert_type, stock_info, detail):
-    """构建人类可读的预警消息"""
+    """构建人类可读的预警消息（021BS P2②：各类型尾部自带数据时点）"""
     name = stock_info.get('name', '')
     symbol = stock_info.get('symbol', '')
 
@@ -435,17 +463,20 @@ def _format_message(alert_type, stock_info, detail):
             f'{name}({symbol}) 评级{arrow}：'
             f'{detail["old_rating"]} → {detail["new_rating"]}，'
             f'评分 {detail["old_score"]:.1f} → {detail["new_score"]:.1f}'
+            f'{_data_cutoff_note(detail.get("latest_date"), label="评级数据")}'
         )
     if alert_type == 'score_below':
         return (
             f'{name}({symbol}) 评分跌破阈值：'
             f'当前 {detail["score"]:.1f} 分 < 阈值 {detail["threshold"]} 分'
+            f'{_data_cutoff_note(detail.get("analysis_date"))}'
         )
     if alert_type == 'capital_outflow':
         return (
             f'{name}({symbol}) 主力资金连续{detail["consecutive_days"]}日净流出，'
             f'累计流出 {detail["total_outflow"]:.2f} 万元'
             f'（基于最近{detail["consecutive_days"]}个有数据交易日）'
+            f'{_data_cutoff_note(detail.get("latest_date"))}'
         )
     if alert_type == 'tech_signal':
         # 021BN 教训：会被前端渲染的文案禁止裸 '<' 字符（本分支全部用文字描述）
@@ -454,7 +485,8 @@ def _format_message(alert_type, stock_info, detail):
         if detail.get('resonances'):
             res_str = '、'.join(f"{r['label']}（{r['stars']}星）" for r in detail['resonances'])
             msg += f'；共振组合：{res_str}'
-        msg += f'（基于截至{detail["kline_upto"]}的已采集K线离线复算）'
+        msg += _data_cutoff_note(
+            detail.get('kline_upto'), extra='基于已采集K线离线复算')
         msg += _rating_context_suffix(detail)
         return msg
     if alert_type == 'sell_signal':
@@ -464,7 +496,8 @@ def _format_message(alert_type, stock_info, detail):
         if detail.get('resonances'):
             res_str = '、'.join(f"{r['label']}（{r['stars']}星）" for r in detail['resonances'])
             msg += f'；共振组合：{res_str}'
-        msg += f'（基于截至{detail["kline_upto"]}的已采集K线离线复算）'
+        msg += _data_cutoff_note(
+            detail.get('kline_upto'), extra='基于已采集K线离线复算')
         msg += _rating_context_suffix(detail)
         return msg
     return f'{name}({symbol}) 触发 {alert_type} 预警'

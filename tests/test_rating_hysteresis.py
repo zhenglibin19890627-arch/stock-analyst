@@ -133,3 +133,60 @@ class TestThresholdsSource:
 
         th = get_effective_thresholds('hk_stock')
         assert th['推荐买入']['min'] == 70  # 021R override
+
+
+class TestScoreTierMismatchNote:
+    """021BS P1-1：分数×档位失配持续口径标注（合成迟滞保持态场景）。
+
+    锁定契约：失配 → 非空说明（含两档位名/迟滞口径/换挡触发线，无裸 '<'）；
+    一致或无法判定 → ''。与 apply_hysteresis 同源阈值，只产说明不改评级。
+    """
+
+    def _note(self, score, rating, market='a_stock'):
+        from modules.rating_hysteresis import score_tier_mismatch_note
+
+        return score_tier_mismatch_note(score, rating, market)
+
+    def test_keep_state_mismatch_produces_note(self):
+        # 021BS P1-1 实测形态（300229 拓尔思）：52.0 在持有观望区间，评级保持建议减仓
+        note = self._note(52.0, '建议减仓')
+        assert note
+        assert '持有观望' in note and '建议减仓' in note
+        assert '迟滞' in note
+        assert '52.0' in note
+        assert '<' not in note  # 021BN 教训：渲染文案禁止裸 '<'
+
+    def test_upgrade_switch_line_is_boundary_plus_margin(self):
+        # 50 + 3 = 53：说明必须给出与 apply_hysteresis 同式的升档触发线
+        note = self._note(52.0, '建议减仓')
+        assert '53' in note
+
+    def test_downgrade_mismatch_produces_note(self):
+        # 63.5 在建议减仓区间之外（观望带内）但评级已是更低的建议减仓 → 反向失配
+        note = self._note(46.0, '持有观望')
+        assert note and '持有观望' in note and '建议减仓' in note
+        # 降档触发线 = 原档(持有观望) min − margin = 50 − 3 = 47
+        assert '47' in note
+
+    def test_consistent_returns_empty(self):
+        assert self._note(58.0, '持有观望') == ''
+        assert self._note(70.0, '推荐买入') == ''
+        assert self._note(45.0, '建议减仓') == ''
+
+    def test_hk_market_uses_overrides(self):
+        # 港股 021R override：68 分属持有观望（≤69）、70 分属推荐买入（≥70）
+        assert self._note(68.0, '推荐买入', 'hk_stock') != ''
+        assert self._note(68.0, '持有观望', 'hk_stock') == ''
+        assert self._note(72.0, '持有观望', 'hk_stock') != ''
+
+    def test_unjudgeable_returns_empty(self):
+        assert self._note(None, '持有观望') == ''
+        assert self._note(52.0, '') == ''
+        assert self._note(52.0, None) == ''
+        assert self._note('abc', '持有观望') == ''
+        # 未知评级档位
+        assert self._note(52.0, 'B+') == ''
+
+    def test_band_outside_all_tiers_returns_empty(self):
+        assert self._note(150.0, '持有观望') == ''
+        assert self._note(-5.0, '建议减仓') == ''

@@ -75,6 +75,26 @@ def _derive_trader_signal(kf_json):
         return None
 
 
+def _derive_score_tier_note(row):
+    """021BS P1-1：看板评分卡透出「分数×档位失配」持续注记（读取面调和，B24 合规）。
+
+    021BS 修复前生成的存量报告未落 key_factors.score_tier_note，由本读取面按
+    同源纯函数（rating_hysteresis.score_tier_mismatch_note）现算补齐，使看板
+    评分卡与报告页的评级口径说明同源；评级本身零改动（不动行动清单/看板的
+    评级展示，只加说明）。一致或无法判定返回 None。
+    """
+    try:
+        if row.get('total_score') is None or not row.get('rating'):
+            return None
+        from modules.rating_hysteresis import score_tier_mismatch_note
+
+        return score_tier_mismatch_note(
+            row['total_score'], row['rating'], row.get('market') or 'a_stock'
+        ) or None
+    except Exception:  # noqa: BLE001 —— 注记属增强展示，失败不阻塞主卡片
+        return None
+
+
 @bp.route('/api/portfolio/watchlist-scores')
 def api_portfolio_watchlist_scores():
     """自选股批量评分看板数据（单次四表 JOIN，零引擎侵入）。
@@ -221,6 +241,8 @@ def api_portfolio_watchlist_scores():
                 'obos_signal': _derive_obos_signal(r.get('key_factors')),
                 # 2026-09-18：操盘手阶段×评级分歧标记（日报预计算，零重算）
                 'trader_signal': _derive_trader_signal(r.get('key_factors')),
+                # 021BS P1-1：分数×档位失配口径注记（读取面现算，存量报告同覆盖）
+                'score_tier_note': _derive_score_tier_note(r),
                 # 021BM：价格建议区间（最新报告已存 JSON，零重算；建议卡买入侧展示）
                 'pa_zone': _parse_pa_zone(r.get('price_advice')),
             }

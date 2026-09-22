@@ -1014,6 +1014,15 @@
         if (adviseData.action_advice && adviseData.action_advice !== adviseData.rating) {
             html += '<div class="action-advice">建议：' + adviseData.action_advice + '</div>';
         }
+        // 021BS P1-1：分数×档位失配口径注记（迟滞保持态说明；后端同源纯函数产出，
+        // 存量报告由读取路径现算补齐）。渲染前转义防守（021BN 教训：禁裸 '<'）。
+        if (adviseData.score_tier_note) {
+            var _stn = String(adviseData.score_tier_note)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            html += '<div style="background:#fff8e1;border:1px solid #ffd54f;border-radius:6px;' +
+                    'padding:7px 10px;margin-top:8px;font-size:12.5px;color:#795548;line-height:1.6;">' +
+                    '⚖️ ' + _stn + '</div>';
+        }
         html += '<div class="rating-time">报告生成于：' + _fmtGenTime(adviseData.generated_at) + '</div>';
         if (adviseData.latest_close != null) {
             html += '<div class="rating-time">最新收盘：' + adviseData.latest_close.toFixed(2) +
@@ -1114,6 +1123,13 @@
                 '<span style="font-size:12px;color:var(--text-3,#888);font-weight:normal;margin-left:8px;">' +
                 '短期(日线) · 中期(周线) · 长期(月线)｜红涨绿跌，黄为震荡</span></div>';
         html += '<div id="trendCompassBody" style="color:var(--text-3,#999);font-size:13px;">加载中...</div>';
+        // 021BS P2①：三层口径固定脚注——不同源属正常分层，操作结论以「④ 操作矩阵」为准
+        html += '<div style="margin-top:8px;padding:6px 10px;background:var(--bg-light,#f5f7fa);' +
+                'border-left:3px solid #bbb;font-size:12px;color:var(--text-3,#888);line-height:1.6;">' +
+                '口径说明：本页「技术面子分」为评分动量口径、「趋势罗盘」为独立三周期方向判定' +
+                '（月2:周1.5:日1 加权）、「操盘手阶段」为量价结构+信号判定——三者不同源、' +
+                '方向可以并存，属正常分层而非矛盾；仓位与操作结论请以下方「🎯 操盘手建议」' +
+                '中「④ 操作矩阵」的分域结论为准。</div>';
         html += '</div>';
 
         // 3.6 操盘手建议（2026-09-18）：阶段/主力/对策（异步填充，只读端点）

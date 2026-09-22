@@ -585,6 +585,81 @@ class TestBuildMarkdownSingle:
         assert '较前次报告 ↓ 5.0' in md
         assert '较昨日' not in md
 
+    # --------------------------------------------------------
+    # 021BS P1-1：分数×档位失配持续标注（迟滞保持态外层调和，B24 合规）
+    # --------------------------------------------------------
+
+    def test_mismatch_without_hyst_info_gets_persistent_note(self):
+        """刷新路径形态（021BS P1-1 实测根因）：md_source 无 rating_hysteresis 时，
+        失配仍必须带口径说明——拓尔思形态：52.0 属持有观望区间、评级保持建议减仓"""
+        advice = self._advice()
+        advice['total_score'] = 52.0
+        advice['rating'] = '建议减仓'
+        advice['market'] = 'a_stock'
+        md = _build_markdown_single(advice, prev_score=None)
+        assert '评级口径说明' in md
+        assert '迟滞' in md
+        assert '持有观望' in md  # 说明须点名分数所处档位
+        assert '<' not in md  # 021BN 教训：渲染文案禁止裸 '<'
+
+    def test_mismatch_with_hyst_info_no_duplicate_note(self):
+        """压制当日（每日批次路径）：已有迟滞说明时不再重复失配注记"""
+        advice = self._advice()
+        advice['total_score'] = 52.0
+        advice['rating'] = '建议减仓'
+        advice['market'] = 'a_stock'
+        advice['rating_hysteresis'] = {
+            'kept': '建议减仓', 'raw': '持有观望', 'score': 52.0,
+            'boundary': 50, 'margin': 3, 'direction': 'upgrade',
+        }
+        md = _build_markdown_single(advice, prev_score=None)
+        assert '评级迟滞' in md
+        assert '评级口径说明' not in md  # 压制当日已有迟滞说明，不重复失配注记
+
+    def test_consistent_no_note(self):
+        """分数与评级同档：不附加口径说明"""
+        advice = self._advice()  # 47.5 × 建议减仓（30-49）一致
+        md = _build_markdown_single(advice, prev_score=None)
+        assert '评级口径说明' not in md
+
+
+class TestBuildKeyFactorsScoreTierNote:
+    """021BS P1-1：key_factors 结构化失配注记（随每次报告落库）"""
+
+    @staticmethod
+    def _advice(score, rating, market='a_stock'):
+        return {
+            'market': market,
+            'total_score': score,
+            'rating': rating,
+            'dimensions': {
+                'kline': {'status': 'ok', 'score': 50.0, 'weight': 0.2715, 'factors': {}},
+            },
+        }
+
+    def test_mismatch_note_present(self):
+        from modules.advisor import _build_key_factors
+
+        kf = _build_key_factors(self._advice(52.0, '建议减仓'))
+        assert 'score_tier_note' in kf
+        assert '持有观望' in kf['score_tier_note']
+        assert '<' not in kf['score_tier_note']
+
+    def test_consistent_note_absent(self):
+        from modules.advisor import _build_key_factors
+
+        kf = _build_key_factors(self._advice(47.5, '建议减仓'))
+        assert 'score_tier_note' not in kf
+
+    def test_four_dims_keys_shape_preserved(self):
+        """新增注记键不得破坏既有四维结构（消费方按需透出）"""
+        from modules.advisor import _build_key_factors
+
+        kf = _build_key_factors(self._advice(52.0, '建议减仓'))
+        assert kf['kline']['score'] == 50.0
+        assert kf['kline']['weight'] == 0.2715
+        assert kf['kline']['top_factors'] == {}
+
 
 # ============================================================
 # 八、基本面趋势判定 _build_fund_trend（021BN 诚实化）
