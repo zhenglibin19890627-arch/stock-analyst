@@ -488,6 +488,16 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
             },
         })
 
+    # 021BR：全行统一持仓标记——前端"只看持仓"筛选与 📍徽标依赖（此前仅卖侧行携带）
+    for it in items:
+        info = (held_map or {}).get(it.get('stock_id')) or {}
+        it['held'] = int(info.get('total_qty') or 0) > 0
+
+    # 021BR：全行统一持仓标记——前端"只看持仓"筛选与 📍徽标依赖（此前仅卖侧行携带）
+    for it in items:
+        info = (held_map or {}).get(it.get('stock_id')) or {}
+        it['held'] = int(info.get('total_qty') or 0) > 0
+
     items.sort(key=_sort_key)
     return {
         'date': today,

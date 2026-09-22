@@ -280,6 +280,30 @@ class TestSignalRatingConflict:
         assert sig['detail']['rating_conflict'] is None
 
 
+class TestHeldFlagOnAllItems:
+    """021BR：全行统一 held 标记——前端「📍只看持仓」筛选依赖（此前仅卖侧行携带）"""
+
+    def test_all_items_carry_held_flag(self):
+        """行动项（含评级/预警/缺报行）均有 held 布尔键，且按 held_map 正确取值"""
+        stocks = [_stock(1, '000001', '甲一'), _stock(2, '000002', '甲二')]
+        rows = [
+            _report(1, _TODAY, '持有观望', rn=1, code='000001', name='甲一'),
+            _report(2, _TODAY, '持有观望', rn=1, status='failed',
+                    error_msg='采集超时', code='000002', name='甲二'),
+        ]
+        alerts = [
+            {'stock_id': 1, 'alert_type': 'score_below', 'message': '评分低于阈值', 'is_read': 0},
+        ]
+        held_map = {1: {'total_qty': 100, 'avg_cost': 10.0}}
+        result = build_action_list(_TODAY, stocks, rows, alerts, None, held_map=held_map)
+        assert result['items'], '应有预警/缺报行动项'
+        for it in result['items']:
+            assert isinstance(it.get('held'), bool), f"{it['kind']} 缺 held 键"
+        by_kind = {it['kind']: it for it in result['items']}
+        assert by_kind['alert_unread']['held'] is True     # 股1 持仓中
+        assert by_kind['report_failed']['held'] is False   # 股2 无持仓
+
+
 class TestSellSignalItems:
     """021BQ 项D：卖点信号行动项（持仓标记 + 相悖调和反向 + 排序契约）"""
 

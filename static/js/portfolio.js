@@ -1519,9 +1519,42 @@
      * 本函数只做渲染：徽标配色（红升绿降，与看板红涨绿跌惯例一致）+ 统计行 + 点击行看报告。
      * 聚合接口失败时返回空串静默跳过，不阻塞看板其余卡片。
      */
+    // ========== 今日行动清单筛选（021BR：类型 chips + 只看持仓，纯前端过滤） ==========
+    var _alFilter = { kind: 'all', heldOnly: false };
+    function _alGroupOf(kind) {
+        if (kind === 'stop_discipline') return 'stop';
+        if (kind === 'sell_signal') return 'sell';
+        if (kind === 'tech_signal') return 'buy';
+        if (kind === 'alert_unread') return 'alert';
+        if (kind === 'report_failed') return 'missing';
+        if (kind && kind.indexOf('rating') === 0) return 'rating';
+        return 'other';
+    }
+    function alSetFilter(kind) {
+        // 再点同一 chip 取消筛选回到「全部」
+        _alFilter.kind = (_alFilter.kind === kind) ? 'all' : kind;
+        _alRefreshActionCard();
+    }
+    function alToggleHeld() {
+        _alFilter.heldOnly = !_alFilter.heldOnly;
+        _alRefreshActionCard();
+    }
+    function _alRefreshActionCard() {
+        var el = document.getElementById('actionListCard');
+        if (el && typeof _dashData !== 'undefined' && _dashData && _dashData.actionList) {
+            el.outerHTML = renderActionListCard(_dashData.actionList);
+        }
+    }
+    function _alChip(key, label, n, active) {
+        if (!n) return '';
+        var bgc = active ? '#34495e' : 'var(--bg-light,#f0f0f0)';
+        var fgc = active ? '#fff' : 'var(--text-2,#666)';
+        return '<span onclick="alSetFilter(\'' + key + '\')" style="cursor:pointer;user-select:none;font-size:12px;padding:2px 10px;border-radius:10px;background:' + bgc + ';color:' + fgc + ';white-space:nowrap;">' + label + ' ' + n + '</span>';
+    }
+
     function renderActionListCard(al) {
         if (!al || !al.items) return '';
-        var html = '<div class="card" style="margin-bottom:20px;">';
+        var html = '<div class="card" id="actionListCard" style="margin-bottom:20px;">';
         html += '<div class="card-title">🎯 今日行动清单 <span style="font-size:13px;color:var(--text-3,#888);font-weight:normal;">（' + escapeHtml(al.date || '') + ' · 按今日应做排序，点击行查看个股报告）</span></div>';
         var st = al.stats || {};
         html += '<div style="display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px;color:var(--text-3,#888);margin-bottom:8px;">';
@@ -1535,9 +1568,33 @@
         if (st.sell_hits > 0) html += '<span style="color:#00695c;">卖点信号 <b>' + st.sell_hits + '</b>（共振4星以上 ' + (st.sell_resonance_hits || 0) + '）</span>';
         if (st.unread_alerts_today > 0) html += '<span style="color:#2e7d32;">未读预警 <b>' + st.unread_alerts_today + '</b></span>';
         html += '</div>';
+        // 021BR：筛选 chips（类型 + 只看持仓）——纯前端过滤，再点同一 chip 取消
+        var _AL_GROUPS = [
+            {key: 'stop', label: '🛑 止损纪律'},
+            {key: 'rating', label: '⚖ 评级变动'},
+            {key: 'sell', label: '🟢 卖点信号'},
+            {key: 'buy', label: '🔵 买点信号'},
+            {key: 'alert', label: '🔔 预警未读'},
+            {key: 'missing', label: '📄 缺报补数'}
+        ];
+        var _groupCount = {};
+        var _heldCount = 0;
+        al.items.forEach(function(it) {
+            var g = _alGroupOf(it.kind);
+            _groupCount[g] = (_groupCount[g] || 0) + 1;
+            if (it.held) _heldCount++;
+        });
+        html += '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px;">';
+        html += _alChip('all', '全部', al.items.length, _alFilter.kind === 'all');
+        _AL_GROUPS.forEach(function(g) { html += _alChip(g.key, g.label, _groupCount[g.key] || 0, _alFilter.kind === g.key); });
+        if (_heldCount > 0) {
+            html += '<span onclick="alToggleHeld()" style="cursor:pointer;user-select:none;font-size:12px;padding:2px 10px;border-radius:10px;background:' + (_alFilter.heldOnly ? '#2e7d32' : '#e8f5e9') + ';color:' + (_alFilter.heldOnly ? '#fff' : '#2e7d32') + ';white-space:nowrap;">📍只看持仓 ' + _heldCount + '</span>';
+        }
+        html += '</div>';
         if (!al.items.length) {
             html += '<div style="padding:14px 0;font-size:13px;color:var(--text-3,#999);">今日暂无待办行动项——评级平稳、无新买点信号、预警全部已读</div>';
         } else {
+            var _visibleCount = 0;
             html += '<div style="max-height:340px;overflow-y:auto;">';
             al.items.forEach(function(it) {
                 var bg, fg, label;
@@ -1560,19 +1617,25 @@
                 }
                 else if (it.kind === 'alert_unread') { bg = '#fff8e1'; fg = '#b26a00'; label = '预警未读'; }
                 else { bg = 'var(--bg-light,#f0f0f0)'; fg = '#888'; label = '缺报补数'; }
-                html += '<div onclick="viewReport(' + it.stock_id + ')" style="display:flex;align-items:flex-start;gap:8px;padding:8px 4px;border-bottom:1px solid var(--border-light,#f0f0f0);cursor:pointer;">';
+                var g = _alGroupOf(it.kind);
+                var visible = (_alFilter.kind === 'all' || _alFilter.kind === g) && (!_alFilter.heldOnly || it.held);
+                if (visible) _visibleCount++;
+                html += '<div onclick="viewReport(' + it.stock_id + ')" style="display:' + (visible ? 'flex' : 'none') + ';align-items:flex-start;gap:8px;padding:8px 4px;border-bottom:1px solid var(--border-light,#f0f0f0);cursor:pointer;">';
                 html += '<span style="background:' + bg + ';color:' + fg + ';font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;white-space:nowrap;margin-top:1px;">' + label + '</span>';
                 html += '<div style="flex:1;font-size:13px;line-height:1.5;">';
                 html += '<b>' + escapeHtml(it.name || '') + '</b> <span style="color:var(--text-3,#888);">' + escapeHtml(it.symbol || '') + '</span>';
-                if (it.kind === 'sell_signal' && it.detail && it.detail.held) {
-                    // 021BQ：持仓徽标（账户无关聚合口径，quantity>0 即持仓中）
-                    var qtyTxt = it.detail.total_qty ? it.detail.total_qty.toLocaleString() + ' 股' : '';
+                if (it.held) {
+                    // 021BR：持仓徽标扩展到全部行型（账户无关聚合口径，quantity>0 即持仓中）
+                    var qtyTxt = (it.detail && it.detail.total_qty) ? it.detail.total_qty.toLocaleString() + ' 股' : '';
                     html += '<span style="background:#e8f5e9;color:#2e7d32;font-size:10.5px;padding:1px 6px;border-radius:8px;margin-left:6px;white-space:nowrap;">📍持仓' + qtyTxt + '</span>';
                 }
                 html += '<div style="color:var(--text-2,#555);">' + escapeHtml(it.reason || '') + '</div>';
                 html += '</div></div>';
             });
             html += '</div>';
+            if (_visibleCount === 0) {
+                html += '<div style="padding:12px 0;font-size:13px;color:var(--text-3,#999);">当前筛选条件下没有行动项——点上方「全部」或取消「只看持仓」恢复。</div>';
+            }
         }
         if ((st.missing_today || 0) > 0) {
             html += '<div style="margin-top:10px;font-size:12px;color:var(--text-3,#aaa);">另有 ' + st.missing_today + ' 只今日尚无有效报告（生成失败的已在上方列出）——可点下方「🚀 生成今日报告」补齐。</div>';
