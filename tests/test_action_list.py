@@ -64,6 +64,34 @@ def _sig_result(sids, trigger_today=True):
     }
 
 
+def _sell_result(sids, trigger_today=True):
+    """021BQ scan_watchlist_sell_signals 返回的最小模拟：今日死叉命中 + 5星 bear 共振。"""
+    trigger = _TODAY if trigger_today else '2026-09-17'
+    return {
+        'scope': 'watchlist_offline',
+        'side': 'sell',
+        'stock_count': len(sids),
+        'results': [
+            {
+                'stock_id': sid, 'symbol': '600519', 'name': '贵州茅台',
+                'sell_matches': [
+                    {'signal': 'macd_dead_above', 'label': 'MACD水上死叉',
+                     'trigger_date': trigger, 'note': ''},
+                    {'signal': 'kdj_dead_high', 'label': 'KDJ高位死叉',
+                     'trigger_date': trigger, 'note': ''},
+                ],
+                'sell_resonances': [
+                    {'key': 'res_week_bear', 'label': '周线空头波段卖', 'stars': 5,
+                     'kind': 'bear', 'note': '', 'signals': ''},
+                ],
+                'kline_upto': _TODAY, 'kline_count': 46,
+            }
+            for sid in sids
+        ],
+        'errors': [],
+    }
+
+
 # ---------------- 纯逻辑：排序与聚合 ----------------
 
 class TestBuildActionListOrdering:
@@ -252,6 +280,99 @@ class TestSignalRatingConflict:
         assert sig['detail']['rating_conflict'] is None
 
 
+class TestSellSignalItems:
+    """021BQ 项D：卖点信号行动项（持仓标记 + 相悖调和反向 + 排序契约）"""
+
+    def test_sell_item_with_held_marker(self):
+        """持仓者卖点信号：detail 持仓标记 + reason 附减仓/止损纪律提示"""
+        stocks = [_stock(1)]
+        rows = [_report(1, _TODAY, '持有观望', rn=1)]
+        held_map = {1: {'total_qty': 500, 'avg_cost': 14.0}}
+        result = build_action_list(_TODAY, stocks, rows, [], None,
+                                   _sell_result([1]), held_map)
+        sell = [it for it in result['items'] if it['kind'] == 'sell_signal'][0]
+        assert sell['priority'] == 2
+        assert sell['priority_label'] == '卖点信号'
+        assert sell['detail']['held'] is True
+        assert sell['detail']['total_qty'] == 500
+        assert sell['detail']['avg_cost'] == 14.0
+        assert '持仓 500 股（成本 14.00）' in sell['reason']
+        assert '减仓/止损检查' in sell['reason']
+        # 持有观望档与卖点方向一致 → 不标相悖
+        assert sell['detail']['rating_conflict'] is None
+        st = result['stats']
+        assert st['sell_hits'] == 1
+        assert st['sell_resonance_hits'] == 1  # 周线空头 5 星
+
+    def test_sell_item_empty_position(self):
+        """空仓者卖点信号：弱相关——reason 提示回避，detail.held=False 排序垫底"""
+        result = build_action_list(_TODAY, [_stock(1)], [], [], None,
+                                   _sell_result([1]), None)
+        sell = result['items'][0]
+        assert sell['detail']['held'] is False
+        assert sell['detail']['total_qty'] == 0
+        assert sell['detail']['avg_cost'] is None
+        assert '当前空仓' in sell['reason']
+        assert '回避新买入' in sell['reason']
+
+    def test_sell_conflict_with_buy_rating_reversed(self):
+        """相悖调和反向用例：卖点信号 × 推荐买入评级 → 显式标注评级未变以评级为主"""
+        stocks = [_stock(1)]
+        rows = [_report(1, _TODAY, '推荐买入', rn=1, total_score=72.0)]
+        result = build_action_list(_TODAY, stocks, rows, [], None, _sell_result([1]))
+        sell = [it for it in result['items'] if it['kind'] == 'sell_signal'][0]
+        assert sell['detail']['rating_conflict'] == '推荐买入'
+        assert '当前综合评级「推荐买入」（72.0分）' in sell['reason']
+        assert '短线回调警示，评级未变' in sell['reason']
+        assert '以评级为主' in sell['reason']
+        assert '<' not in sell['reason']  # 021BN 教训
+
+    def test_sell_strong_buy_rating_also_conflict(self):
+        """强烈推荐买入档同样视为相悖（反向元组与买侧对称）"""
+        stocks = [_stock(1)]
+        rows = [_report(1, _TODAY, '强烈推荐买入', rn=1, total_score=85.0)]
+        result = build_action_list(_TODAY, stocks, rows, [], None, _sell_result([1]))
+        sell = result['items'][0]
+        assert sell['detail']['rating_conflict'] == '强烈推荐买入'
+
+    def test_sell_aligned_reduce_rating_no_conflict(self):
+        """减仓档 + 卖点信号 → 方向一致不标相悖"""
+        stocks = [_stock(1)]
+        rows = [_report(1, _TODAY, '建议减仓', rn=1)]
+        result = build_action_list(_TODAY, stocks, rows, [], None, _sell_result([1]))
+        sell = result['items'][0]
+        assert sell['detail']['rating_conflict'] is None
+        assert '短线回调警示' not in sell['reason']
+
+    def test_sort_contract_held_sell_before_buy_before_empty_sell(self):
+        """排序契约（021BQ 裁定，测试锁定）：P2 内 卖出·持仓 < 买点 < 卖出·空仓"""
+        stocks = [_stock(1, '600001', '甲'), _stock(2, '600002', '乙'),
+                  _stock(3, '600003', '丙')]
+        held_map = {2: {'total_qty': 1000, 'avg_cost': 10.0}}
+        buy = _sig_result([1])       # 买点 5 星（股票1）
+        sell = _sell_result([2, 3])  # 卖点：股票2 持仓 / 股票3 空仓
+        result = build_action_list(_TODAY, stocks, [], [], buy, sell, held_map)
+        got = [(it['kind'], it['stock_id']) for it in result['items']]
+        assert got == [
+            ('sell_signal', 2),   # 卖出·持仓（风控优先）
+            ('tech_signal', 1),   # 买点 5 星
+            ('sell_signal', 3),   # 卖出·空仓（回避信息垫底）
+        ]
+
+    def test_sell_today_gate(self):
+        """非今日命中不产卖侧行动项（与买侧同口径："今日应做"）"""
+        result = build_action_list(_TODAY, [_stock(1)], [], [], None,
+                                   _sell_result([1], trigger_today=False))
+        assert result['items'] == []
+        assert result['stats']['sell_hits'] == 0
+
+    def test_sell_degraded_path_none(self):
+        """卖点路降级（None 缺省参数）：既有调用方零破坏"""
+        result = build_action_list(_TODAY, [_stock(1)], [], [], _sig_result([1]))
+        assert [it['kind'] for it in result['items']] == ['tech_signal']
+        assert result['stats']['sell_hits'] == 0
+
+
 # ---------------- 集成：临时库全链 ----------------
 
 def _deep_v_gap_closes():
@@ -324,3 +445,47 @@ def test_get_action_list_empty_db(db):
     assert result['items'] == []
     assert result['stats']['active_count'] == 1
     assert result['stats']['missing_today'] == 1
+
+
+def test_get_action_list_sell_chain(db):
+    """021BQ 全链：死叉形态K线 + 持仓 + 推荐买入报告 → 卖点行动项（持仓+相悖调和）"""
+    today = dt.date.today().isoformat()
+    # 021BQ 校准形态：ramp+加速阳+大阴 → MACD水上死叉+KDJ高位死叉落最新一根
+    closes = [60 + i * 2.0 for i in range(44)] + [156.0, 138.0]
+    conn = db_manager.get_connection()
+    conn.execute(
+        """INSERT INTO daily_reports (report_date, stock_id, stock_code, stock_name,
+           total_score, rating, rating_label, score_change, status, report_type)
+           VALUES (?, ?, '600519', '贵州茅台', 72.0, '推荐买入', '推荐买入', 1.0, 'ok', 'daily')""",
+        (today, db),
+    )
+    conn.execute(
+        'INSERT INTO holdings (account_id, stock_id, cost_price, quantity) '
+        'VALUES (1, ?, 14.0, 800)',
+        (db,),
+    )
+    dates = [(dt.date(2026, 9, 1) + dt.timedelta(days=i)).isoformat()
+             for i in range(len(closes))]
+    conn.executemany(
+        'INSERT OR IGNORE INTO raw_kline (stock_id, trade_date, open, close, high, low, volume) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [(db, d, c * 0.99, c, c * 1.01, c * 0.98, 1000.0)
+         for d, c in zip(dates, closes)],
+    )
+    conn.commit()
+    conn.close()
+
+    result = get_action_list()
+    sell_items = [it for it in result['items'] if it['kind'] == 'sell_signal']
+    assert len(sell_items) == 1
+    item = sell_items[0]
+    assert item['detail']['held'] is True
+    assert item['detail']['total_qty'] == 800
+    assert item['detail']['rating_conflict'] == '推荐买入'
+    assert '持仓 800 股（成本 14.00）' in item['reason']
+    assert {s['signal'] for s in item['detail']['signals']} == {
+        'macd_dead_above', 'kdj_dead_high'}
+    assert result['stats']['sell_hits'] == 1
+    # 无周K → 无周线空头共振，但同日双死叉即 4 星（res_double_dead，不需要周K）
+    assert result['stats']['sell_resonance_hits'] == 1
+    assert item['detail']['top_stars'] == 4

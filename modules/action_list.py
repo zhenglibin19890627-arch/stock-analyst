@@ -1,21 +1,24 @@
 """
-021BP 决策闭环 项3：今日行动清单（只读聚合）
+021BP 决策闭环 项3 + 021BQ 项D：今日行动清单（只读聚合）
 
-目标：用户 30 秒看完"今天该关注什么"。聚合四路现成数据——
+目标：用户 30 秒看完"今天该关注什么"。聚合五路现成数据——
   路1 daily_reports 最新行：评级升降 / 超时缺报股显式列出（补日报 §4.4
       "失败股从概览表消失"的可见性缺口）/ 操盘手摘要（key_factors.trader，
       已预计算零重算）
   路2 自选股买点信号离线复算（t2 market_screener.scan_watchlist_signals，
       今日命中 + 共振星级）
+  路2b 自选股卖点信号离线复算（021BQ scan_watchlist_sell_signals，
+      今日命中 + bear 共振；持仓标记来自 holdings 账户无关聚合）
   路3 alert_history 当日触发（未读）
   路4 （经路1 的 overview 行透出操盘手阶段/分歧，供卡片副表）
 
-排序约定（"今日应做"）：
-  P1 评级升降 > P2 买点信号（共振≥4星优先）> P3 预警未读 > P4 超时缺报股
+排序约定（"今日应做"，021BQ 起卖侧插入 P2）：
+  P1 评级升降 > P2 卖出信号·持仓（风控优先）> P2 买点信号（共振≥4星优先）
+  > P2 卖出信号·空仓（回避信息垫底）> P3 预警未读 > P4 超时缺报股
 
 红线合规：
   - R9：只读聚合，不写 daily_reports/评分/评级表，不动任何写入路径；
-  - V8：只读消费源表；
+  - V8：只读消费源表（raw_kline*/holdings/daily_reports/alert_history）；
   - B24/R13：零触碰 generate_advice；
   - R7：评级升降方向仅消费 alert_engine.RATING_ORDER 既有顺序表（允许范围），
     不重实现"分数→评级"映射；
@@ -41,6 +44,11 @@ _TOP_RESONANCE_STARS = 4
 # 报告"建议减仓"、操盘手"强下跌"自相矛盾（AGENTS.md §9.6：判定标准是真实操作
 # 路径下的端到端表现，契约层自洽 ≠ 用户体验正确）。
 _CONFLICT_RATINGS = ('建议减仓', '强烈建议卖出')
+
+# 021BQ 项D：买点相悖机制的卖侧镜像——卖点信号撞上买入档评级时显式调和
+# （"短线回调警示，评级未变"），评级仍是动作主指令。方向与 _CONFLICT_RATINGS
+# 相反，独立元组，勿复用。
+_SELL_CONFLICT_RATINGS = ('推荐买入', '强烈推荐买入')
 
 
 def get_action_list():
@@ -83,10 +91,23 @@ def get_action_list():
             (today,),
         )
         alerts_today = [dict(r) for r in cursor.fetchall()]
+
+        # 021BQ 项D：持仓标记（holdings 账户无关聚合——同股多账户分仓只记一行，
+        # 满足 021W 多行约定；quantity>0 才算持仓中）
+        cursor.execute(
+            'SELECT stock_id, SUM(quantity) AS total_qty, '
+            'CASE WHEN SUM(quantity) > 0 '
+            'THEN SUM(quantity * cost_price) / SUM(quantity) END AS avg_cost '
+            'FROM holdings WHERE quantity > 0 GROUP BY stock_id'
+        )
+        held_map = {
+            r['stock_id']: {'total_qty': int(r['total_qty'] or 0), 'avg_cost': r['avg_cost']}
+            for r in cursor.fetchall()
+        }
     finally:
         conn.close()
 
-    # 路2：t2 信号复算（独立连接；失败降级为空）
+    # 路2：t2 买点信号复算（独立连接；失败降级为空）
     try:
         from modules.market_screener import scan_watchlist_signals
 
@@ -95,13 +116,24 @@ def get_action_list():
         logger.warning(f'[行动清单] 信号复算失败（本清单无信号项）: {e}')
         signal_result = None
 
+    # 路2b：021BQ 卖点信号复算（独立连接；失败降级为空，不阻塞清单）
+    try:
+        from modules.market_screener import scan_watchlist_sell_signals
+
+        sell_result = scan_watchlist_sell_signals()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f'[行动清单] 卖点信号复算失败（本清单无卖点项）: {e}')
+        sell_result = None
+
     return build_action_list(
         today=today, stocks=stocks, report_rows=report_rows,
         alerts_today=alerts_today, signal_result=signal_result,
+        sell_result=sell_result, held_map=held_map,
     )
 
 
-def build_action_list(today, stocks, report_rows, alerts_today, signal_result):
+def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
+                      sell_result=None, held_map=None):
     """纯逻辑装配今日行动清单（不触库不触网，全部输入由调用方给定）。
 
     Args:
@@ -112,10 +144,13 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result):
             rating_label/score_change/status/error_msg/key_factors
         alerts_today: [{'stock_id','alert_type','message','is_read'}]
         signal_result: scan_watchlist_signals() 返回（None=信号路降级）
+        sell_result: 021BQ scan_watchlist_sell_signals() 返回（None=卖点路降级）
+        held_map: 021BQ 持仓标记 {stock_id: {'total_qty', 'avg_cost'}}
+            （holdings 账户无关聚合；None=全部视为空仓）
 
     Returns: {
         'date', 'items'（排序后行动项）, 'overview'（今日有报告股概览+操盘手摘要）,
-        'failed_stocks'（今日失败股显式列出）, 'stats'（八项计数）
+        'failed_stocks'（今日失败股显式列出）, 'stats'（十项计数）
     }
     """
     latest_by_stock = {}
@@ -138,6 +173,8 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result):
         'rating_moves': 0,
         'signal_hits': 0,
         'resonance_hits': 0,
+        'sell_hits': 0,
+        'sell_resonance_hits': 0,
         'unread_alerts_today': 0,
     }
 
@@ -186,9 +223,9 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result):
             stats['rating_moves'] += 1
             items.append(move)
 
-    # ---- 路2：t2 信号复算（今日命中才算行动项；共振≥4星类内排前） ----
+    # ---- 路2：t2 买点信号复算（今日命中才算行动项；共振≥4星类内排前） ----
+    stock_by_id = {s['stock_id']: s for s in stocks}
     if signal_result:
-        stock_by_id = {s['stock_id']: s for s in stocks}
         for sig in signal_result.get('results') or []:
             s = stock_by_id.get(sig.get('stock_id'))
             if s is None:
@@ -242,6 +279,81 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result):
                     'top_stars': top_stars,
                     'kline_upto': kline_upto,
                     'rating_conflict': conflict_rating,
+                },
+            })
+
+    # ---- 路2b：021BQ 卖点信号复算（今日命中；持仓者风控优先，空仓回避垫底） ----
+    if sell_result:
+        for sig in sell_result.get('results') or []:
+            s = stock_by_id.get(sig.get('stock_id'))
+            if s is None:
+                continue
+            kline_upto = sig.get('kline_upto')
+            hits_today = [
+                h for h in sig.get('sell_matches') or []
+                if h.get('trigger_date') == kline_upto
+            ]
+            if not hits_today:
+                continue  # 窗口内历史命中：前日巡检已覆盖，非"今日出现"
+            resonances = sig.get('sell_resonances') or []
+            top_stars = max((r.get('stars') or 0) for r in resonances) if resonances else 0
+            stats['sell_hits'] += 1
+            if top_stars >= _TOP_RESONANCE_STARS:
+                stats['sell_resonance_hits'] += 1
+
+            # 持仓标记（holdings 账户无关聚合；空仓者的卖点信号弱相关——排序垫底）
+            held_info = (held_map or {}).get(s['stock_id']) or {}
+            held_qty = int(held_info.get('total_qty') or 0)
+            held = held_qty > 0
+            avg_cost = held_info.get('avg_cost')
+
+            labels = '、'.join(h['label'] for h in hits_today)
+            reason = f'今日出现卖点信号：{labels}'
+            if resonances:
+                res_str = '、'.join(f"{r['label']}（{r['stars']}星）" for r in resonances)
+                reason += f'；共振组合：{res_str}'
+            if held:
+                cost_txt = f'（成本 {avg_cost:.2f}）' if avg_cost else ''
+                reason += f'。持仓 {held_qty:,} 股{cost_txt}——按纪律执行减仓/止损检查'
+            else:
+                reason += '。当前空仓——回避新买入，等待企稳'
+
+            # 评级相悖调和（021BP 机制的卖侧镜像）：最新评级为买入档时显式标注，
+            # detail.rating_conflict 供前端徽标转琥珀色"卖出信号·与评级相悖"
+            latest = latest_by_stock.get(s['stock_id'])
+            conflict_rating = None
+            if latest and latest.get('status') == 'ok' and latest.get('rating') in _SELL_CONFLICT_RATINGS:
+                conflict_rating = latest.get('rating')
+                score = latest.get('total_score')
+                score_txt = f'（{score:.1f}分）' if isinstance(score, (int, float)) else ''
+                reason += (
+                    f'。当前综合评级「{conflict_rating}」{score_txt}：'
+                    '卖点信号与评级方向相悖——短线回调警示，评级未变，'
+                    '信号仅波段参考，以评级为主'
+                )
+
+            items.append({
+                'priority': 2,
+                'priority_label': '卖点信号',
+                'kind': 'sell_signal',
+                'stock_id': s['stock_id'], 'symbol': s['symbol'], 'name': s['name'],
+                'reason': reason,
+                'detail': {
+                    'signals': [
+                        {'signal': h['signal'], 'label': h['label'],
+                         'trigger_date': h['trigger_date']}
+                        for h in hits_today
+                    ],
+                    'resonances': [
+                        {'key': r['key'], 'label': r['label'], 'stars': r['stars']}
+                        for r in resonances
+                    ],
+                    'top_stars': top_stars,
+                    'kline_upto': kline_upto,
+                    'rating_conflict': conflict_rating,
+                    'held': held,
+                    'total_qty': held_qty,
+                    'avg_cost': avg_cost,
                 },
             })
 
@@ -331,7 +443,8 @@ def _rating_move_item(prev_row, latest_row, trader):
 
 def _sort_key(item):
     """"今日应做"排序：P1 评级升降（降级风控优先，再按评分变动幅度）>
-    P2 买点信号（共振≥4星优先）> P3 预警未读 > P4 缺报补数；类内按代码。"""
+    P2 卖出信号·持仓（风控优先）> P2 买点信号（共振≥4星优先）
+    > P2 卖出信号·空仓（回避信息垫底）> P3 预警未读 > P4 缺报补数；类内按代码。"""
     p = item['priority']
     detail = item.get('detail') or {}
     if p == 1:
@@ -340,7 +453,13 @@ def _sort_key(item):
         magnitude = abs(chg) if isinstance(chg, (int, float)) else 0
         return (p, dir_rank, -magnitude, item['symbol'])
     if p == 2:
-        return (p, -(detail.get('top_stars') or 0), item['symbol'])
+        # 021BQ：side_rank——卖出+持仓=0 < 买点=1 < 卖出+空仓=2
+        # （持仓风控优先于他人买点，空仓回避信息垫底）
+        if item['kind'] == 'sell_signal':
+            side_rank = 0 if detail.get('held') else 2
+        else:
+            side_rank = 1
+        return (p, side_rank, -(detail.get('top_stars') or 0), item['symbol'])
     return (p, 0, item['symbol'])
 
 

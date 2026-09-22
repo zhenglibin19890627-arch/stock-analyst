@@ -1531,6 +1531,7 @@
         if (st.missing_today > 0) html += '<span>今日缺报 <b>' + st.missing_today + '</b></span>';
         if (st.rating_moves > 0) html += '<span style="color:#e65100;">评级变动 <b>' + st.rating_moves + '</b></span>';
         if (st.signal_hits > 0) html += '<span style="color:#1565c0;">买点信号 <b>' + st.signal_hits + '</b>（共振4星以上 ' + (st.resonance_hits || 0) + '）</span>';
+        if (st.sell_hits > 0) html += '<span style="color:#00695c;">卖点信号 <b>' + st.sell_hits + '</b>（共振4星以上 ' + (st.sell_resonance_hits || 0) + '）</span>';
         if (st.unread_alerts_today > 0) html += '<span style="color:#2e7d32;">未读预警 <b>' + st.unread_alerts_today + '</b></span>';
         html += '</div>';
         if (!al.items.length) {
@@ -1548,12 +1549,24 @@
                     bg = rc ? '#fff3e0' : '#e3f2fd'; fg = rc ? '#e65100' : '#1565c0';
                     label = rc ? '反弹信号·与评级相悖' : '买点信号';
                 }
+                else if (it.kind === 'sell_signal') {
+                    // 021BQ：卖点信号（A股绿=风控惯例）——相悖琥珀 / 持仓绿系 / 空仓灰蓝
+                    var sd = it.detail || {};
+                    if (sd.rating_conflict) { bg = '#fff3e0'; fg = '#e65100'; label = '卖出信号·与评级相悖'; }
+                    else if (sd.held) { bg = '#e8f5e9'; fg = '#2e7d32'; label = '卖出信号·持仓'; }
+                    else { bg = '#e0f2f1'; fg = '#00695c'; label = '回避信号'; }
+                }
                 else if (it.kind === 'alert_unread') { bg = '#fff8e1'; fg = '#b26a00'; label = '预警未读'; }
                 else { bg = 'var(--bg-light,#f0f0f0)'; fg = '#888'; label = '缺报补数'; }
                 html += '<div onclick="viewReport(' + it.stock_id + ')" style="display:flex;align-items:flex-start;gap:8px;padding:8px 4px;border-bottom:1px solid var(--border-light,#f0f0f0);cursor:pointer;">';
                 html += '<span style="background:' + bg + ';color:' + fg + ';font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;white-space:nowrap;margin-top:1px;">' + label + '</span>';
                 html += '<div style="flex:1;font-size:13px;line-height:1.5;">';
                 html += '<b>' + escapeHtml(it.name || '') + '</b> <span style="color:var(--text-3,#888);">' + escapeHtml(it.symbol || '') + '</span>';
+                if (it.kind === 'sell_signal' && it.detail && it.detail.held) {
+                    // 021BQ：持仓徽标（账户无关聚合口径，quantity>0 即持仓中）
+                    var qtyTxt = it.detail.total_qty ? it.detail.total_qty.toLocaleString() + ' 股' : '';
+                    html += '<span style="background:#e8f5e9;color:#2e7d32;font-size:10.5px;padding:1px 6px;border-radius:8px;margin-left:6px;white-space:nowrap;">📍持仓' + qtyTxt + '</span>';
+                }
                 html += '<div style="color:var(--text-2,#555);">' + escapeHtml(it.reason || '') + '</div>';
                 html += '</div></div>';
             });
@@ -1562,7 +1575,7 @@
         if ((st.missing_today || 0) > 0) {
             html += '<div style="margin-top:10px;font-size:12px;color:var(--text-3,#aaa);">另有 ' + st.missing_today + ' 只今日尚无有效报告（生成失败的已在上方列出）——可点下方「🚀 生成今日报告」补齐。</div>';
         }
-        html += '<div style="margin-top:8px;font-size:12px;color:var(--text-3,#aaa);">买点信号为离线快照参考口径（基于已采集K线复算，截止最新采集日），不构成投资建议。</div>';
+        html += '<div style="margin-top:8px;font-size:12px;color:var(--text-3,#aaa);">买卖点信号均为离线快照参考口径（基于已采集K线复算，截止最新采集日；卖出信号同为离线快照参考，持仓标记来自持仓账户聚合），不构成投资建议。</div>';
         html += '</div>';
         return html;
     }

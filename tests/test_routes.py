@@ -345,7 +345,7 @@ def test_alert_rule_create_sell_signal(client):
 
 
 def test_dashboard_action_list(client):
-    """021BP 项3：今日行动清单聚合端点（空库 200 + 结构完整）"""
+    """021BP 项3：今日行动清单聚合端点（空库 200 + 结构完整）；021BQ 卖侧统计键增量"""
     resp = client.get('/api/dashboard/action-list')
     _assert_ok(resp)
     body = resp.get_json()
@@ -354,6 +354,8 @@ def test_dashboard_action_list(client):
     assert body['overview'] == []
     assert body['failed_stocks'] == []
     assert body['stats']['active_count'] == 0
+    assert 'sell_hits' in body['stats']        # 021BQ 增量键（旧键零改动）
+    assert 'sell_resonance_hits' in body['stats']
     assert body['date']
 
 
