@@ -325,6 +325,25 @@ def test_watchlist_signals_endpoint(client):
     assert body['errors'] == []
 
 
+def test_watchlist_sell_signals_endpoint(client):
+    """021BQ 项B：自选股卖点信号巡检端点（空库 200 + 卖侧口径标注）"""
+    resp = client.get('/api/market/scan/watchlist-sell-signals')
+    _assert_ok(resp)
+    body = resp.get_json()
+    assert body['success'] is True
+    assert body['scope'] == 'watchlist_offline'
+    assert body['side'] == 'sell'
+    assert body['results'] == []
+    assert body['errors'] == []
+
+
+def test_alert_rule_create_sell_signal(client):
+    """021BQ 项C：新预警类型 sell_signal 可创建（blueprint 白名单已同步）"""
+    resp = client.post('/api/alerts/rules', json={'rule_type': 'sell_signal'})
+    assert resp.status_code == 200, resp.data[:300]
+    assert resp.get_json()['success'] is True
+
+
 def test_dashboard_action_list(client):
     """021BP 项3：今日行动清单聚合端点（空库 200 + 结构完整）"""
     resp = client.get('/api/dashboard/action-list')

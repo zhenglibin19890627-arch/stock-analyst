@@ -7,7 +7,8 @@ from database.db_manager import get_connection
 bp = Blueprint('alerts', __name__)
 
 # 与 modules/alert_engine.py VALID_RULE_TYPES 保持同步（缺一即漏：API 会 400）
-_VALID_ALERT_TYPES = ('rating_change', 'score_below', 'capital_outflow', 'tech_signal')
+_VALID_ALERT_TYPES = ('rating_change', 'score_below', 'capital_outflow', 'tech_signal',
+                      'sell_signal')
 
 
 @bp.route('/api/alerts/rules', methods=['GET'])
@@ -37,9 +38,9 @@ def api_get_alert_rules():
 
 @bp.route('/api/alerts/rules', methods=['POST'])
 def api_create_alert_rule():
-    """新增预警规则（校验 rule_type，仅支持白名单4种）。
+    """新增预警规则（校验 rule_type，仅支持白名单5种）。
     Body: {rule_type, stock_id?, threshold?, enabled?}
-    tech_signal 阈值语义=共振星级门槛（选填，3/4/5）
+    tech_signal 阈值语义=共振星级门槛（选填，3/4/5）；sell_signal 同（bear 共振星级）
     """
     try:
         data = request.get_json(silent=True) or {}

@@ -8,7 +8,8 @@
         'rating_change': '评级变动',
         'score_below': '评分跌破',
         'capital_outflow': '资金流出',
-        'tech_signal': '买点信号'
+        'tech_signal': '买点信号',
+        'sell_signal': '卖点信号'
     };
 
     function toggleAlertDropdown(e) {
@@ -102,13 +103,15 @@
         'rating_change': '评级变动',
         'score_below': '评分跌破',
         'capital_outflow': '资金流出',
-        'tech_signal': '买点信号'
+        'tech_signal': '买点信号',
+        'sell_signal': '卖点信号'
     };
     var _alertRuleTypeHints = {
         'rating_change': { label: '阈值', show: false, hint: '评级变动无需设置阈值，评级发生升降级时自动提醒' },
         'score_below': { label: '跌破阈值（0-100）', show: true, hint: '当综合评分跌破此值时提醒，建议设 40-70' },
         'capital_outflow': { label: '流出金额（万元）', show: true, hint: '当主力净流出超过此金额时提醒，建议设 500-5000' },
-        'tech_signal': { label: '阈值', show: false, hint: '自选股当日出现 MACD/KDJ 买点信号时提醒，并标注共振组合星级；每日收盘后自动巡检，无需设置阈值' }
+        'tech_signal': { label: '阈值', show: false, hint: '自选股当日出现 MACD/KDJ 买点信号时提醒，并标注共振组合星级；每日收盘后自动巡检，无需设置阈值' },
+        'sell_signal': { label: '阈值', show: false, hint: '自选股当日出现 MACD/KDJ 死叉、破位MA20 等卖点信号时提醒，并标注共振组合星级；每日收盘后自动巡检，无需设置阈值' }
     };
     var _alertStocksCache = null;
 

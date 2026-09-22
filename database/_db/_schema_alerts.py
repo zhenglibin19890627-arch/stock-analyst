@@ -13,7 +13,7 @@ def _create_alert_tables(cursor):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS alert_rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            rule_type TEXT NOT NULL,              -- rating_change / score_below / capital_outflow / tech_signal
+            rule_type TEXT NOT NULL,              -- rating_change / score_below / capital_outflow / tech_signal / sell_signal
             stock_id INTEGER,                     -- NULL=全局默认规则
             threshold REAL,                       -- 阈值（评分阈值/连续天数，按 rule_type 解释）
             enabled INTEGER DEFAULT 1,            -- 1=启用, 0=停用
@@ -31,7 +31,7 @@ def _create_alert_tables(cursor):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             rule_id INTEGER NOT NULL,             -- 关联触发规则
             stock_id INTEGER NOT NULL,            -- 触发股票
-            alert_type TEXT NOT NULL,             -- rating_change / score_below / capital_outflow / tech_signal
+            alert_type TEXT NOT NULL,             -- rating_change / score_below / capital_outflow / tech_signal / sell_signal
             trigger_value TEXT,                   -- 触发值详情（JSON格式）
             message TEXT NOT NULL,                -- 人类可读预警消息
             is_read INTEGER DEFAULT 0,            -- 0=未读, 1=已读
@@ -69,6 +69,9 @@ def _seed_default_alert_rules(cursor):
     # 021BP 项2: tech_signal 买点信号巡检默认开启（无阈值=任意买点信号都提醒；
     #   阈值语义=共振星级门槛 3/4/5），检查器复用 market_screener 纯函数
     #   对已采集K线离线复算，走 scan_once 既有每日收盘后挂载点，幂等写入
+    # 021BQ 项C: sell_signal 卖点信号巡检默认开启（与 tech_signal 对称；
+    #   走卖侧平行库 SELL_SIGNAL_LIBRARY/bear 共振，在线全市场扫描不受影响；
+    #   每日每股至多 1 条（幂等约束），用户可一键停用全局规则）
     # 注意：SQLite 中 NULL!=NULL，UNIQUE 约束无法去重全局规则(stock_id IS NULL)，
     # 因此用 WHERE NOT EXISTS 逐条幂等插入
     # ============================================================
@@ -77,6 +80,7 @@ def _seed_default_alert_rules(cursor):
         ('score_below', 65.0),
         ('capital_outflow', 3),
         ('tech_signal', None),
+        ('sell_signal', None),
     ]:
         cursor.execute(
             """

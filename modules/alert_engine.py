@@ -1,23 +1,29 @@
 """
 P3-B 智能预警模块 (Alert Engine)
 
-基于监理批准的 3 类预警规则（G1-G3）+ 021BP 决策闭环新增信号类规则：
+基于监理批准的 3 类预警规则（G1-G3）+ 021BP/021BQ 决策闭环新增信号类规则：
   1. rating_change  评级跨档变化（升级/降级）
   2. score_below    评分跌破阈值（默认65）
   3. capital_outflow 主力资金连续净流出（默认3天）
   4. tech_signal    自选股买点技术信号（021BP 项2：复用 market_screener
                     信号纯函数对已采集K线离线复算，零网络；阈值语义=共振
                     星级门槛，选填）
+  5. sell_signal    自选股卖点技术信号（021BQ 项C：check_tech_signal 的
+                    同构镜像，走卖侧平行库 SELL_SIGNAL_LIBRARY/ bear 共振，
+                    在线全市场扫描不受影响；阈值语义=共振星级门槛，选填）
 
-设计要点（架构师评审 review_alert_P3B_20260727.md + 021BP 方案）：
+设计要点（架构师评审 review_alert_P3B_20260727.md + 021BP/021BQ 方案）：
   - scan_once() 每日日报后调用 1 次（G3；15:54 窗3 收盘批次，收盘后触发）
   - 双层异常隔离：外层整体 try/except，内层单只股票失败不阻塞其他
   - 幂等：alert_history 表 (rule_id, stock_id, trigger_date) 唯一约束 + INSERT OR IGNORE
   - 规则优先级：个股规则(stock_id匹配) > 全局规则(stock_id IS NULL)
   - 评级跨档必须复用 scoring_engine.normalize_rating（D4，不重新实现）
   - 连续净流出取最近 N 个"有数据"的交易日（D3，缺失跳过不中断，窗口含今天）
-  - 只读消费 ratings_history / analysis_results / raw_capital_flow / raw_kline*，
-    不回写引擎源表（V8；tech_signal 同样只读K线，不产候选入库）
+  - 只读消费 ratings_history / analysis_results / raw_capital_flow / raw_kline* /
+    daily_reports（021BQ 评级上下文注记），不回写引擎源表（V8；tech/sell_signal
+    同样只读K线，不产候选入库）
+  - 信号×评级相悖调和（021BQ 项④）：卖点信号撞买入档评级 / 买点信号撞减仓
+    卖出档评级时，消息附注"仅波段参考，以评级为主"——评级是唯一动作主指令
 """
 
 import json
@@ -46,7 +52,8 @@ RATING_ORDER = {
 }
 
 # 合法规则类型白名单（API 校验用；与 blueprints/alerts.py _VALID_ALERT_TYPES 同步）
-VALID_RULE_TYPES = ('rating_change', 'score_below', 'capital_outflow', 'tech_signal')
+VALID_RULE_TYPES = ('rating_change', 'score_below', 'capital_outflow', 'tech_signal',
+                    'sell_signal')
 
 
 # ================================================================
@@ -286,6 +293,7 @@ def check_tech_signal(cursor, stock_id, min_stars=None, window=3):
     if min_stars is not None and not resonances:
         return None
 
+    current_rating = _get_current_rating(cursor, stock_id)
     return {
         'signals': [
             {'signal': h['signal'], 'label': h['label'], 'trigger_date': h['trigger_date']}
@@ -296,12 +304,123 @@ def check_tech_signal(cursor, stock_id, min_stars=None, window=3):
         ],
         'kline_upto': kline_upto,
         'kline_count': item['kline_count'],
+        'current_rating': current_rating,
+        'rating_conflict': _rating_conflict('tech_signal', current_rating),
+    }
+
+
+# ================================================================
+# 规则5：自选股卖点技术信号（021BQ 决策闭环 项C）
+#   与 check_tech_signal 同构镜像；复用 market_screener 卖侧平行库
+#   （SELL_SIGNAL_LIBRARY + detect_sell_* + bear 共振，不触碰买侧信号库，
+#   在线全市场扫描仍只产买点）；只读 raw_kline/raw_kline_weekly + daily_reports
+#   （V8 只读消费，不产候选入库）；不涉评级映射（R7 天然规避）。
+# ================================================================
+
+# 信号×评级相悖调和（021BP 行动清单 _CONFLICT_RATINGS 机制镜像，021BQ 项④）：
+# 卖点信号撞买入档评级 / 买点信号撞减仓卖出档评级时，消息附注
+# "仅波段参考，以评级为主"——评级是唯一动作主指令，信号仅短线波段参考。
+_SELL_CONFLICT_RATINGS = ('推荐买入', '强烈推荐买入')
+_BUY_CONFLICT_RATINGS = ('建议减仓', '强烈建议卖出')
+
+
+def _get_current_rating(cursor, stock_id):
+    """最新有效日报的评级（消息上下文注记用；无报告返回 None）。
+
+    只读 daily_reports（V8 合规）；口径与 trader_advisor._gather_inputs 读取
+    "最新评级"一致（status='ok' 且 report_type='daily'，report_date 降序首行）。
+    """
+    cursor.execute(
+        "SELECT rating FROM daily_reports "
+        "WHERE stock_id = ? AND status = 'ok' AND report_type = 'daily' "
+        'ORDER BY report_date DESC LIMIT 1',
+        (stock_id,),
+    )
+    row = cursor.fetchone()
+    return row['rating'] if row else None
+
+
+def _rating_conflict(alert_type, rating):
+    """判定信号方向与当前评级是否相悖（仅 tech_signal / sell_signal 参与判定）。"""
+    if not rating:
+        return False
+    if alert_type == 'sell_signal':
+        return rating in _SELL_CONFLICT_RATINGS
+    if alert_type == 'tech_signal':
+        return rating in _BUY_CONFLICT_RATINGS
+    return False
+
+
+def check_sell_signal(cursor, stock_id, min_stars=None, window=3):
+    """检查自选股最新交易日是否出现卖点技术信号（离线复算，零网络）。
+
+    判定口径与 check_tech_signal 同构镜像（"今日出现"才提醒——每日巡检幂等，
+    不重复轰炸）：
+      - 信号：仅认触发日 == 最新已采集K线日（kline_upto）的死叉/破位命中；
+        窗口内的历史命中不计（前一日巡检已覆盖，同日重复由 UNIQUE 约束去重）
+      - 共振：由检测窗口内全部命中推导（bear 库：双死叉/周线空头/顶背离），
+        随当日信号一并列出
+      - min_stars（规则阈值，选填）：共振星级门槛——设 3/4/5 时，仅当出现
+        不低于该星级的 bear 共振组合才提醒；留空=任意卖点信号都提醒
+
+    数据不足（<35 根日K）静默跳过，不报错不提醒。
+
+    Returns:
+        dict: {'signals': [{signal,label,trigger_date}], 'resonances': [{key,label,stars}],
+               'kline_upto', 'kline_count', 'current_rating', 'rating_conflict'}
+        None: 无信号 / 数据不足 / 未达星级门槛
+    """
+    # 延迟导入：卖侧平行库在同仓 market_screener 模块（含网络函数，避免无关导入开销）
+    from modules.market_screener import (
+        _read_watchlist_klines,
+        compute_watchlist_sell_result,
+    )
+
+    daily_rows, weekly_rows = _read_watchlist_klines(cursor, stock_id)
+    item = compute_watchlist_sell_result(daily_rows, weekly_rows, window=window)
+    kline_upto = item['kline_upto']
+    if not kline_upto:
+        return None  # 无已采集K线
+
+    hits_today = [h for h in item['sell_matches'] if h['trigger_date'] == kline_upto]
+    resonances = item['sell_resonances']
+    if min_stars is not None:
+        resonances = [r for r in resonances if r['stars'] >= int(min_stars)]
+
+    if not hits_today:
+        return None
+    if min_stars is not None and not resonances:
+        return None
+
+    current_rating = _get_current_rating(cursor, stock_id)
+    return {
+        'signals': [
+            {'signal': h['signal'], 'label': h['label'], 'trigger_date': h['trigger_date']}
+            for h in hits_today
+        ],
+        'resonances': [
+            {'key': r['key'], 'label': r['label'], 'stars': r['stars']} for r in resonances
+        ],
+        'kline_upto': kline_upto,
+        'kline_count': item['kline_count'],
+        'current_rating': current_rating,
+        'rating_conflict': _rating_conflict('sell_signal', current_rating),
     }
 
 
 # ================================================================
 # 消息格式化
 # ================================================================
+
+
+def _rating_context_suffix(detail):
+    """信号×评级相悖时的调和注记（021BQ 项④：评级是主指令，信号仅波段参考）。
+
+    021BN 教训：本函数输出会进入前端渲染文案，禁止裸 '<' 字符。"""
+    if detail.get('rating_conflict') and detail.get('current_rating'):
+        return (f'；注意：当前评级「{detail["current_rating"]}」与该信号方向相悖，'
+                '仅波段参考，以评级为主')
+    return ''
 
 
 def _format_message(alert_type, stock_info, detail):
@@ -336,6 +455,17 @@ def _format_message(alert_type, stock_info, detail):
             res_str = '、'.join(f"{r['label']}（{r['stars']}星）" for r in detail['resonances'])
             msg += f'；共振组合：{res_str}'
         msg += f'（基于截至{detail["kline_upto"]}的已采集K线离线复算）'
+        msg += _rating_context_suffix(detail)
+        return msg
+    if alert_type == 'sell_signal':
+        # 021BQ 项C：卖点信号文案与买点同构镜像（禁裸 '<'，021BN 教训）
+        labels = '、'.join(s['label'] for s in detail['signals'])
+        msg = f'{name}({symbol}) 今日出现卖点信号：{labels}'
+        if detail.get('resonances'):
+            res_str = '、'.join(f"{r['label']}（{r['stars']}星）" for r in detail['resonances'])
+            msg += f'；共振组合：{res_str}'
+        msg += f'（基于截至{detail["kline_upto"]}的已采集K线离线复算）'
+        msg += _rating_context_suffix(detail)
         return msg
     return f'{name}({symbol}) 触发 {alert_type} 预警'
 
@@ -355,6 +485,12 @@ _RULE_CHECKERS = {
     ),
     # 阈值语义=共振星级门槛（选填；None=任意买点信号都提醒）
     'tech_signal': lambda cur, rule, sid: check_tech_signal(
+        cur, sid,
+        min_stars=(int(rule['threshold']) if rule['threshold'] is not None else None),
+    ),
+    # 021BQ 项C：卖点信号检查器（与 tech_signal 同构镜像）
+    # 阈值语义=bear 共振星级门槛（选填；None=任意卖点信号都提醒）
+    'sell_signal': lambda cur, rule, sid: check_sell_signal(
         cur, sid,
         min_stars=(int(rule['threshold']) if rule['threshold'] is not None else None),
     ),

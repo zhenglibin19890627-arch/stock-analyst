@@ -17,6 +17,11 @@
   - 扫描器只生产候选，不自动入库；加自选 ≤20 只（BATCH_OPERATION_LIMIT 红线）
   - 快照 ≠ 评级，结果页须标注"快照参考"
   - 无新 pip 依赖（仅 requests）
+  - 021BQ：卖出侧走平行库（SELL_SIGNAL_LIBRARY/SELL_RESONANCE_LIBRARY 与
+    detect_sell_signals/detect_sell_resonances），只服务自选股持仓风险链路
+    （巡检/预警/行动清单）——在线扫描（run_signal_chunk/run_coarse_scan）
+    仍只产买点，往 SIGNAL_LIBRARY/RESONANCE_LIBRARY 加卖侧 key 会泄漏进
+    全市场扫描，严禁（2026-09-07 重设计边界）。
 """
 
 import json
@@ -627,7 +632,194 @@ def detect_signals(kline_rows, wanted=None, window=3):
 
 
 # ================================================================
-# 自选股信号离线复算（021BP 决策闭环 项1）
+# 卖出侧信号库（021BQ 决策闭环：平行库，与买侧同构镜像）
+#   边界（2026-09-07 重设计 + 021BQ 方案裁定）：选股器只产买点、持仓风险
+#   归预警——本库与 detect_sell_* 系列只服务自选股持仓风险链路（巡检/
+#   预警/行动清单/操盘手矩阵），严禁并入 SIGNAL_LIBRARY/RESONANCE_LIBRARY
+#   （会泄漏进在线全市场扫描 run_signal_chunk 的缺省 wanted）。
+#   指标口径复用 _macd_series/_kdj_series/_rsi_series/_ma_series（R7 精神：
+#   与 technical_detail 同源口径不出现第二实现）。
+# ================================================================
+
+SELL_SIGNAL_LIBRARY = {
+    'macd_dead_above': {'label': 'MACD水上死叉', 'note': 'DIF下穿DEA且DIF>0：多头趋势中的派发/回调信号，持仓者减仓警示'},
+    'macd_dead_below': {'label': 'MACD水下死叉', 'note': 'DIF下穿DEA且DIF≤0：空头趋势加速信号，弱势反弹结束'},
+    'kdj_dead_high': {'label': 'KDJ高位死叉', 'note': 'K下穿D且交叉时D高于75：超买区回落，信号中较可靠的卖点'},
+    'kdj_dead': {'label': 'KDJ死叉', 'note': 'K下穿D：一般卖点参考'},
+    'ma20_break': {'label': '破位MA20', 'note': '收盘价自MA20上方跌破MA20（1%缓冲防毛刺）：短线趋势破位事件'},
+}
+
+SELL_RESONANCE_LIBRARY = {
+    'res_double_dead': {
+        'label': '双死叉共振', 'stars': 4, 'kind': 'bear',
+        'note': 'MACD系死叉+KDJ系死叉同窗：两个独立指标系同向下行；同日触发更佳'},
+    'res_week_bear': {
+        'label': '周线空头波段卖', 'stars': 5, 'kind': 'bear',
+        'note': '周线MACD空头(DIF<DEA)+日线窗口死叉：下跌趋势顺势卖点，持仓者警惕继续走弱'},
+    'res_top_reverse': {
+        'label': '顶背离反转卖', 'stars': 5, 'kind': 'bear',
+        'note': '顶背离(价格创60日新高而DIF未新高)+KDJ高位死叉：顶部反转最强确认'},
+}
+
+_MACD_BEAR = ('macd_dead_above', 'macd_dead_below')
+_KDJ_BEAR = ('kdj_dead_high', 'kdj_dead')
+_ALL_BEAR = _MACD_BEAR + _KDJ_BEAR
+# 卖点型共振取最高档（先到先得）：顶背离反转 ≥ 周线空头 ≥ 双死叉
+_SELL_RES_TIER_ORDER = ('res_top_reverse', 'res_week_bear', 'res_double_dead')
+
+
+def detect_sell_signals(kline_rows, wanted=None, window=3):
+    """对单只股票的K线序列检测卖出侧信号（detect_signals 的同构镜像）。
+
+    kline_rows: screener kline 行（时间正序，结构同 fetch_kline 输出）
+    wanted: 信号 key 列表（None=全部 SELL_SIGNAL_LIBRARY）
+    window: 触发窗口（最近 N 个交易日内发生的交叉/破位事件）
+
+    Returns: [{'signal', 'label', 'trigger_date', 'note'}]
+    """
+    wanted = set(wanted) if wanted else set(SELL_SIGNAL_LIBRARY.keys())
+    if len(kline_rows) < 35:
+        return []
+    closes = [r['close'] for r in kline_rows]
+    highs = [r['high'] for r in kline_rows]
+    lows = [r['low'] for r in kline_rows]
+    dates = [r['date'] for r in kline_rows]
+    n = len(closes)
+    hits = []
+
+    # ---- MACD 死叉类（金叉判定的逐条件反向） ----
+    if wanted & {'macd_dead_above', 'macd_dead_below'}:
+        dif, dea = _macd_series(closes)
+        for i in range(n - window, n):
+            if dif[i - 1] >= dea[i - 1] and dif[i] < dea[i]:
+                key = 'macd_dead_above' if dif[i] > 0 else 'macd_dead_below'
+                if key in wanted:
+                    lib = SELL_SIGNAL_LIBRARY[key]
+                    hits.append({'signal': key, 'label': lib['label'],
+                                 'trigger_date': dates[i], 'note': lib['note']})
+
+    # ---- KDJ 死叉类（高位死叉优先于普通死叉，同窗不重复报） ----
+    if wanted & {'kdj_dead_high', 'kdj_dead'}:
+        ks, ds, _js = _kdj_series(highs, lows, closes)
+        high_hit_at = None
+        for i in range(n - window, n):
+            if ks[i - 1] >= ds[i - 1] and ks[i] < ds[i]:
+                if ds[i - 1] > 75:
+                    high_hit_at = i
+                    break  # 高位死叉优先于普通死叉，同窗不重复报
+        if high_hit_at is not None:
+            if 'kdj_dead_high' in wanted:
+                lib = SELL_SIGNAL_LIBRARY['kdj_dead_high']
+                hits.append({'signal': 'kdj_dead_high', 'label': lib['label'],
+                             'trigger_date': dates[high_hit_at], 'note': lib['note']})
+        else:
+            for i in range(n - window, n):
+                if ks[i - 1] >= ds[i - 1] and ks[i] < ds[i]:
+                    if 'kdj_dead' in wanted:
+                        lib = SELL_SIGNAL_LIBRARY['kdj_dead']
+                        hits.append({'signal': 'kdj_dead', 'label': lib['label'],
+                                     'trigger_date': dates[i], 'note': lib['note']})
+                    break
+
+    # ---- 破位 MA20（事件口径：前收在 MA20 上方、今收跌破 MA20×1.01 缓冲线） ----
+    if 'ma20_break' in wanted:
+        mas = _ma_series(closes, 20)
+        for i in range(n - window, n):
+            if mas[i] is None or mas[i - 1] is None:
+                continue
+            if closes[i - 1] >= mas[i - 1] and closes[i] < mas[i] * 1.01:
+                lib = SELL_SIGNAL_LIBRARY['ma20_break']
+                hits.append({'signal': 'ma20_break', 'label': lib['label'],
+                             'trigger_date': dates[i], 'note': lib['note']})
+
+    return hits
+
+
+def detect_sell_resonances(hits, kline_rows=None, weekly_kline_rows=None):
+    """从单只股票的卖出信号命中推导 bear 共振组合（detect_resonances 的同构镜像）。
+
+    hits: detect_sell_signals 输出；kline_rows: 日K（顶背离/放量滞涨证据）；
+    weekly_kline_rows: 周K（可选，周线空头波段卖用）。
+    Returns: [{'key', 'label', 'stars', 'kind', 'note', 'signals': 'label@date + ...'}]
+    卖点型取最高档（顶背离反转 > 周线空头 > 双死叉）。
+    """
+    if not hits:
+        return []
+    keys = {h['signal'] for h in hits}
+    macd_bear = any(k in keys for k in _MACD_BEAR)
+    kdj_bear = any(k in keys for k in _KDJ_BEAR)
+    if not (macd_bear or kdj_bear):
+        return []
+
+    # 环境注记（不定级）：RSI 超买环境 + MA20 位置
+    env = []
+    if kline_rows and len(kline_rows) >= 20:
+        closes = [r['close'] for r in kline_rows]
+        rsis = _rsi_series(closes)
+        if rsis and rsis[-1] is not None and rsis[-1] > 70:
+            env.append('RSI超买环境')
+        ma20 = _ma_series(closes, 20)[-1]
+        if ma20:
+            env.append('MA20上方' if closes[-1] >= ma20 else 'MA20下方')
+    env_str = ('（' + '·'.join(env) + '）') if env else ''
+
+    sig_desc = ' + '.join(f"{h['label']}@{h['trigger_date']}" for h in hits)
+
+    def _res(key):
+        lib = SELL_RESONANCE_LIBRARY[key]
+        return {'key': key, 'label': lib['label'], 'stars': lib['stars'],
+                'kind': lib['kind'], 'note': lib['note'] + env_str,
+                'signals': sig_desc}
+
+    found = {}
+
+    # ① 双死叉共振：MACD系 + KDJ系同窗（同日触发 ⭐4，跨日同窗 ⭐3）
+    if macd_bear and kdj_bear:
+        dates = {h['trigger_date'] for h in hits if h['signal'] in _ALL_BEAR}
+        res = _res('res_double_dead')
+        res['stars'] = 4 if len(dates) == 1 else 3
+        if len(dates) == 1:
+            res['note'] = '同日双死叉（MACD+KDJ同日触发）：标准卖出共振' + env_str
+        found['res_double_dead'] = res
+
+    if kline_rows and len(kline_rows) >= 35:
+        closes = [r['close'] for r in kline_rows]
+
+        # ② 周线空头波段卖：周线 MACD 空头（DIF<DEA）+ 日线窗口内死叉
+        if weekly_kline_rows and len(weekly_kline_rows) >= 35:
+            wdif, wdea = _macd_series([r['close'] for r in weekly_kline_rows])
+            if wdif[-1] < wdea[-1]:
+                found['res_week_bear'] = _res('res_week_bear')
+
+        # ③ 顶背离反转卖：顶背离 + KDJ高位死叉（可选放量滞涨注记）
+        if 'kdj_dead_high' in keys and len(kline_rows) >= 60:
+            dif, _dea = _macd_series(closes)
+            look = 60
+            seg = closes[-look:]
+            pmax_off = seg.index(max(seg))
+            recent_high = pmax_off >= look - 5            # 价格新高出现在近5根内
+            dif_seg = dif[-look:]
+            divergence = recent_high and dif_seg[pmax_off] < max(dif_seg) - 1e-9
+            if divergence:
+                res = _res('res_top_reverse')
+                last = kline_rows[-1]
+                prev_vols = [r['volume'] for r in kline_rows[-6:-1]]
+                vol_stall = (bool(prev_vols)
+                             and last['volume'] >= 1.5 * (sum(prev_vols) / len(prev_vols))
+                             and last['close'] <= last['open'])
+                if vol_stall:
+                    res['note'] += '·放量滞涨'
+                found['res_top_reverse'] = res
+
+    # 卖点型取最高档
+    for key in _SELL_RES_TIER_ORDER:
+        if key in found:
+            return [found[key]]
+    return []
+
+
+# ================================================================
+# 自选股信号离线复算（021BP 决策闭环 项1；021BQ 起含卖出侧平行复算）
 #   复用上方信号纯函数（detect_signals/detect_resonances），输入改为
 #   自选股已采集的库内 K 线（raw_kline / raw_kline_weekly），零网络。
 #   口径：与在线扫描同为"快照参考"——结果截止最新已采集K线（kline_upto），
@@ -741,6 +933,77 @@ def scan_watchlist_signals(stock_ids=None, signals=None, window=3,
                 errors.append({'stock_id': s['id'], 'error': str(e)[:120]})
         return {
             'scope': 'watchlist_offline',
+            'stock_count': len(stocks),
+            'results': results,
+            'errors': errors,
+        }
+    finally:
+        conn.close()
+
+
+def compute_watchlist_sell_result(kline_rows, weekly_rows=None, wanted=None, window=3):
+    """单只股票卖出侧离线复算：卖点信号 + bear 共振（纯函数包装，不触库不触网）。
+
+    Returns: {'side', 'sell_matches', 'sell_resonances', 'kline_upto', 'kline_count'}；
+    K线不足 35 根时 sell_matches 为空列表（detect_sell_signals 门槛），
+    kline_upto 仍回报供调用方判断数据新鲜度。
+    """
+    sell_matches = detect_sell_signals(kline_rows, wanted=wanted, window=window)
+    sell_resonances = detect_sell_resonances(sell_matches, kline_rows, weekly_rows)
+    return {
+        'side': 'sell',
+        'sell_matches': sell_matches,
+        'sell_resonances': sell_resonances,
+        'kline_upto': str(kline_rows[-1]['date']) if kline_rows else None,
+        'kline_count': len(kline_rows),
+    }
+
+
+def scan_watchlist_sell_signals(stock_ids=None, signals=None, window=3,
+                                daily_limit=_WATCHLIST_DAILY_LIMIT):
+    """自选股卖点信号巡检（只读离线复算，零网络；021BQ 决策闭环）。
+
+    与 scan_watchlist_signals 同构镜像：读库口径/收录口径/异常隔离全部一致，
+    仅收录有卖点信号/bear 共振命中的股票。持仓者离场提示的巡检数据源
+    （预警 check_sell_signal / 行动清单卖侧行均消费本函数或其纯函数包装）。
+
+    Returns: {
+        'scope': 'watchlist_offline',   # 快照参考口径标注（区别于在线扫描）
+        'side': 'sell',                 # 卖出侧标注（与买侧巡检区分）
+        'stock_count': N,               # 巡检股票数
+        'results': [{stock_id, symbol, name, sell_matches, sell_resonances,
+                     kline_upto, kline_count}],
+        'errors': [{stock_id, error}],
+    }
+    """
+    wanted = list(signals) if signals else list(SELL_SIGNAL_LIBRARY.keys())
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, symbol, name FROM stocks WHERE status='active' ORDER BY id")
+        stocks = [dict(r) for r in cursor.fetchall()]
+        if stock_ids:
+            wanted_ids = {int(s) for s in stock_ids}
+            stocks = [s for s in stocks if s['id'] in wanted_ids]
+
+        results = []
+        errors = []
+        for s in stocks:
+            try:
+                daily, weekly = _read_watchlist_klines(cursor, s['id'], daily_limit=daily_limit)
+                item = compute_watchlist_sell_result(daily, weekly, wanted=wanted, window=window)
+                if item['sell_matches'] or item['sell_resonances']:
+                    results.append({
+                        'stock_id': s['id'],
+                        'symbol': s['symbol'] or '',
+                        'name': s['name'] or '',
+                        **item,
+                    })
+            except Exception as e:  # noqa: BLE001 —— 单只失败不阻塞巡检（与买侧同型）
+                errors.append({'stock_id': s['id'], 'error': str(e)[:120]})
+        return {
+            'scope': 'watchlist_offline',
+            'side': 'sell',
             'stock_count': len(stocks),
             'results': results,
             'errors': errors,

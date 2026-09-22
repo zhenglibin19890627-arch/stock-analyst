@@ -221,3 +221,46 @@ def api_market_watchlist_signals():
     except Exception as e:  # noqa: BLE001
         return jsonify({'success': False, 'error': f'{e!s}',
                         'scope': 'watchlist_offline', 'results': [], 'errors': []}), 500
+
+
+# ============================================================
+# 021BQ 决策闭环: 自选股卖点信号巡检（离线复算，零网络）
+# ============================================================
+
+
+@bp.route('/api/market/scan/watchlist-sell-signals', methods=['GET'])
+def api_market_watchlist_sell_signals():
+    """自选股卖点信号巡检：对已采集K线（raw_kline/raw_kline_weekly）离线复算。
+
+    与 watchlist-signals 同构镜像，走卖侧平行库（SELL_SIGNAL_LIBRARY/
+    SELL_RESONANCE_LIBRARY，kind='bear'）——在线全市场扫描不受影响（仍只产买点）。
+    零网络——100 只毫秒级完成。Query: ?window=3（触发窗口1~10）&stock_ids=1,2,3
+    （缺省=全部 active 自选股）。响应 scope=watchlist_offline + side=sell：
+    快照参考口径，截止最新已采集K线（kline_upto）。
+    """
+    try:
+        from modules.market_screener import scan_watchlist_sell_signals
+
+        try:
+            window = int(request.args.get('window') or 3)
+        except (TypeError, ValueError):
+            window = 3
+        window = min(max(window, 1), 10)
+
+        raw_ids = (request.args.get('stock_ids') or '').strip()
+        stock_ids = None
+        if raw_ids:
+            stock_ids = []
+            for part in raw_ids.split(','):
+                try:
+                    stock_ids.append(int(part))
+                except ValueError:
+                    continue
+            if not stock_ids:
+                stock_ids = None
+
+        result = scan_watchlist_sell_signals(stock_ids=stock_ids, window=window)
+        return jsonify({'success': True, **result})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({'success': False, 'error': f'{e!s}', 'side': 'sell',
+                        'scope': 'watchlist_offline', 'results': [], 'errors': []}), 500
