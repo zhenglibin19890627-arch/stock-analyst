@@ -100,7 +100,7 @@ python app.py
 ```bash
 # 标准验证命令（在项目根目录运行）
 python -m pytest tests/            # 默认 = fast 层（实测 ~15s；跳过 slow 标记的真实时钟退避测试，OPT-5 分层）
-python -m pytest tests/ -m "slow or not slow"   # 全量（含 slow 层，约 7~8 分钟）
+python -m pytest tests/ -m "slow or not slow"   # 全量（含 slow 层，实测约 2~8 分钟，视机器负载）
 python scripts/check_redlines.py   # 红线自动核验（021A，随 pytest 执行）
 ruff check .
 mypy app.py config.py modules
