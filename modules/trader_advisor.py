@@ -17,10 +17,23 @@
     既有键（stage/capital/playbook/disagreement/rating/total_score/disclaimer）
     结构零改动，纯增量。
 
-与评级的关系（主从结构，用户拍板）：
-    评级是唯一「动作主指令」；本模块输出阶段解读与路径规划。
-    分歧时不推翻评级——动作收窄为「按评级执行但放缓择时」或「等待确认」，
-    并显式给出裁决信号（什么信号出现时跟随哪一方）。测试锁死该行为。
+021BR（2026-09-22）分域不对称层级（用户拍板，测试锁死）——永不自相矛盾：
+    ①风控纪律（止损/破位）无条件最高：纪律已触发时任何行不得与其冲突——
+      「持有」类行被纪律行取代，共振行不得输出「持仓者持有」（改写为反抽减仓参考）；
+    ②减仓/离场类动作听操盘手：评级门控未到（如评级还在持有观望）而操盘手判
+      强下跌/破位/卖点信号时，输出确定性减仓/离场行并标注「操盘手纪律触发，
+      评级尚未跟上（当前评级 X）」，不再写「按评级执行风控」式推给评级；
+    ③买入/加仓方向仍评级门控（021BQ 三档不变），操盘手信号只能改性（反弹参考）
+      不能催促买入。
+    配套：矩阵每行增 layer（纪律/战术/战略）与 status（triggered/pending）字段；
+    止损/破位已触发时 operations.status 置顶状态行（现价/触发线/触发日期）；
+    共振行补触发日期与时效（窗口内历史触发不再读起来像新信号）；
+    detect_disagreement 补「持有观望 × 强置信弱势阶段」档（阶段领先于评级）。
+
+与评级的关系（021BR 分域不对称层级，用户拍板）：
+    风控纪律无条件最高；减仓/离场听操盘手（独立触发）；买入/加仓仍以评级为
+    唯一动作主指令（021BQ 三档门控不变）。分歧时不推翻评级域——动作收窄并
+    显式给出裁决信号（什么信号出现时跟随哪一方）。测试锁死该行为。
 
 方法论与诚实边界：
     - 评分是加权平均（表达强度），阶段判定是模式识别（表达结构）——
@@ -44,6 +57,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from database.db_manager import get_connection
@@ -85,6 +99,7 @@ CONF_WEAK = '低'
 
 DISAG_REVERSAL = 'reversal_opportunity'  # 评级弱 × 阶段好（跌出恐慌盘）
 DISAG_RISK = 'structural_risk'           # 评级强 × 阶段差（冲高派发嫌疑）
+DISAG_STAGE_LEAD = 'stage_leads_rating'  # 评级观望 × 强置信弱势阶段（021BR：阶段领先于评级）
 
 
 # ================================================================
@@ -249,7 +264,7 @@ def _gather_inputs(stock_id: int) -> dict[str, Any] | None:
     try:
         cur = conn.cursor()
         cur.execute(
-            'SELECT close, high, low, volume FROM raw_kline '
+            'SELECT trade_date, close, high, low, volume FROM raw_kline '
             'WHERE stock_id = ? ORDER BY trade_date DESC LIMIT 60',
             (stock_id,),
         )
@@ -287,6 +302,8 @@ def _gather_inputs(stock_id: int) -> dict[str, Any] | None:
         'holding_qty': int(hold['total_qty'] or 0) if hold else 0,
         'cost_price': hold['avg_cost'] if hold else None,
         'signals': signals,
+        # 021BR：近 60 根 (日期, 收盘) 旧→新——止损/破位触发日期回填用
+        'kline_tail': [(str(r['trade_date']), float(r['close'])) for r in reversed(rows)],
     }
 
 
@@ -477,6 +494,8 @@ def detect_disagreement(rating: str | None, stage: dict[str, Any]) -> dict[str, 
     """评级（动作主指令）与阶段判定的分歧检测。
 
     仅在边界档产生实质分歧；低置信度阶段判定不硬造分歧（默认跟评级）。
+    021BR 补档：持有观望 × 强置信弱势阶段（下跌/顶部出货）→ 阶段领先于评级——
+    评级门控未到的空隙档（仅强置信，避免边界抖动）。
     """
     if not rating:
         return None
@@ -488,6 +507,8 @@ def detect_disagreement(rating: str | None, stage: dict[str, Any]) -> dict[str, 
         return {'type': DISAG_REVERSAL}
     if rating in _RATING_STRONG and code in (STAGE_DISTRIBUTION, STAGE_DECLINE):
         return {'type': DISAG_RISK}
+    if rating == '持有观望' and conf == CONF_STRONG and code in (STAGE_DISTRIBUTION, STAGE_DECLINE):
+        return {'type': DISAG_STAGE_LEAD}
     return None
 
 
@@ -547,6 +568,15 @@ def build_playbook(
         watch.append(f'风险确认：跌破 MA20（{ma20:.2f}）→ 结构论胜出，清仓离场' if ma20
                      else '风险确认：跌破 MA20 → 结构论胜出，清仓离场')
         watch.append('评级胜出条件：缩量回踩 MA20 企稳再放量 → 继续按评级持有/加仓')
+    elif disagreement and disagreement['type'] == DISAG_STAGE_LEAD:
+        actions.append(
+            f'⚠️ 阶段领先于评级（评级「{rating}」但阶段特征为{stage_name}）：'
+            '评级尚未跟上结构变化——风控纪律无条件执行，减仓/离场听操盘手纪律，'
+            '加仓继续看评级'
+        )
+        watch.append(f'评级跟上确认：放量站回 MA20（{ma20:.2f}）并企稳 → 阶段论让位，恢复按评级执行' if ma20
+                     else '评级跟上确认：放量站回 MA20 并企稳 → 恢复按评级执行')
+        watch.append('纪律优先：止损线/MA20 破位期间，减仓检查不等待评级')
     else:
         ma20_above = ma20 is not None and close > ma20
         if ma20_above:
@@ -572,7 +602,17 @@ def build_playbook(
 # 021BQ 操作矩阵：短线信号×阶段联动 + 持仓/空仓双视角操作建议
 #   主从契约不变：全部为「条件→动作」式行，与评级相悖时行内附调和注记，
 #   永不输出与评级相反的无条件指令（测试锁死）。
+# 021BR 分域不对称层级：纪律（止损/破位）无条件最高 > 减仓/离场听操盘手
+#   （独立触发，评级未跟上时行内标注）> 买入/加仓评级门控（021BQ 三档不变）；
+#   行增 layer/status 字段，共振行带触发日期与时效，止损已触发置顶状态行。
 # ================================================================
+
+# 021BR 分域不对称层级：矩阵行层级标注
+LAYER_DISCIPLINE = '纪律'  # 风控纪律（止损/破位）——无条件最高，任何行不得与之冲突
+LAYER_TACTICAL = '战术'    # 减仓/离场/回避——操盘手独立触发，不等评级
+LAYER_STRATEGIC = '战略'   # 买入/加仓/持有维持——评级门控
+HIERARCHY_NOTE = '纪律无条件执行 · 减仓听操盘手 · 加仓看评级'
+
 
 def _stop_level(cost: float | None, price_advice: dict[str, Any] | None):
     """止损参考位：成本×0.92 纪律线 与 最新日报价格建议止损 取高者（先到先执行）。
@@ -593,23 +633,73 @@ def _stop_level(cost: float | None, price_advice: dict[str, Any] | None):
 
 def _row(action: str, trigger: str, level: str | None = None,
          level_value: float | None = None, source: str = '',
-         note: str | None = None) -> dict[str, Any]:
-    """操作矩阵标准行：动作 + 触发条件 + 价位 + 来源（+ 相悖调和注记）。"""
+         note: str | None = None, layer: str | None = None,
+         status: str | None = None) -> dict[str, Any]:
+    """操作矩阵标准行：动作 + 触发条件 + 价位 + 来源（+ 相悖调和注记）。
+
+    021BR：layer ∈ {纪律, 战术, 战略}（分域不对称层级标注）；
+    status ∈ {'triggered', 'pending'}（触发状态回填，None=非触发型条件行）。
+    """
     return {'action': action, 'trigger': trigger, 'level': level or '—',
-            'level_value': level_value, 'source': source, 'note': note}
+            'level_value': level_value, 'source': source, 'note': note,
+            'layer': layer, 'status': status}
+
+
+def _break_trigger_date(kline_tail: list[tuple[str, float]],
+                        level: float | None) -> str | None:
+    """当前破位段的首日（触发日期，021BR 状态置顶用）。
+
+    kline_tail 为 [(trade_date, close)] 旧→新；从最新一根向前回溯连续收于
+    level 之下的 K 线，返回该段最早日期；最新一根未破位 → None。
+    """
+    if not level or not kline_tail:
+        return None
+    i = len(kline_tail) - 1
+    trig: str | None = None
+    while i >= 0 and kline_tail[i][1] < level:
+        trig = kline_tail[i][0]
+        i -= 1
+    return trig
+
+
+def _res_date_desc(res: dict[str, Any] | None, upto: str | None) -> str:
+    """共振触发日期描述（021BR 时效标注）。
+
+    从 resonance['signals']（'label@date + ...'，market_screener 同源）提取最新
+    触发日：今日触发→「触发于 X（今日）」；窗口内历史触发→「触发于 X
+    （窗口内历史，非今日）」；解析失败→「触发日不详」。历史触发不得读起来像新信号。
+    """
+    sig = str((res or {}).get('signals') or '')
+    dates = re.findall(r'@(\d{4}-\d{2}-\d{2})', sig)
+    if not dates:
+        return '触发日不详'
+    latest = max(dates)
+    if upto and latest == upto:
+        return f'触发于 {latest}（今日）'
+    return f'触发于 {latest}（窗口内历史，非今日）'
 
 
 def signal_stage_linkage(stage_code: str, rating: str | None,
-                         signals: dict[str, Any] | None) -> list[str]:
+                         signals: dict[str, Any] | None,
+                         close: float | None = None,
+                         stop_level: float | None = None) -> list[str]:
     """短线信号 × 阶段联动解读（白话行；操作矩阵的「联动解读」段）。
 
     语义锚点：弱势阶段的买点=超跌反弹（反抽减仓/不接飞刀）、
     上升阶段的卖点=趋势内回调（跌破 MA20 才执行）、
     底部买点=启动前兆（小仓试错）、震荡期信号=区间噪音（按区间执行）。
     信号×评级相悖时显式调和标注（与行动清单 021BP c23f9ee 同思路）。
+
+    021BR：①共振行带触发日期与时效（_res_date_desc，历史触发不再像新信号）；
+    ②止损纪律门控（层级契约①）——纪律已触发（close < stop_level）时，
+    买点共振行不得输出「持仓者持有」，改写为「止损纪律已触发，共振仅作
+    反抽减仓参考」；③弱势阶段买点共振与 buy_today 同语义（反抽减仓）；
+    ④买点共振×减仓档评级附相悖调和（独立注记，勿复用行动清单元组）。
     """
     out: list[str] = []
     signals = signals or {}
+    stop_hit = stop_level is not None and close is not None and close < stop_level
+    upto = signals.get('kline_upto')
     buy_today = [h['label'] for h in signals.get('buy_today') or []]
     sell_today = [h['label'] for h in signals.get('sell_today') or []]
     if buy_today:
@@ -640,13 +730,27 @@ def signal_stage_linkage(stage_code: str, rating: str | None,
     sell_res = signals.get('sell_resonances') or []
     if sell_res:
         top = max(r['stars'] for r in sell_res)
-        out.append(f'卖出侧共振成立（最高 {top} 星）→ 离场证据强于单信号：'
+        top_r = max(sell_res, key=lambda r: r['stars'])
+        dd = _res_date_desc(top_r, upto)
+        out.append(f'卖出侧共振成立（最高 {top} 星，{dd}）→ 离场证据强于单信号：'
                    '持仓者把减仓位提前，空仓者回避')
     buy_res = signals.get('buy_resonances') or []
     if buy_res:
         top = max(r['stars'] for r in buy_res)
-        out.append(f'买点侧共振成立（最高 {top} 星）→ 入场证据强于单信号：'
-                   '空仓者可按区间分批，持仓者持有')
+        top_r = max(buy_res, key=lambda r: r['stars'])
+        dd = _res_date_desc(top_r, upto)
+        if stop_hit:
+            out.append(f'买点侧共振（最高 {top} 星，{dd}）与止损纪律冲突——'
+                       '止损纪律已触发，共振仅作反抽减仓参考，不构成持有理由')
+        elif stage_code in (STAGE_DECLINE, STAGE_DISTRIBUTION):
+            out.append(f'弱势阶段出现买点共振（最高 {top} 星，{dd}）→ '
+                       '大概率是超跌反弹而非反转：持仓者把它当反抽减仓位，空仓者不接飞刀')
+        else:
+            out.append(f'买点侧共振成立（最高 {top} 星，{dd}）→ 入场证据强于单信号：'
+                       '空仓者可按区间分批，持仓者持有')
+        if not stop_hit and rating in _RATING_WEAK:
+            out.append(f'买点共振与评级「{rating}」相悖：共振只作反抽参考——'
+                       '不加仓，以评级为主')
     if sell_today and rating in _RATING_STRONG:
         out.append(f'卖出信号与评级「{rating}」相悖：评级是动作主指令——'
                    '信号仅波段参考，执行节奏放缓，以评级为主')
@@ -665,6 +769,7 @@ def build_operations_matrix(
     signals: dict[str, Any] | None,
     price_advice: dict[str, Any] | None = None,
     vs: dict[str, Any] | None = None,
+    kline_tail: list[tuple[str, float]] | None = None,
 ) -> dict[str, Any]:
     """持仓/空仓双视角操作矩阵（021BQ 增量键 operations 的构造器，纯函数）。
 
@@ -672,14 +777,21 @@ def build_operations_matrix(
     view 标注当前视角。价位三源：成本×0.92 纪律线、MA20、最新日报
     price_advice 的止损/买入区间（零重算读取）。
 
+    021BR 分域不对称层级：每行带 layer（纪律/战术/战略）与 status
+    （triggered/pending）；止损/破位已触发时 status 置顶状态行
+    （现价/触发线/触发日期）；「持有」类行在纪律已触发时被纪律行取代，
+    任何行不得与风控纪律冲突（层级契约①，测试锁死）。
+
     Returns: {
         'view': 'held'|'empty',
         'holding': {qty, cost, pnl_pct},
+        'status': None | {kind, close, stop_line, trigger_date, ma20_broken, text},
+        'hierarchy_note': '纪律无条件执行 · 减仓听操盘手 · 加仓看评级',
         'signals_today': [{signal,label,side,trigger_date}],
         'linkage': [信号×阶段联动解读...],
-        'held_rows': [{action,trigger,level,level_value,source,note}...],
+        'held_rows': [{action,trigger,level,level_value,source,note,layer,status}...],
         'empty_rows': [...],
-        'top_action': '动作·价位'（当前视角首行摘要，看板增量键）,
+        'top_action': '动作·价位（已触发）'（当前视角首行摘要，看板增量键）,
     }
     """
     signals = signals or {}
@@ -699,6 +811,43 @@ def build_operations_matrix(
     sell_top_stars = max((r['stars'] for r in sell_res), default=0)
     buy_top_stars = max((r['stars'] for r in buy_res), default=0)
 
+    # ---------- 021BR 纪律状态（层级契约①：止损/破位无条件最高） ----------
+    stop, stop_source = _stop_level(cost, price_advice)
+    stop_hit = stop is not None and close < stop
+    stop_trig_date = _break_trigger_date(kline_tail or [], stop) if stop_hit else None
+    ma20_broken = bool(ma20 and close < ma20)
+    ma20_trig_date = _break_trigger_date(kline_tail or [], ma20) if (ma20 and close < ma20) else None
+
+    status_line: dict[str, Any] | None = None
+    if stop_hit:
+        txt = f'止损纪律已触发：现价 {close:.2f} 低于触发线 {stop:.2f}'
+        if stop_trig_date:
+            txt += f'（{stop_trig_date} 起失守）'
+        if ma20_broken:
+            txt += '；同时已跌破 MA20，破位与止损同向'
+        txt += '——无条件执行，不等评级、不等反抽'
+        status_line = {
+            'kind': 'stop_triggered',
+            'close': round(close, 2),
+            'stop_line': stop,
+            'trigger_date': stop_trig_date,
+            'ma20_broken': ma20_broken,
+            'text': txt,
+        }
+    elif ma20_broken and view == 'held':
+        txt = f'破位状态：现价 {close:.2f} 已跌破 MA20（{ma20:.2f}'
+        if ma20_trig_date:
+            txt += f'，{ma20_trig_date} 起失守'
+        txt += '）——操盘手破位纪律待命：反抽不收复则降低仓位'
+        status_line = {
+            'kind': 'breakdown',
+            'close': round(close, 2),
+            'stop_line': stop,
+            'trigger_date': ma20_trig_date,
+            'ma20_broken': True,
+            'text': txt,
+        }
+
     signals_today = (
         [{'signal': h['signal'], 'label': h['label'], 'side': 'buy',
           'trigger_date': h['trigger_date']} for h in buy_today]
@@ -716,30 +865,53 @@ def build_operations_matrix(
         buy_conflict_note = (f'买点信号与评级「{rating}」相悖——按超跌反弹对待，'
                              '不加仓，以评级为主')
 
-    # ---------- 持仓视角：止损 → 持有/破位 → 减仓（事件/条件） → 仓位纪律 ----------
+    # ---------- 持仓视角：纪律置顶 → 止损 → 持有/破位（分域） → 减仓 → 仓位纪律 ----------
     held: list[dict[str, Any]] = []
-    stop, stop_source = _stop_level(cost, price_advice)
     if stop is not None:
+        trig_txt = f'收盘跌破 {stop:.2f} 触发即无条件执行（这是纪律不是观点）'
+        if stop_hit:
+            trig_txt += (f'——已触发：现价 {close:.2f} 低于触发线'
+                         + (f'（{stop_trig_date} 起失守）' if stop_trig_date else '')
+                         + '，无条件执行不等待')
         held.append(_row(
-            '止损', f'收盘跌破 {stop:.2f} 触发即无条件执行（这是纪律不是观点）',
-            level=f'{stop:.2f}', level_value=stop, source=stop_source))
+            '止损', trig_txt,
+            level=f'{stop:.2f}', level_value=stop, source=stop_source,
+            layer=LAYER_DISCIPLINE, status='triggered' if stop_hit else 'pending'))
+    # 021BR 分域注记：减仓域评级对齐状态（观望/买入档=评级尚未跟上、减仓档=同向）
+    # ——止损/破位行不推给评级（层级契约②）；卖出信号×强档评级另走 021BQ
+    # 锁定的相悖调和（conflict_note，见下）
+    risk_note: str | None = None
+    if rating and rating not in _RATING_WEAK:
+        risk_note = f'操盘手纪律触发，评级尚未跟上（当前评级 {rating}）'
+    elif rating in _RATING_WEAK:
+        risk_note = f'与评级「{rating}」同向'
     if ma20:
-        if close >= ma20:
+        if close >= ma20 and not stop_hit:
             held.append(_row(
                 '持有', f'收盘站稳 MA20（{ma20_str}）上方且无卖出信号 → 继续持有',
-                level=f'MA20={ma20_str}', level_value=ma20, source='阶段+技术面'))
-        else:
+                level=f'MA20={ma20_str}', level_value=ma20, source='阶段+技术面',
+                layer=LAYER_STRATEGIC))
+        elif close < ma20:
             held.append(_row(
-                '减仓检查', f'收盘已跌破 MA20（{ma20_str}）→ 按评级执行风控，'
+                '减仓检查', f'收盘已跌破 MA20（{ma20_str}）→ 操盘手破位纪律触发：'
                 '反抽不收复 MA20 则降低仓位',
-                level=f'MA20={ma20_str}', level_value=ma20, source='阶段+技术面'))
+                level=f'MA20={ma20_str}', level_value=ma20, source='阶段+技术面',
+                note=risk_note, layer=LAYER_TACTICAL, status='triggered'))
+        else:  # 收盘在 MA20 上方但止损纪律已触发——纪律优先，不输出「持有」（层级契约①）
+            held.append(_row(
+                '减仓检查', f'收盘在 MA20（{ma20_str}）上方，但止损纪律已触发'
+                f'（现价 {close:.2f}，低于触发线 {stop:.2f}）→ 纪律优先：先执行止损，'
+                'MA20 上方仅作反抽退出参考',
+                level=f'MA20={ma20_str}', level_value=ma20, source='阶段+技术面',
+                note=risk_note, layer=LAYER_TACTICAL, status='triggered'))
     if sell_today or sell_top_stars >= 4:
         if sell_today:
             trig = ('今日已出现 ' + '、'.join(h['label'] for h in sell_today)
                     + (f'（截至 {upto}）' if upto else '') + ' → 执行减仓检查')
         else:
             top_res = max(sell_res, key=lambda r: r['stars'])
-            trig = f'窗口内出现 {top_res["label"]}（{top_res["stars"]}星）→ 反弹即分批减仓'
+            trig = (f'窗口内出现 {top_res["label"]}（{top_res["stars"]}星，'
+                    f'{_res_date_desc(top_res, upto)}）→ 反弹即分批减仓')
         if ma20 and close < ma20:
             level_str = f'反抽 MA20（{ma20_str}）附近分批减'
         elif ma20:
@@ -748,22 +920,31 @@ def build_operations_matrix(
             level_str = '分批降低仓位'
         if low60 and ma20:
             level_str += f'；前低 {low60:.2f} 为最后防线'
+        # 021BR 分域：减仓听操盘手——强档评级保留 021BQ 锁定的相悖调和，
+        # 观望/买入档=独立触发标注（层级契约②），减仓档=同向
+        note: str | None
+        if conflict_note:
+            note = conflict_note
+        else:
+            note = risk_note
         held.append(_row('减仓', trig, level=level_str,
-                         level_value=ma20, source='技术信号', note=conflict_note))
+                         level_value=ma20, source='技术信号', note=note,
+                         layer=LAYER_TACTICAL,
+                         status='triggered' if sell_today else None))
     else:
         held.append(_row(
             '减仓（条件）', f'若出现 MACD/KDJ 死叉或收盘跌破 MA20（{ma20_str or "—"}）'
             '→ 减仓检查',
             level=f'MA20={ma20_str}' if ma20 else '—', level_value=ma20,
-            source='技术信号'))
+            source='技术信号', layer=LAYER_TACTICAL))
     if cost and qty:
         pnl = (close - cost) / cost * 100
         held.append(_row(
             '仓位纪律', f'持仓 {qty:,} 股 · 成本 {cost:.2f} · '
-            f'浮动{"盈" if pnl >= 0 else "亏"} {pnl:+.1f}%——加减仓动作以评级为主指令',
-            source='评级主指令'))
+            f'浮动{"盈" if pnl >= 0 else "亏"} {pnl:+.1f}%——{HIERARCHY_NOTE}',
+            source='分域层级', layer=LAYER_STRATEGIC))
 
-    # ---------- 空仓视角：回避/观望 → 买入触发/关注 → 等待信号 ----------
+    # ---------- 空仓视角：回避/观望 → 买入触发/关注 → 等待信号（买入域评级门控不变） ----------
     empty_rows: list[dict[str, Any]] = []
     if sell_today or sell_top_stars >= 4:
         if sell_today:
@@ -771,16 +952,17 @@ def build_operations_matrix(
                     + ' → 回避新买入，等企稳')
         else:
             top_res = max(sell_res, key=lambda r: r['stars'])
-            trig = f'窗口内出现 {top_res["label"]}（{top_res["stars"]}星）→ 回避新买入'
+            trig = (f'窗口内出现 {top_res["label"]}（{top_res["stars"]}星，'
+                    f'{_res_date_desc(top_res, upto)}）→ 回避新买入')
         empty_rows.append(_row(
             '回避', trig,
             level=f'等放量站回 MA20（{ma20_str}）再确认' if ma20 else '等右侧确认',
-            level_value=ma20, source='技术信号'))
+            level_value=ma20, source='技术信号', layer=LAYER_TACTICAL))
     else:
         empty_rows.append(_row(
             '观望', '无卖出信号但左侧未反转 → 观望，等右侧确认信号',
             level=f'关注 MA20（{ma20_str}）方向' if ma20 else '—',
-            level_value=ma20, source='阶段+技术面'))
+            level_value=ma20, source='阶段+技术面', layer=LAYER_STRATEGIC))
     if buy_today:
         if rating in _RATING_STRONG:
             tone = f'评级「{rating}」支持，可分批执行'
@@ -808,30 +990,38 @@ def build_operations_matrix(
         empty_rows.append(_row(
             action, '今日出现 ' + '、'.join(h['label'] for h in buy_today)
             + ' → 条件触发；' + tone,
-            level=level_str, level_value=lv, source='技术信号+价格建议', note=note))
+            level=level_str, level_value=lv, source='技术信号+价格建议', note=note,
+            layer=LAYER_STRATEGIC))
     elif buy_top_stars >= 4:
         top_res = max(buy_res, key=lambda r: r['stars'])
         empty_rows.append(_row(
-            '关注', f'窗口内买点共振 {top_res["label"]}（{top_res["stars"]}星）'
+            '关注', f'窗口内买点共振 {top_res["label"]}（{top_res["stars"]}星，'
+            f'{_res_date_desc(top_res, upto)}）'
             '→ 列入观察，等触发日落定（以收盘为准）',
-            level='等今日确认', source='技术信号'))
+            level='等今日确认', source='技术信号', layer=LAYER_STRATEGIC))
     else:
         empty_rows.append(_row(
             '等待信号', '无买点事件 → 不预判，等信号触发再执行（不抄底不猜顶）',
-            source='纪律'))
+            source='纪律', layer=LAYER_STRATEGIC))
 
     cur_rows = held if view == 'held' else empty_rows
     top_action = None
     if cur_rows:
         r0 = cur_rows[0]
-        top_action = r0['action'] + (f'·{r0["level"]}' if r0['level_value'] is not None else '')
+        trig_suffix = '（已触发）' if r0.get('status') == 'triggered' else ''
+        top_action = (r0['action']
+                      + (f'·{r0["level"]}' if r0['level_value'] is not None else '')
+                      + trig_suffix)
 
     return {
         'view': view,
         'holding': {'qty': qty, 'cost': cost,
                     'pnl_pct': round((close - cost) / cost * 100, 1) if cost and qty else None},
+        'status': status_line,
+        'hierarchy_note': HIERARCHY_NOTE,
         'signals_today': signals_today,
-        'linkage': signal_stage_linkage(stage['code'], rating, signals),
+        'linkage': signal_stage_linkage(stage['code'], rating, signals,
+                                        close=close, stop_level=stop),
         'held_rows': held,
         'empty_rows': empty_rows,
         'top_action': top_action,
@@ -861,12 +1051,14 @@ def generate_trader_advice(stock_id: int) -> dict[str, Any]:
         )
         # 021BQ 操作矩阵（增量键）：持仓/空仓双视角 + 短线信号联动，
         # 失败静默降级（不阻塞既有阶段/主力/对策主链路）
+        # 021BR：kline_tail 供止损/破位触发日期回填
         try:
             operations = build_operations_matrix(
                 data, stage, inputs['rating'],
                 {'qty': inputs['holding_qty'], 'cost': inputs['cost_price']},
                 float(data.close), inputs.get('signals'),
                 inputs.get('price_advice'), vs=inputs.get('vs'),
+                kline_tail=inputs.get('kline_tail'),
             )
         except Exception as e:  # noqa: BLE001 —— 增量层失败不阻塞主链路
             logger.warning(f'[trader-advisor] 操作矩阵构造失败 stock_id={stock_id}: {e}')
@@ -880,7 +1072,8 @@ def generate_trader_advice(stock_id: int) -> dict[str, Any]:
             'disagreement': None,
             'rating': inputs['rating'],
             'total_score': inputs['total_score'],
-            'disclaimer': '阶段与主力判断为规则化推断（参考非指令），仓位动作以评级为准；不构成投资建议',
+            'disclaimer': '阶段与主力判断为规则化推断（参考非指令），'
+                          f'{HIERARCHY_NOTE}；不构成投资建议',
         }
         if operations is not None:
             result['operations'] = operations
@@ -890,6 +1083,14 @@ def generate_trader_advice(stock_id: int) -> dict[str, Any]:
                     'type': DISAG_REVERSAL,
                     'text': f'与评级「{inputs["rating"]}」分歧：阶段特征更接近{stage["name"]}——'
                             '评分看的是动量走弱，阶段看的是筹码换手结构。主指令不变，执行节奏放缓。',
+                }
+            elif disagreement['type'] == DISAG_STAGE_LEAD:
+                result['disagreement'] = {
+                    'type': DISAG_STAGE_LEAD,
+                    'text': f'阶段领先于评级：阶段特征为{stage["name"]}'
+                            f'（{stage["confidence"]}置信）而评级仍「{inputs["rating"]}」'
+                            '——评级尚未跟上结构变化；风控纪律（止损/破位）无条件执行，'
+                            '减仓/离场听操盘手纪律，加仓继续看评级。',
                 }
             else:
                 result['disagreement'] = {

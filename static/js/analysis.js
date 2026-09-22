@@ -1507,7 +1507,14 @@
                         '回避': '#888', '观望': '#888', '等待信号': '#888'
                     };
                     html += '<div style="font-weight:600;font-size:13px;padding:8px 0 4px;">④ 操作矩阵' +
-                            ' <span style="font-weight:400;color:var(--text-3,#888);font-size:12px;">触发条件 → 动作（价位）</span></div>';
+                            ' <span style="font-weight:400;color:var(--text-3,#888);font-size:12px;">纪律无条件执行 · 减仓听操盘手 · 加仓看评级</span></div>';
+                    // 021BR 状态置顶：止损已触发/破位显式状态行（现价/触发线/触发日期）
+                    var stt = ops.status;
+                    if (stt && stt.text) {
+                        html += '<div style="margin:2px 0 8px;padding:8px 10px;background:#fdecea;' +
+                                'border-left:3px solid #c0392b;border-radius:0 6px 6px 0;font-size:12.5px;' +
+                                'color:#7b1c12;line-height:1.7;font-weight:600;">🛑 ' + _taEsc(stt.text) + '</div>';
+                    }
                     var sigs = ops.signals_today || [];
                     if (sigs.length) {
                         html += '<div style="display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 6px;">';
@@ -1535,10 +1542,19 @@
                         }
                         html += '<div style="margin-top:6px;">';
                         html += '<div style="font-size:12px;font-weight:600;color:var(--text-2,#555);margin-bottom:3px;">👤 ' + label + _taEsc(headExtra) + '</div>';
+                        var layerColor = { '纪律': '#c0392b', '战术': '#d35400', '战略': '#1a73e8' };
                         rows.forEach(function(r) {
                             var c = opsColor[r.action] || '#888';
-                            html += '<div style="display:flex;gap:6px;align-items:flex-start;padding:3px 0;line-height:1.6;">';
-                            html += '<span style="flex:none;min-width:64px;text-align:center;font-size:11.5px;font-weight:600;color:#fff;background:' + c + ';border-radius:4px;padding:2px 6px;">' + _taEsc(r.action) + '</span>';
+                            var triggered = r.status === 'triggered';
+                            html += '<div style="display:flex;gap:6px;align-items:flex-start;padding:3px 0;line-height:1.6;' +
+                                    (triggered ? 'background:#fdf2f1;border-radius:6px;' : '') + '">';
+                            if (r.layer) {
+                                html += '<span style="flex:none;font-size:10px;font-weight:600;color:#fff;background:' +
+                                        (layerColor[r.layer] || '#888') + ';border-radius:3px;padding:2px 5px;margin-top:2px;">' +
+                                        _taEsc(r.layer) + '</span>';
+                            }
+                            html += '<span style="flex:none;min-width:64px;text-align:center;font-size:11.5px;font-weight:600;color:#fff;background:' + c + ';border-radius:4px;padding:2px 6px;">' + _taEsc(r.action) +
+                                    (triggered ? '<span style="font-weight:400;">·已触发</span>' : '') + '</span>';
                             html += '<span style="font-size:12.5px;color:var(--text-2,#555);">' + _taEsc(r.trigger) +
                                     (r.level && r.level !== '—' ? ' <b style="color:var(--text,#444);">[' + _taEsc(r.level) + ']</b>' : '') +
                                     (r.source ? ' <span style="font-size:11px;color:var(--text-3,#999);">（' + _taEsc(r.source) + '）</span>' : '') + '</span>';

@@ -618,3 +618,209 @@ class TestOperationsEndToEnd:
         assert sig['stage_name'] == '主升期'
         assert sig['has_disagreement'] is False
         assert sig['top_action'] == '止损·12.88'
+
+
+# ================================================================
+# 021BR 分域不对称层级：纪律最高 / 减仓操盘手独立触发 / 买入评级门控
+#   + 止损状态置顶 + 共振时效（中免实测形态回归，测试锁死）
+# ================================================================
+
+_RES_BUY = [{'key': 'res_week_daily', 'label': '周线共振波段', 'stars': 5,
+             'kind': 'bull', 'note': '', 'signals': 'KDJ低位金叉@2026-09-21'}]
+
+_STAGE_DECLINE = {'code': STAGE_DECLINE, 'name': '下跌期', 'confidence': '强'}
+
+
+class TestAsymmetricHierarchy021BR:
+    """层级契约①②③ + 状态置顶 + 共振时效（用户拍板，测试锁死）"""
+
+    def _zhongmian_ops(self):
+        """中免 2026-09-22 实测形态：现价 52.27 低于止损线 56.16（成本 57.53），
+        MA20 52.78 已破，同屏买点共振 5 星（触发日 09-21 = 窗口内历史信号）"""
+        return build_operations_matrix(
+            _MkData(ma20=52.78), _STAGE_DECLINE, '持有观望',
+            {'qty': 2100, 'cost': 57.53}, 52.27,
+            _mk_signals(buy_res=_RES_BUY, upto='2026-09-22'),
+            {'stop_loss': 56.16}, kline_tail=[
+                ('2026-09-18', 55.90), ('2026-09-21', 53.10), ('2026-09-22', 52.27)])
+
+    def test_zhongmian_no_hold_when_stop_triggered(self):
+        """契约①回归：止损已触发 + 共振5星同现 → 无「持有」行、
+        linkage 无「持仓者持有」、共振行改写为反抽减仓参考并带历史触发日期"""
+        ops = self._zhongmian_ops()
+        assert not [r for r in ops['held_rows'] if r['action'] == '持有']
+        assert all('持仓者持有' not in line for line in ops['linkage'])
+        assert any('止损纪律已触发' in line and '反抽减仓参考' in line
+                   for line in ops['linkage'])
+        # 共振时效：窗口内历史触发必须带日期且标注非今日，不得读起来像新信号
+        assert any('2026-09-21' in line and '非今日' in line for line in ops['linkage'])
+
+    def test_zhongmian_stop_status_pinned_top(self):
+        """契约③状态置顶：ops.status 显式止损已触发（现价/触发线/触发日期）；
+        止损行 status='triggered' 且附现价；top_action 带「已触发」"""
+        ops = self._zhongmian_ops()
+        st = ops['status']
+        assert st and st['kind'] == 'stop_triggered'
+        assert st['close'] == 52.27 and st['stop_line'] == 56.16
+        assert st['trigger_date'] == '2026-09-18'  # 当前破位段首日
+        assert st['ma20_broken'] is True
+        stop_rows = [r for r in ops['held_rows'] if r['action'] == '止损']
+        assert stop_rows[0]['status'] == 'triggered'
+        assert '现价 52.27' in stop_rows[0]['trigger']
+        assert ops['top_action'].startswith('止损·56.16')
+        assert '已触发' in ops['top_action']
+
+    def test_layer_annotations_on_all_rows(self):
+        """契约②标注面：每行带 layer（纪律/战术/战略）+ 分域头部话术；
+        止损=纪律、减仓检查=战术、仓位纪律=战略"""
+        ops = self._zhongmian_ops()
+        for r in ops['held_rows'] + ops['empty_rows']:
+            assert r['layer'] in ('纪律', '战术', '战略'), r
+        by_action = {r['action']: r for r in ops['held_rows']}
+        assert by_action['止损']['layer'] == '纪律'
+        assert by_action['减仓检查']['layer'] == '战术'
+        assert by_action['仓位纪律']['layer'] == '战略'
+        assert ops['hierarchy_note'] == '纪律无条件执行 · 减仓听操盘手 · 加仓看评级'
+
+    def test_breakdown_independent_of_rating_lag(self):
+        """契约②：强下跌（卖点+破位）× 评级滞后（持有观望）→ 确定性减仓行 +
+        「操盘手纪律触发，评级尚未跟上（当前评级 持有观望）」；
+        全矩阵不再出现「按评级执行风控」式推给评级"""
+        ops = build_operations_matrix(
+            _MkData(ma20=52.78), _STAGE_DECLINE, '持有观望',
+            {'qty': 1000, 'cost': 57.53}, 52.27,
+            _mk_signals(sell_today=[_sell_hit()], upto='2026-09-22'),
+            {'stop_loss': 56.16})
+        reduce_rows = [r for r in ops['held_rows'] if r['action'] == '减仓']
+        assert reduce_rows and reduce_rows[0]['note']
+        assert '操盘手纪律触发' in reduce_rows[0]['note']
+        assert '评级尚未跟上（当前评级 持有观望）' in reduce_rows[0]['note']
+        check_rows = [r for r in ops['held_rows'] if r['action'] == '减仓检查']
+        assert check_rows and '操盘手破位纪律触发' in check_rows[0]['trigger']
+        assert '按评级执行风控' not in json.dumps(ops, ensure_ascii=False)
+
+    def test_weak_rating_aligned_note(self):
+        """契约②补齐：减仓档评级 × 卖点信号 → 同向注记（非推诿非滞后）"""
+        ops = build_operations_matrix(
+            _MkData(), _STAGE_OK, '建议减仓', {'qty': 1000, 'cost': 20.0}, 19.0,
+            _mk_signals(sell_today=[_sell_hit()]), _PA)
+        reduce_rows = [r for r in ops['held_rows'] if r['action'] == '减仓']
+        assert reduce_rows[0]['note'] and '同向' in reduce_rows[0]['note']
+
+    def test_buy_domain_still_rating_gated(self):
+        """契约③：买入域仍评级门控——减仓档评级 × 今日买点 → 试仓观察
+        （绝不输出买入触发），行层级=战略"""
+        ops = build_operations_matrix(
+            _MkData(), _STAGE_OK, '建议减仓', {'qty': 0, 'cost': None}, 21.0,
+            _mk_signals(buy_today=[_buy_hit()]), _PA)
+        assert not [r for r in ops['empty_rows'] if '买入触发' in r['action']]
+        watch = [r for r in ops['empty_rows'] if r['action'] == '试仓观察']
+        assert watch and watch[0]['layer'] == '战略'
+        assert '仅观察不买入' in watch[0]['trigger']
+
+    def test_resonance_normal_wording_when_stop_not_triggered(self):
+        """止损未触发 + 共振5星 → 共振行保持「成立」措辞（带日期时效）"""
+        ops = build_operations_matrix(
+            _MkData(ma20=20.0), _STAGE_OK, '持有观望',
+            {'qty': 1000, 'cost': 20.0}, 21.0,
+            _mk_signals(buy_res=_RES_BUY, upto='2026-09-22'), _PA)
+        assert any('共振成立' in line and '2026-09-21' in line for line in ops['linkage'])
+        assert not any('止损纪律已触发' in line for line in ops['linkage'])
+
+    def test_linkage_direct_stop_gate(self):
+        """signal_stage_linkage 直调门控：close 低于 stop_level → 共振行改写"""
+        lines = signal_stage_linkage(STAGE_DECLINE, '持有观望',
+                                     _mk_signals(buy_res=_RES_BUY, upto='2026-09-22'),
+                                     close=52.27, stop_level=56.16)
+        assert any('止损纪律已触发' in line and '反抽减仓参考' in line for line in lines)
+        assert all('持仓者持有' not in line for line in lines)
+
+    def test_weak_stage_resonance_no_hold(self):
+        """汤臣形态回归（诊断 A9）：下跌期 + 今日买点 + 共振 → 共振行与买点行
+        同语义（反抽减仓），不再互斥出现「反抽减仓」与「持仓者持有」"""
+        lines = signal_stage_linkage(STAGE_DECLINE, '持有观望',
+                                     _mk_signals(buy_today=[_buy_hit()],
+                                                 buy_res=_RES_BUY, upto='2026-09-22'))
+        assert any('反抽减仓' in line for line in lines)
+        assert all('持仓者持有' not in line for line in lines)
+
+    def test_hold_row_survives_when_stop_not_triggered(self):
+        """纪律未触发 + MA20 上方 → 「持有」行保留（层级压制只在纪律触发时生效）；
+        状态行为 None"""
+        ops = build_operations_matrix(
+            _MkData(ma20=20.0), _STAGE_OK, '持有观望',
+            {'qty': 1000, 'cost': 20.0}, 21.0, _mk_signals(), _PA)
+        assert any(r['action'] == '持有' for r in ops['held_rows'])
+        assert ops['status'] is None
+
+    def test_no_bare_lt_in_hierarchy_texts(self):
+        """021BN 延续：层级/状态新文案同样不得引入裸 <"""
+        ops = self._zhongmian_ops()
+        assert '<' not in json.dumps(ops, ensure_ascii=False)
+
+    def test_zhongmian_end_to_end(self, client):
+        """端到端（临时库）：止损线失守 → operations.status 置顶 + 触发日期回填 +
+        无「持有」行 + top_action 带已触发（/trader-advice 端点与看板链路同源）"""
+        import datetime as dt
+        sid = client._stock_id
+        closes = [60.0] * 58 + [55.5, 52.27]  # 最后两根失守 56.16
+        d0 = dt.date(2026, 6, 20)
+        conn = db_manager.get_connection()
+        try:
+            conn.execute("INSERT INTO accounts (name) VALUES ('测试账户')")
+            for i, cl in enumerate(closes):
+                d = (d0 + dt.timedelta(days=i)).isoformat()
+                conn.execute(
+                    "INSERT INTO raw_kline (stock_id, trade_date, open, close, high, low, volume) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (sid, d, cl * 0.99, cl, cl * 1.01, cl * 0.98, 1000))
+            conn.execute(
+                "INSERT INTO daily_reports (report_date, stock_id, stock_code, stock_name, "
+                "engine_version, total_score, rating, key_factors, price_advice, status, report_type) "
+                "VALUES ('2026-08-18', ?, '002230', '测试股', 'v5', 55.0, '持有观望', '{}', ?, 'ok', 'daily')",
+                (sid, json.dumps({'stop_loss': 56.16})))
+            conn.execute(
+                'INSERT INTO holdings (account_id, stock_id, cost_price, quantity) '
+                'VALUES (1, ?, 57.53, 2100)', (sid,))
+            conn.commit()
+        finally:
+            conn.close()
+        r = generate_trader_advice(sid)
+        assert r['available']
+        ops = r['operations']
+        st = ops['status']
+        assert st and st['kind'] == 'stop_triggered'
+        assert st['stop_line'] == 56.16
+        assert st['trigger_date'] == '2026-08-17'  # 倒数第2根（d0+58）= 破位段首日
+        assert not [row for row in ops['held_rows'] if row['action'] == '持有']
+        assert '已触发' in ops['top_action']
+        assert ops['hierarchy_note'] == '纪律无条件执行 · 减仓听操盘手 · 加仓看评级'
+
+
+class TestStageLeadDisagreement021BR:
+    """分歧检测补档（诊断 §3.5）：持有观望 × 强置信弱势阶段 → stage_leads_rating"""
+
+    def test_neutral_rating_strong_decline_flagged(self):
+        d = detect_disagreement('持有观望', {'code': STAGE_DECLINE, 'confidence': '强'})
+        assert d and d['type'] == 'stage_leads_rating'
+        d2 = detect_disagreement('持有观望', {'code': STAGE_DISTRIBUTION, 'confidence': '强'})
+        assert d2 and d2['type'] == 'stage_leads_rating'
+
+    def test_mid_or_weak_confidence_not_flagged(self):
+        assert detect_disagreement('持有观望', {'code': STAGE_DECLINE, 'confidence': '中'}) is None
+        assert detect_disagreement('持有观望', {'code': STAGE_DECLINE, 'confidence': '低'}) is None
+
+    def test_neutral_rating_bull_stage_not_flagged(self):
+        assert detect_disagreement('持有观望', {'code': STAGE_MARKUP_FULL, 'confidence': '强'}) is None
+
+    def test_playbook_stage_lead_branch(self):
+        from modules.trader_advisor import build_playbook
+        stg = {'code': STAGE_DECLINE, 'name': '下跌期', 'confidence': '强', 'evidence': []}
+        cap = {'summary': 'x', 'tone': 'bearish', 'details': [], 'blind_spots': []}
+        pb = build_playbook(stg, cap, '持有观望', 1000, 57.5, 52.3,
+                            {'type': 'stage_leads_rating'})
+        text = ' '.join(pb['actions'])
+        assert '阶段领先于评级' in text
+        assert '评级尚未跟上' in text
+        assert '加仓继续看评级' in text
+        assert any('纪律优先' in w for w in pb['watch_signals'])
