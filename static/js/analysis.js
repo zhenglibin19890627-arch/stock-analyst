@@ -1496,6 +1496,61 @@
                     html += '</div>';
                 }
 
+                // 第四段（021BQ）：操作矩阵——持仓/空仓双视角 + 短线信号联动
+                var ops = d.operations;
+                if (ops) {
+                    var opsColor = {
+                        '止损': '#27ae60', '减仓': '#27ae60', '减仓检查': '#27ae60', '清仓': '#27ae60',
+                        '持有': '#1a73e8', '仓位纪律': '#1a73e8',
+                        '买入触发': '#e74c3c', '试仓触发': '#e74c3c',
+                        '关注': '#f39c12', '试仓观察': '#f39c12',
+                        '回避': '#888', '观望': '#888', '等待信号': '#888'
+                    };
+                    html += '<div style="font-weight:600;font-size:13px;padding:8px 0 4px;">④ 操作矩阵' +
+                            ' <span style="font-weight:400;color:var(--text-3,#888);font-size:12px;">触发条件 → 动作（价位）</span></div>';
+                    var sigs = ops.signals_today || [];
+                    if (sigs.length) {
+                        html += '<div style="display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 6px;">';
+                        sigs.forEach(function(s) {
+                            var c = s.side === 'sell' ? '#27ae60' : '#e74c3c';
+                            html += '<span style="font-size:11px;color:#fff;background:' + c + ';padding:2px 8px;border-radius:10px;">' +
+                                    (s.side === 'sell' ? '▼ 卖 ' : '▲ 买 ') + _taEsc(s.label) + '@' + _taEsc(s.trigger_date) + '</span>';
+                        });
+                        html += '</div>';
+                    } else {
+                        html += '<div style="color:var(--text-3,#999);font-size:12px;margin-bottom:5px;">今日无金叉/死叉事件（近3日窗口离线复算口径）</div>';
+                    }
+                    (ops.linkage || []).forEach(function(t) {
+                        html += '<div style="background:#eef4fb;border-left:3px solid #1a73e8;border-radius:0 6px 6px 0;padding:5px 8px;margin:3px 0;color:#1a3c6e;font-size:12.5px;line-height:1.7;">📡 ' + _taEsc(t) + '</div>';
+                    });
+                    [['持仓者', ops.held_rows, ops.holding], ['空仓者', ops.empty_rows, null]].forEach(function(pair) {
+                        var label = pair[0];
+                        var rows = pair[1] || [];
+                        var hold = pair[2];
+                        var headExtra = '';
+                        if (hold && hold.qty > 0) {
+                            headExtra = '（持仓 ' + hold.qty + ' 股' +
+                                (hold.cost ? ' · 成本 ' + Number(hold.cost).toFixed(2) : '') +
+                                (hold.pnl_pct != null ? ' · 浮动' + (hold.pnl_pct >= 0 ? '盈 +' : '亏 ') + hold.pnl_pct + '%' : '') + '）';
+                        }
+                        html += '<div style="margin-top:6px;">';
+                        html += '<div style="font-size:12px;font-weight:600;color:var(--text-2,#555);margin-bottom:3px;">👤 ' + label + _taEsc(headExtra) + '</div>';
+                        rows.forEach(function(r) {
+                            var c = opsColor[r.action] || '#888';
+                            html += '<div style="display:flex;gap:6px;align-items:flex-start;padding:3px 0;line-height:1.6;">';
+                            html += '<span style="flex:none;min-width:64px;text-align:center;font-size:11.5px;font-weight:600;color:#fff;background:' + c + ';border-radius:4px;padding:2px 6px;">' + _taEsc(r.action) + '</span>';
+                            html += '<span style="font-size:12.5px;color:var(--text-2,#555);">' + _taEsc(r.trigger) +
+                                    (r.level && r.level !== '—' ? ' <b style="color:var(--text,#444);">[' + _taEsc(r.level) + ']</b>' : '') +
+                                    (r.source ? ' <span style="font-size:11px;color:var(--text-3,#999);">（' + _taEsc(r.source) + '）</span>' : '') + '</span>';
+                            html += '</div>';
+                            if (r.note) {
+                                html += '<div style="background:#fff8e1;border-radius:6px;padding:4px 8px;margin:2px 0 2px 70px;color:#7a5c00;font-size:12px;line-height:1.6;">⚠️ ' + _taEsc(r.note) + '</div>';
+                            }
+                        });
+                        html += '</div>';
+                    });
+                }
+
                 // 判断依据（默认收起，点开展开）+ 主力细节 + 盲区
                 var ev = st.evidence || [];
                 var blind = cap.blind_spots || [];

@@ -56,6 +56,7 @@ def _derive_trader_signal(kf_json):
 
     日报生成时由 trader_advisor 预计算（阶段名 + 与评级的分歧）；
     无摘要/解析失败返回 None（前端不显示标记，不影响主卡片）。
+    021BQ：增量键 top_action（操作矩阵当前视角首行动作摘要；旧键零改动）。
     """
     if not kf_json:
         return None
@@ -68,6 +69,7 @@ def _derive_trader_signal(kf_json):
             'stage_name': t.get('stage_name'),
             'has_disagreement': bool(t.get('has_disagreement')),
             'disagreement_text': t.get('disagreement_text'),
+            'top_action': t.get('top_action'),
         }
     except (TypeError, ValueError):
         return None

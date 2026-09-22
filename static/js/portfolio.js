@@ -1698,15 +1698,24 @@
                 }
 
                 // 2026-09-18：操盘手阶段×评级分歧标记（日报预计算，零重算读取）
+                // 021BQ：增量 top_action（操作矩阵首行动作摘要；无分歧时以中性 chip 展示）
                 var traderStr = '';
                 var trader = st.trader_signal;
                 if (trader && trader.has_disagreement) {
                     var tName = trader.stage_name || '';
                     var tTip = (trader.disagreement_text || '评级与操盘手阶段判定存在分歧，主指令仍以评级为准') +
+                        (trader.top_action ? '；当前动作：' + trader.top_action : '') +
                         '（阶段：' + tName + '；来自最新报告 ' + (st.report_date || '—') + '，点击查看完整操盘手建议）';
                     traderStr = '<span style="font-size:11px;color:#8a6d00;background:#fff3cd;padding:2px 7px;' +
                         'border-radius:10px;white-space:nowrap;cursor:help;" title="' +
                         tTip.replace(/"/g, '&quot;') + '">⚡' + tName + '·分歧</span>';
+                } else if (trader && trader.top_action) {
+                    var taTip = '操盘手操作矩阵首行动作（触发条件与价位见个股页操盘手卡；来自最新报告 ' +
+                        (st.report_date || '—') + '）';
+                    traderStr = '<span style="font-size:11px;color:#1a3c6e;background:#eef4fb;padding:2px 7px;' +
+                        'border-radius:10px;white-space:nowrap;cursor:help;" title="' +
+                        taTip.replace(/"/g, '&quot;') + '">🎯' +
+                        String(trader.top_action || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</span>';
                 }
 
                 var clickFn, clickTitle;

@@ -23,10 +23,12 @@ from modules.trader_advisor import (
     STAGE_MARKUP_EARLY,
     STAGE_MARKUP_FULL,
     STAGE_RANGE,
+    build_operations_matrix,
     capital_narrative,
     classify_stage,
     detect_disagreement,
     generate_trader_advice,
+    signal_stage_linkage,
 )
 
 
@@ -351,3 +353,268 @@ class TestEndToEnd:
         assert d['success']
         assert d['stage']['name']
         assert d['capital']['summary']
+
+
+# ================================================================
+# 021BQ 操作矩阵：双视角 / 评级主从 / 短线信号联动 / 多账户聚合
+# ================================================================
+
+def _mk_signals(buy_today=None, sell_today=None, buy_res=None, sell_res=None,
+                upto='2026-09-18'):
+    return {
+        'kline_upto': upto,
+        'buy_today': buy_today or [],
+        'sell_today': sell_today or [],
+        'buy_window': list(buy_today or []),
+        'sell_window': list(sell_today or []),
+        'buy_resonances': buy_res or [],
+        'sell_resonances': sell_res or [],
+    }
+
+
+def _sell_hit(label='MACD水上死叉', key='macd_dead_above'):
+    return {'signal': key, 'label': label, 'trigger_date': '2026-09-18', 'note': ''}
+
+
+def _buy_hit(label='MACD水下金叉', key='macd_golden_below'):
+    return {'signal': key, 'label': label, 'trigger_date': '2026-09-18', 'note': ''}
+
+
+class _MkData:
+    """build_operations_matrix 的最小 data（仅需 ma20）"""
+
+    def __init__(self, ma20=20.0):
+        self.ma20 = ma20
+
+
+_STAGE_OK = {'code': STAGE_MARKUP_EARLY, 'name': '拉升初期', 'confidence': '中'}
+_PA = {'stop_loss': 12.0, 'buy_low': 19.0, 'buy_high': 21.0}
+
+
+class TestOperationsMatrix:
+    """双视角操作矩阵纯函数（021BQ 增量键 operations）"""
+
+    def test_view_and_dual_rows(self):
+        ops = build_operations_matrix(_MkData(), _STAGE_OK, '持有观望',
+                                      {'qty': 1000, 'cost': 20.0}, 21.0,
+                                      _mk_signals(), _PA)
+        assert ops['view'] == 'held'
+        assert ops['holding']['qty'] == 1000
+        assert ops['holding']['pnl_pct'] == 5.0
+        assert ops['held_rows'] and ops['empty_rows']  # 双视角行同时输出
+        assert ops['top_action'].startswith('止损·')   # 当前视角首行摘要
+        # 空仓行对同一输入也可独立成立（构造无持仓输入验证）
+        ops2 = build_operations_matrix(_MkData(), _STAGE_OK, '持有观望',
+                                       {'qty': 0, 'cost': None}, 21.0,
+                                       _mk_signals(), _PA)
+        assert ops2['view'] == 'empty'
+
+    def test_stop_level_takes_higher_of_two_sources(self):
+        """止损位 = max(成本×0.92 纪律线, 价格建议止损)，双源标注取值口径"""
+        ops = build_operations_matrix(_MkData(), _STAGE_OK, '持有观望',
+                                      {'qty': 1000, 'cost': 13.9}, 14.0,
+                                      _mk_signals(), _PA)
+        stop_rows = [r for r in ops['held_rows'] if r['action'] == '止损']
+        assert len(stop_rows) == 1
+        # max(13.9×0.92=12.788→12.79, 12.0) = 12.79
+        assert stop_rows[0]['level_value'] == 12.79
+        assert stop_rows[0]['source'] == '纪律/价格建议取高者'
+
+    def test_stop_level_pa_only_when_no_cost(self):
+        ops = build_operations_matrix(_MkData(), _STAGE_OK, '持有观望',
+                                      {'qty': 1000, 'cost': None}, 14.0,
+                                      _mk_signals(), _PA)
+        stop_rows = [r for r in ops['held_rows'] if r['action'] == '止损']
+        assert stop_rows[0]['level_value'] == 12.0
+        assert stop_rows[0]['source'] == '价格建议'
+
+    def test_sell_signal_reduce_row_with_conflict_note(self):
+        """卖点信号×买入档评级 → 减仓行引用具体信号，行内附调和注记（主从契约）"""
+        ops = build_operations_matrix(_MkData(), _STAGE_OK, '推荐买入',
+                                      {'qty': 1000, 'cost': 20.0}, 21.0,
+                                      _mk_signals(sell_today=[_sell_hit()]), _PA)
+        reduce_rows = [r for r in ops['held_rows'] if r['action'] == '减仓']
+        assert len(reduce_rows) == 1
+        assert 'MACD水上死叉' in reduce_rows[0]['trigger']
+        assert '以评级为主' in reduce_rows[0]['note']
+        # 联动解读同样显式标注相悖 + 减仓行引用 MA20 价位
+        assert any('相悖' in line and '以评级为主' in line for line in ops['linkage'])
+        assert any('MA20' in r['level'] for r in ops['held_rows'])
+
+    def test_reduce_conditional_when_no_sell_signal(self):
+        """无卖出信号 → 减仓行走条件触发式（若出现死叉/破位），不输出无条件指令"""
+        ops = build_operations_matrix(_MkData(), _STAGE_OK, '推荐买入',
+                                      {'qty': 1000, 'cost': 20.0}, 21.0,
+                                      _mk_signals(), _PA)
+        cond = [r for r in ops['held_rows'] if r['action'] == '减仓（条件）']
+        assert len(cond) == 1
+        assert cond[0]['trigger'].startswith('若')
+
+    def test_empty_buy_trigger_with_rating_gating(self):
+        """空仓视角：买点信号×买入档 → 买入触发行带价格建议区间；×减仓档 → 降级为观察并附调和注记"""
+        ops = build_operations_matrix(_MkData(), _STAGE_OK, '推荐买入',
+                                      {'qty': 0, 'cost': None}, 21.0,
+                                      _mk_signals(buy_today=[_buy_hit()]), _PA)
+        buy_rows = [r for r in ops['empty_rows'] if r['action'] == '买入触发']
+        assert len(buy_rows) == 1
+        assert 'MACD水下金叉' in buy_rows[0]['trigger']
+        assert '买入区间 19.00~21.00' in buy_rows[0]['level']
+        assert '支持' in buy_rows[0]['trigger']
+
+        ops2 = build_operations_matrix(_MkData(), _STAGE_OK, '建议减仓',
+                                       {'qty': 0, 'cost': None}, 21.0,
+                                       _mk_signals(buy_today=[_buy_hit()]), _PA)
+        watch_rows = [r for r in ops2['empty_rows'] if r['action'] == '试仓观察']
+        assert len(watch_rows) == 1
+        assert '仅观察不买入' in watch_rows[0]['trigger']
+        assert '以评级为主' in watch_rows[0]['note']
+        assert not [r for r in ops2['empty_rows'] if r['action'] == '买入触发']
+
+    def test_baseline_rows_without_signals(self):
+        """无任何信号 → 基线条件行仍然成立（止损/持有/观望/等待信号）"""
+        ops = build_operations_matrix(_MkData(), _STAGE_OK, '持有观望',
+                                      {'qty': 1000, 'cost': 20.0}, 21.0,
+                                      _mk_signals(), _PA)
+        actions = [r['action'] for r in ops['held_rows']]
+        assert '止损' in actions and '持有' in actions and '减仓（条件）' in actions
+        assert ops['signals_today'] == []
+        assert ops['linkage'] == []
+        e_actions = [r['action'] for r in ops['empty_rows']]
+        assert '观望' in e_actions and '等待信号' in e_actions
+
+    def test_linkage_stage_x_signal_semantics(self):
+        """联动解读语义锚点：弱势+买点=超跌反弹不接飞刀；上升+卖点=趋势内回调"""
+        link_down = signal_stage_linkage(STAGE_DECLINE, '建议减仓',
+                                         _mk_signals(buy_today=[_buy_hit()]))
+        assert any('超跌反弹' in line and '不接飞刀' in line for line in link_down)
+        link_up = signal_stage_linkage(STAGE_MARKUP_FULL, '推荐买入',
+                                       _mk_signals(sell_today=[_sell_hit()]))
+        assert any('回调警示' in line for line in link_up)
+        link_acc = signal_stage_linkage(STAGE_ACCUMULATION, '持有观望',
+                                        _mk_signals(buy_today=[_buy_hit(label='KDJ低位金叉', key='kdj_golden_low')]))
+        assert any('启动前兆' in line for line in link_acc)
+
+    def test_sell_resonance_raises_reduce_priority(self):
+        """窗口内 bear 共振 ≥4 星（非当日）→ 减仓/回避行同样成立"""
+        res = [{'key': 'res_week_bear', 'label': '周线空头波段卖', 'stars': 5,
+                'kind': 'bear', 'note': '', 'signals': ''}]
+        ops = build_operations_matrix(_MkData(), _STAGE_OK, '持有观望',
+                                      {'qty': 1000, 'cost': 20.0}, 21.0,
+                                      _mk_signals(sell_res=res), _PA)
+        assert any(r['action'] == '减仓' for r in ops['held_rows'])
+        assert any(r['action'] == '回避' for r in ops['empty_rows'])
+        assert '周线空头波段卖' in ops['held_rows'][-2]['trigger']
+
+    def test_no_bare_lt_in_matrix(self):
+        import json as _json
+        ops = build_operations_matrix(_MkData(), _STAGE_OK, '推荐买入',
+                                      {'qty': 1000, 'cost': 20.0}, 21.0,
+                                      _mk_signals(sell_today=[_sell_hit()],
+                                                  buy_today=[_buy_hit()]), _PA)
+        assert '<' not in _json.dumps(ops, ensure_ascii=False)
+
+
+class TestOperationsEndToEnd:
+    """generate_trader_advice 端到端（临时库造K线/持仓/日报）"""
+
+    def _seed_calibrated_kline(self, client, stock_id, closes):
+        """021BQ 校准 OHLC（open=0.99c/high=1.01c/low=0.98c）——与卖侧信号
+        校准几何一致（ramp+加速阳+大阴 → 双死叉落最新一根）"""
+        import datetime as dt
+        d0 = dt.date(2026, 6, 1)
+        conn = db_manager.get_connection()
+        try:
+            for i, cl in enumerate(closes):
+                d = (d0 + dt.timedelta(days=i)).isoformat()
+                conn.execute(
+                    "INSERT INTO raw_kline (stock_id, trade_date, open, close, high, low, volume) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (stock_id, d, cl * 0.99, cl, cl * 1.01, cl * 0.98, 1000))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_operations_incremental_key(self, client):
+        """operations 为纯增量键：既有键（stage/capital/playbook/disagreement/
+        rating/total_score/disclaimer）结构零改动"""
+        sid = client._stock_id
+        _seed_kline(client, sid, [10 + i * 0.05 for i in range(60)])
+        _seed_rating(client, sid, '持有观望', 57.0)
+        r = generate_trader_advice(sid)
+        assert r['available']
+        for key in ('stage', 'capital', 'playbook', 'disagreement',
+                    'rating', 'total_score', 'disclaimer'):
+            assert key in r
+        ops = r['operations']
+        assert ops['view'] in ('held', 'empty')
+        assert isinstance(ops['held_rows'], list) and isinstance(ops['empty_rows'], list)
+        assert 'signals_today' in ops and 'linkage' in ops
+
+    def test_multi_account_holding_aggregated(self, client):
+        """多账户同股分仓 → 数量汇总 + 加权平均成本（修复 ORDER BY id LIMIT 1 单行取缺口）"""
+        sid = client._stock_id
+        _seed_kline(client, sid, [10 + i * 0.05 for i in range(60)])
+        _seed_rating(client, sid, '持有观望', 57.0)
+        conn = db_manager.get_connection()
+        try:
+            conn.execute("INSERT INTO accounts (name) VALUES ('账户A')")
+            conn.execute("INSERT INTO accounts (name) VALUES ('账户B')")
+            # 账户A 600股@10 + 账户B 400股@20 → 汇总 1000股 加权成本 14.0
+            # （若仍是旧的单行取 ORDER BY id LIMIT 1，只会读到 600@10）
+            conn.execute(
+                'INSERT INTO holdings (account_id, stock_id, cost_price, quantity) '
+                'VALUES (1, ?, 10.0, 600)', (sid,))
+            conn.execute(
+                'INSERT INTO holdings (account_id, stock_id, cost_price, quantity) '
+                'VALUES (2, ?, 20.0, 400)', (sid,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        r = generate_trader_advice(sid)
+        assert r['available']
+        assert r['playbook']['profile'].startswith('持仓 1,000 股 · 成本 14.00')
+        ops = r['operations']
+        assert ops['view'] == 'held'
+        assert ops['holding']['qty'] == 1000
+        assert ops['holding']['cost'] == 14.0
+        # 止损位 = 成本×0.92 = 12.88（加权成本口径）
+        stop_rows = [row for row in ops['held_rows'] if row['action'] == '止损']
+        assert stop_rows and stop_rows[0]['level_value'] == 12.88
+
+    def test_sell_signal_fused_into_operations(self, client):
+        """端到端：死叉形态K线 → operations.signals_today 出现卖侧事件 +
+        联动解读 + 买入档评级相悖调和（信号层真实融合，非装饰键）"""
+        sid = client._stock_id
+        closes = [60 + i * 2.0 for i in range(44)] + [156.0, 138.0]
+        self._seed_calibrated_kline(client, sid, closes)
+        _seed_rating(client, sid, '推荐买入', 70.0)
+
+        r = generate_trader_advice(sid)
+        assert r['available']
+        ops = r['operations']
+        sell_sigs = [s for s in ops['signals_today'] if s['side'] == 'sell']
+        assert {s['signal'] for s in sell_sigs} == {'macd_dead_above', 'kdj_dead_high'}
+        # 同日触发（校准形态：双死叉落最新一根K线）
+        assert len({s['trigger_date'] for s in sell_sigs}) == 1
+        assert any('卖出信号与评级「推荐买入」相悖' in line for line in ops['linkage'])
+        assert any('以评级为主' in line for line in ops['linkage'])
+        # 空仓视角同步给出回避动作
+        assert any(row['action'] == '回避' for row in ops['empty_rows'])
+
+    def test_derive_trader_signal_top_action_passthrough(self, client):
+        """看板派生增量键：key_factors.trader.top_action 透传（旧键零改动）"""
+        from blueprints.portfolio import _derive_trader_signal
+        kf = json.dumps({
+            'kline': {'score': 50},
+            'trader': {
+                'stage_name': '主升期',
+                'has_disagreement': False,
+                'disagreement_text': None,
+                'top_action': '止损·12.88',
+            },
+        }, ensure_ascii=False)
+        sig = _derive_trader_signal(kf)
+        assert sig['stage_name'] == '主升期'
+        assert sig['has_disagreement'] is False
+        assert sig['top_action'] == '止损·12.88'

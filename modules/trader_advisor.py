@@ -5,6 +5,18 @@
     2. 主力资金在干嘛？（资金×筹码×杠杆的组合推断，含分歧检测与数据盲区）
     3. 我们该怎么做 + 什么信号出现时改变判断？（对策 + 裁决条件）
 
+021BQ（2026-09-22）操作矩阵升级：输出新增 `operations` 键——
+    持仓/空仓双视角操作矩阵（触发条件与价位），融合短线技术信号层：
+    - 短线信号：复用 market_screener 平行纯函数对库内K线离线复算
+      （买点 detect_signals + 卖点 detect_sell_signals 双侧，零网络零新增采集）
+    - 关键价位：成本×0.92 纪律线 + 最新日报 price_advice 的止损/买入区间
+      （零重算读取已存数据，不触碰 price_advisor 计算）
+    - 主从契约不变：评级是唯一动作主指令，矩阵全部为「条件→动作」式，
+      与评级相悖的信号行内附调和注记（021BP 行动清单 c23f9ee 同思路），
+      永不输出与评级相反的无条件指令（测试锁死）。
+    既有键（stage/capital/playbook/disagreement/rating/total_score/disclaimer）
+    结构零改动，纯增量。
+
 与评级的关系（主从结构，用户拍板）：
     评级是唯一「动作主指令」；本模块输出阶段解读与路径规划。
     分歧时不推翻评级——动作收窄为「按评级执行但放缓择时」或「等待确认」，
@@ -20,15 +32,17 @@
 数据来源（全部现成，零新增采集）：
     - StockData 契约（data_adapter 加载）：均线/MACD/RSI/量比/主力资金/户数/杠杆/情绪
     - raw_kline 近 60 根：量能趋势/量价配合度/量价背离/位置分位/振幅（本模块计算）
+    - raw_kline 近 250 根 + raw_kline_weekly（021BQ）：买卖侧短线信号离线复算
     - trend_analyzer.analyze_trends：日/周/月三周期趋势
-    - daily_reports 最新评级（分歧检测的「主指令」输入）
-    - holdings 持仓成本（对策个性化）
+    - daily_reports 最新评级 + price_advice（021BQ 价位层，零重算读取）
+    - holdings 持仓成本（对策个性化；021BQ 起按账户聚合，多账户分仓不失真）
 
 只读纯函数：不写库、不发网络请求、不触碰 generate_advice（B24 红线）。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -149,8 +163,81 @@ def _volume_structure(klines: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def _load_price_advice(pa_json: Any) -> dict[str, Any]:
+    """从最新日报已存 price_advice JSON 提取操作矩阵价位（零重算只读）。
+
+    与看板 _parse_pa_zone 同源口径（buy_range_low/high + stop_loss），
+    缺数据/解析失败逐字段降级为 None，不阻塞主链路。
+    """
+    out: dict[str, Any] = {'stop_loss': None, 'buy_low': None, 'buy_high': None}
+    if not pa_json:
+        return out
+    try:
+        pa = json.loads(pa_json) if isinstance(pa_json, str) else pa_json
+    except (TypeError, ValueError):
+        return out
+    if not isinstance(pa, dict):
+        return out
+    if pa.get('stop_loss') is not None:
+        try:
+            out['stop_loss'] = float(pa['stop_loss'])
+        except (TypeError, ValueError):
+            pass
+    if pa.get('buy_range_low') is not None and pa.get('buy_range_high') is not None:
+        try:
+            out['buy_low'] = float(pa['buy_range_low'])
+            out['buy_high'] = float(pa['buy_range_high'])
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _read_signals(cur: Any, stock_id: int, window: int = 3) -> dict[str, Any]:
+    """短线信号层：复用 market_screener 平行纯函数对库内K线买卖双侧离线复算。
+
+    只读 raw_kline/raw_kline_weekly（V8 合规），零网络零新增采集；
+    失败静默降级为空结果（信号层是增量信息，不阻塞阶段判定主链路）。
+    """
+    empty: dict[str, Any] = {
+        'kline_upto': None,
+        'buy_today': [], 'sell_today': [],
+        'buy_window': [], 'sell_window': [],
+        'buy_resonances': [], 'sell_resonances': [],
+    }
+    try:
+        from modules.market_screener import (
+            _read_watchlist_klines,
+            compute_watchlist_sell_result,
+            compute_watchlist_signal_result,
+        )
+
+        daily, weekly = _read_watchlist_klines(cur, stock_id)
+        if not daily:
+            return empty
+        buy = compute_watchlist_signal_result(daily, weekly, window=window)
+        sell = compute_watchlist_sell_result(daily, weekly, window=window)
+        upto = buy['kline_upto']
+        return {
+            'kline_upto': upto,
+            'buy_today': [h for h in buy['matches'] if h['trigger_date'] == upto],
+            'sell_today': [h for h in sell['sell_matches'] if h['trigger_date'] == upto],
+            'buy_window': buy['matches'],
+            'sell_window': sell['sell_matches'],
+            'buy_resonances': buy['resonances'],
+            'sell_resonances': sell['sell_resonances'],
+        }
+    except Exception as e:  # noqa: BLE001 —— 增量层失败不阻塞主链路
+        logger.warning(f'[trader-advisor] 信号层复算失败 stock_id={stock_id}: {e}')
+        return empty
+
+
 def _gather_inputs(stock_id: int) -> dict[str, Any] | None:
-    """汇总阶段判定所需的全部输入（契约数据 + K线结构 + 趋势 + 评级 + 持仓）。"""
+    """汇总阶段判定所需的全部输入（契约数据 + K线结构 + 趋势 + 评级 + 持仓）。
+
+    021BQ：①持仓读数改为账户无关聚合（SUM(quantity) + 加权平均成本）——
+    修复多账户同股分仓时单行取（ORDER BY id LIMIT 1）失真的缺口（021W 约定）；
+    ②新增短线信号层（买卖双侧离线复算）与价位层（最新日报 price_advice 零重算）。
+    """
     from modules.data_adapter import load_stockdata_from_db
     from modules.trend_analyzer import analyze_trends
 
@@ -168,18 +255,23 @@ def _gather_inputs(stock_id: int) -> dict[str, Any] | None:
         )
         rows = [dict(r) for r in cur.fetchall()]
         cur.execute(
-            "SELECT rating, total_score FROM daily_reports "
+            "SELECT rating, total_score, price_advice FROM daily_reports "
             "WHERE stock_id = ? AND status = 'ok' AND report_type = 'daily' "
             'ORDER BY report_date DESC LIMIT 1',
             (stock_id,),
         )
         rep = cur.fetchone()
+        # 021BQ 多账户聚合：同股多账户分仓 → 数量汇总 + 加权平均成本
+        # （SUM+GROUP BY 账户无关聚合，天然满足 021W 多行约定无重复行）
         cur.execute(
-            'SELECT quantity, cost_price FROM holdings '
-            "WHERE stock_id = ? AND quantity > 0 ORDER BY id LIMIT 1",
+            'SELECT SUM(quantity) AS total_qty, '
+            'CASE WHEN SUM(quantity) > 0 '
+            'THEN SUM(quantity * cost_price) / SUM(quantity) END AS avg_cost '
+            'FROM holdings WHERE stock_id = ? AND quantity > 0',
             (stock_id,),
         )
         hold = cur.fetchone()
+        signals = _read_signals(cur, stock_id)
     finally:
         conn.close()
 
@@ -191,8 +283,10 @@ def _gather_inputs(stock_id: int) -> dict[str, Any] | None:
         'trends': trends,
         'rating': rep['rating'] if rep else None,
         'total_score': rep['total_score'] if rep else None,
-        'holding_qty': hold['quantity'] if hold else 0,
-        'cost_price': hold['cost_price'] if hold else None,
+        'price_advice': _load_price_advice(rep['price_advice'] if rep else None),
+        'holding_qty': int(hold['total_qty'] or 0) if hold else 0,
+        'cost_price': hold['avg_cost'] if hold else None,
+        'signals': signals,
     }
 
 
@@ -475,6 +569,276 @@ def build_playbook(
 
 
 # ================================================================
+# 021BQ 操作矩阵：短线信号×阶段联动 + 持仓/空仓双视角操作建议
+#   主从契约不变：全部为「条件→动作」式行，与评级相悖时行内附调和注记，
+#   永不输出与评级相反的无条件指令（测试锁死）。
+# ================================================================
+
+def _stop_level(cost: float | None, price_advice: dict[str, Any] | None):
+    """止损参考位：成本×0.92 纪律线 与 最新日报价格建议止损 取高者（先到先执行）。
+
+    Returns: (level|None, source_str) —— 双源齐备时 source 标注取值口径。
+    """
+    disc = cost * 0.92 if cost else None
+    pa = (price_advice or {}).get('stop_loss')
+    candidates = [(disc, '纪律'), (pa, '价格建议')]
+    vals = [(v, s) for v, s in candidates if v]
+    if not vals:
+        return None, None
+    level, source = max(vals, key=lambda x: x[0])
+    if len(vals) == 2:
+        source = '纪律/价格建议取高者'
+    return round(level, 2), source
+
+
+def _row(action: str, trigger: str, level: str | None = None,
+         level_value: float | None = None, source: str = '',
+         note: str | None = None) -> dict[str, Any]:
+    """操作矩阵标准行：动作 + 触发条件 + 价位 + 来源（+ 相悖调和注记）。"""
+    return {'action': action, 'trigger': trigger, 'level': level or '—',
+            'level_value': level_value, 'source': source, 'note': note}
+
+
+def signal_stage_linkage(stage_code: str, rating: str | None,
+                         signals: dict[str, Any] | None) -> list[str]:
+    """短线信号 × 阶段联动解读（白话行；操作矩阵的「联动解读」段）。
+
+    语义锚点：弱势阶段的买点=超跌反弹（反抽减仓/不接飞刀）、
+    上升阶段的卖点=趋势内回调（跌破 MA20 才执行）、
+    底部买点=启动前兆（小仓试错）、震荡期信号=区间噪音（按区间执行）。
+    信号×评级相悖时显式调和标注（与行动清单 021BP c23f9ee 同思路）。
+    """
+    out: list[str] = []
+    signals = signals or {}
+    buy_today = [h['label'] for h in signals.get('buy_today') or []]
+    sell_today = [h['label'] for h in signals.get('sell_today') or []]
+    if buy_today:
+        labels = '、'.join(buy_today)
+        if stage_code in (STAGE_DECLINE, STAGE_DISTRIBUTION):
+            out.append(f'弱势阶段出现买点信号（{labels}）→ 大概率是超跌反弹而非反转：'
+                       '持仓者把它当反抽减仓位，空仓者不接飞刀（等放量站上均线再确认）')
+        elif stage_code in (STAGE_MARKUP_FULL, STAGE_MARKUP_EARLY):
+            out.append(f'上升阶段出现买点信号（{labels}）→ 趋势内的加速/中继确认：'
+                       '持仓者继续持有，空仓者注意不追高（等回踩）')
+        elif stage_code == STAGE_ACCUMULATION:
+            out.append(f'底部吸筹区出现买点信号（{labels}）→ 可能是启动前兆：'
+                       '空仓者小仓试错（错了就走），持仓者继续持有等右侧')
+        else:
+            out.append(f'震荡期出现买点信号（{labels}）→ 区间内噪音居多：'
+                       '按区间下沿试仓、上沿兑现执行，不追单日信号')
+    if sell_today:
+        labels = '、'.join(sell_today)
+        if stage_code in (STAGE_MARKUP_FULL, STAGE_MARKUP_EARLY):
+            out.append(f'上升阶段出现卖出信号（{labels}）→ 多头趋势内的回调警示：'
+                       '持仓者关注减仓位（跌破 MA20 执行），空仓者不追高等回调结束')
+        elif stage_code in (STAGE_DECLINE, STAGE_DISTRIBUTION):
+            out.append(f'弱势阶段再出卖出信号（{labels}）→ 趋势走弱确认：'
+                       '持仓者严格执行减仓/止损纪律，空仓者继续观望')
+        else:
+            out.append(f'震荡期出现卖出信号（{labels}）→ 破位预警：'
+                       '持仓者收紧防守线（MA20/成本止损），空仓者回避新买入')
+    sell_res = signals.get('sell_resonances') or []
+    if sell_res:
+        top = max(r['stars'] for r in sell_res)
+        out.append(f'卖出侧共振成立（最高 {top} 星）→ 离场证据强于单信号：'
+                   '持仓者把减仓位提前，空仓者回避')
+    buy_res = signals.get('buy_resonances') or []
+    if buy_res:
+        top = max(r['stars'] for r in buy_res)
+        out.append(f'买点侧共振成立（最高 {top} 星）→ 入场证据强于单信号：'
+                   '空仓者可按区间分批，持仓者持有')
+    if sell_today and rating in _RATING_STRONG:
+        out.append(f'卖出信号与评级「{rating}」相悖：评级是动作主指令——'
+                   '信号仅波段参考，执行节奏放缓，以评级为主')
+    if buy_today and rating in _RATING_WEAK:
+        out.append(f'买点信号与评级「{rating}」相悖：按超跌反弹对待——'
+                   '不加仓、不减仓（既有止损纪律优先），以评级为主')
+    return out
+
+
+def build_operations_matrix(
+    data: Any,
+    stage: dict[str, Any],
+    rating: str | None,
+    holding: dict[str, Any] | None,
+    close: float,
+    signals: dict[str, Any] | None,
+    price_advice: dict[str, Any] | None = None,
+    vs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """持仓/空仓双视角操作矩阵（021BQ 增量键 operations 的构造器，纯函数）。
+
+    每行 = 触发条件 → 动作（含价位与来源标注）；持仓/空仓两套行同时输出，
+    view 标注当前视角。价位三源：成本×0.92 纪律线、MA20、最新日报
+    price_advice 的止损/买入区间（零重算读取）。
+
+    Returns: {
+        'view': 'held'|'empty',
+        'holding': {qty, cost, pnl_pct},
+        'signals_today': [{signal,label,side,trigger_date}],
+        'linkage': [信号×阶段联动解读...],
+        'held_rows': [{action,trigger,level,level_value,source,note}...],
+        'empty_rows': [...],
+        'top_action': '动作·价位'（当前视角首行摘要，看板增量键）,
+    }
+    """
+    signals = signals or {}
+    price_advice = price_advice or {}
+    qty = int((holding or {}).get('qty') or 0)
+    cost = (holding or {}).get('cost')
+    view = 'held' if qty > 0 else 'empty'
+    ma20 = getattr(data, 'ma20', None)
+    ma20_str = f'{ma20:.2f}' if ma20 else None
+    low60 = (vs or {}).get('low60')
+
+    buy_today = signals.get('buy_today') or []
+    sell_today = signals.get('sell_today') or []
+    sell_res = signals.get('sell_resonances') or []
+    buy_res = signals.get('buy_resonances') or []
+    upto = signals.get('kline_upto')
+    sell_top_stars = max((r['stars'] for r in sell_res), default=0)
+    buy_top_stars = max((r['stars'] for r in buy_res), default=0)
+
+    signals_today = (
+        [{'signal': h['signal'], 'label': h['label'], 'side': 'buy',
+          'trigger_date': h['trigger_date']} for h in buy_today]
+        + [{'signal': h['signal'], 'label': h['label'], 'side': 'sell',
+            'trigger_date': h['trigger_date']} for h in sell_today]
+    )
+
+    # 信号×评级相悖调和注记（主从契约：显式标注不装一致）
+    conflict_note = None
+    if sell_today and rating in _RATING_STRONG:
+        conflict_note = (f'卖出信号与评级「{rating}」相悖——评级是动作主指令，'
+                         '信号仅波段参考，以评级为主')
+    buy_conflict_note = None
+    if buy_today and rating in _RATING_WEAK:
+        buy_conflict_note = (f'买点信号与评级「{rating}」相悖——按超跌反弹对待，'
+                             '不加仓，以评级为主')
+
+    # ---------- 持仓视角：止损 → 持有/破位 → 减仓（事件/条件） → 仓位纪律 ----------
+    held: list[dict[str, Any]] = []
+    stop, stop_source = _stop_level(cost, price_advice)
+    if stop is not None:
+        held.append(_row(
+            '止损', f'收盘跌破 {stop:.2f} 触发即无条件执行（这是纪律不是观点）',
+            level=f'{stop:.2f}', level_value=stop, source=stop_source))
+    if ma20:
+        if close >= ma20:
+            held.append(_row(
+                '持有', f'收盘站稳 MA20（{ma20_str}）上方且无卖出信号 → 继续持有',
+                level=f'MA20={ma20_str}', level_value=ma20, source='阶段+技术面'))
+        else:
+            held.append(_row(
+                '减仓检查', f'收盘已跌破 MA20（{ma20_str}）→ 按评级执行风控，'
+                '反抽不收复 MA20 则降低仓位',
+                level=f'MA20={ma20_str}', level_value=ma20, source='阶段+技术面'))
+    if sell_today or sell_top_stars >= 4:
+        if sell_today:
+            trig = ('今日已出现 ' + '、'.join(h['label'] for h in sell_today)
+                    + (f'（截至 {upto}）' if upto else '') + ' → 执行减仓检查')
+        else:
+            top_res = max(sell_res, key=lambda r: r['stars'])
+            trig = f'窗口内出现 {top_res["label"]}（{top_res["stars"]}星）→ 反弹即分批减仓'
+        if ma20 and close < ma20:
+            level_str = f'反抽 MA20（{ma20_str}）附近分批减'
+        elif ma20:
+            level_str = f'跌破 MA20（{ma20_str}）即分批离场'
+        else:
+            level_str = '分批降低仓位'
+        if low60 and ma20:
+            level_str += f'；前低 {low60:.2f} 为最后防线'
+        held.append(_row('减仓', trig, level=level_str,
+                         level_value=ma20, source='技术信号', note=conflict_note))
+    else:
+        held.append(_row(
+            '减仓（条件）', f'若出现 MACD/KDJ 死叉或收盘跌破 MA20（{ma20_str or "—"}）'
+            '→ 减仓检查',
+            level=f'MA20={ma20_str}' if ma20 else '—', level_value=ma20,
+            source='技术信号'))
+    if cost and qty:
+        pnl = (close - cost) / cost * 100
+        held.append(_row(
+            '仓位纪律', f'持仓 {qty:,} 股 · 成本 {cost:.2f} · '
+            f'浮动{"盈" if pnl >= 0 else "亏"} {pnl:+.1f}%——加减仓动作以评级为主指令',
+            source='评级主指令'))
+
+    # ---------- 空仓视角：回避/观望 → 买入触发/关注 → 等待信号 ----------
+    empty_rows: list[dict[str, Any]] = []
+    if sell_today or sell_top_stars >= 4:
+        if sell_today:
+            trig = ('今日已出现 ' + '、'.join(h['label'] for h in sell_today)
+                    + ' → 回避新买入，等企稳')
+        else:
+            top_res = max(sell_res, key=lambda r: r['stars'])
+            trig = f'窗口内出现 {top_res["label"]}（{top_res["stars"]}星）→ 回避新买入'
+        empty_rows.append(_row(
+            '回避', trig,
+            level=f'等放量站回 MA20（{ma20_str}）再确认' if ma20 else '等右侧确认',
+            level_value=ma20, source='技术信号'))
+    else:
+        empty_rows.append(_row(
+            '观望', '无卖出信号但左侧未反转 → 观望，等右侧确认信号',
+            level=f'关注 MA20（{ma20_str}）方向' if ma20 else '—',
+            level_value=ma20, source='阶段+技术面'))
+    if buy_today:
+        if rating in _RATING_STRONG:
+            tone = f'评级「{rating}」支持，可分批执行'
+            action = '买入触发'
+            note = None
+        elif rating == '持有观望':
+            tone = f'评级「{rating}」中性——小仓试错，错了就走'
+            action = '试仓触发'
+            note = None
+        elif rating in _RATING_WEAK:
+            tone = f'评级「{rating}」不支持新买入——仅观察不买入'
+            action = '试仓观察'
+            note = buy_conflict_note
+        else:
+            tone = '无评级——仅观察，不作为新买入依据'
+            action = '试仓观察'
+            note = None
+        if price_advice.get('buy_low') and price_advice.get('buy_high'):
+            level_str = (f'买入区间 {price_advice["buy_low"]:.2f}'
+                         f'~{price_advice["buy_high"]:.2f}（价格建议）')
+            lv = price_advice['buy_low']
+        else:
+            level_str = '分批小仓（首仓不超过计划仓位 1/3）'
+            lv = None
+        empty_rows.append(_row(
+            action, '今日出现 ' + '、'.join(h['label'] for h in buy_today)
+            + ' → 条件触发；' + tone,
+            level=level_str, level_value=lv, source='技术信号+价格建议', note=note))
+    elif buy_top_stars >= 4:
+        top_res = max(buy_res, key=lambda r: r['stars'])
+        empty_rows.append(_row(
+            '关注', f'窗口内买点共振 {top_res["label"]}（{top_res["stars"]}星）'
+            '→ 列入观察，等触发日落定（以收盘为准）',
+            level='等今日确认', source='技术信号'))
+    else:
+        empty_rows.append(_row(
+            '等待信号', '无买点事件 → 不预判，等信号触发再执行（不抄底不猜顶）',
+            source='纪律'))
+
+    cur_rows = held if view == 'held' else empty_rows
+    top_action = None
+    if cur_rows:
+        r0 = cur_rows[0]
+        top_action = r0['action'] + (f'·{r0["level"]}' if r0['level_value'] is not None else '')
+
+    return {
+        'view': view,
+        'holding': {'qty': qty, 'cost': cost,
+                    'pnl_pct': round((close - cost) / cost * 100, 1) if cost and qty else None},
+        'signals_today': signals_today,
+        'linkage': signal_stage_linkage(stage['code'], rating, signals),
+        'held_rows': held,
+        'empty_rows': empty_rows,
+        'top_action': top_action,
+    }
+
+
+# ================================================================
 # 主入口
 # ================================================================
 
@@ -495,6 +859,18 @@ def generate_trader_advice(stock_id: int) -> dict[str, Any]:
             inputs['holding_qty'], inputs['cost_price'], float(data.close),
             disagreement,
         )
+        # 021BQ 操作矩阵（增量键）：持仓/空仓双视角 + 短线信号联动，
+        # 失败静默降级（不阻塞既有阶段/主力/对策主链路）
+        try:
+            operations = build_operations_matrix(
+                data, stage, inputs['rating'],
+                {'qty': inputs['holding_qty'], 'cost': inputs['cost_price']},
+                float(data.close), inputs.get('signals'),
+                inputs.get('price_advice'), vs=inputs.get('vs'),
+            )
+        except Exception as e:  # noqa: BLE001 —— 增量层失败不阻塞主链路
+            logger.warning(f'[trader-advisor] 操作矩阵构造失败 stock_id={stock_id}: {e}')
+            operations = None
 
         result: dict[str, Any] = {
             'available': True,
@@ -506,6 +882,8 @@ def generate_trader_advice(stock_id: int) -> dict[str, Any]:
             'total_score': inputs['total_score'],
             'disclaimer': '阶段与主力判断为规则化推断（参考非指令），仓位动作以评级为准；不构成投资建议',
         }
+        if operations is not None:
+            result['operations'] = operations
         if disagreement:
             if disagreement['type'] == DISAG_REVERSAL:
                 result['disagreement'] = {

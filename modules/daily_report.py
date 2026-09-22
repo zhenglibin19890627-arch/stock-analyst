@@ -1119,6 +1119,7 @@ def _process_single_stock(stock, target_date, force, report_type='daily', skip_c
     # 2026-09-18：操盘手建议摘要预计算（阶段名 + 评级分歧标记）——
     # 看板「操作建议」卡零重算读取（portfolio._derive_trader_signal 派生展示）；
     # 只读函数不触碰 generate_advice（B24 红线），失败静默降级不阻塞报告
+    # 021BQ：增量键 top_action（操作矩阵当前视角首行动作摘要，旧键零改动）
     try:
         from modules.trader_advisor import generate_trader_advice
 
@@ -1128,6 +1129,7 @@ def _process_single_stock(stock, target_date, force, report_type='daily', skip_c
                 'stage_name': _ta['stage'].get('name'),
                 'has_disagreement': bool(_ta.get('disagreement')),
                 'disagreement_text': (_ta.get('disagreement') or {}).get('text'),
+                'top_action': (_ta.get('operations') or {}).get('top_action'),
             }
     except Exception as e:  # noqa: BLE001
         logger.warning(f'[daily-report] trader 摘要预计算失败 stock_id={stock_id}: {e}')
