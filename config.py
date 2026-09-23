@@ -169,8 +169,16 @@ TRADE_FEE_A_STOCK = {
 }
 TRADE_FEE_BROKERS = [
     # keywords 命中账户名即采用该券商佣金（先命中先用）
-    {'keywords': ['银河'], 'commission_rate': 0.0001853, 'commission_min': 5.0},  # 万1.853 最低5元（用户交割单实测口径，2026-09-09）
-    {'keywords': ['东方财富', '东财'], 'commission_rate': 0.00015, 'commission_min': 5.0},  # 万1.5 最低5元
+    # 021BV（2026-09-24）免5 裁定：commission_min 5.0→0.0。依据（t1 诊断
+    # docs/reports/021bv_fee_diag_20260923.md §3.3/§5）：①09-09「交割单实测」
+    # 在数学上未被任何一笔验证——全部银河流水金额 <26,983 元地板门槛，佣金分量
+    # 恒为 5.00 元，费率值无从生效；②用户实测反馈估算偏高 2~4 元/笔，与地板
+    # 高估形态吻合，唯一自洽解释为银河免 5（万一免五类套餐）；③东财对照组
+    # 8/8 分厘拟合证明 min=5 模型本身无误，属银河档参数错。回退方式：若用户
+    # 交割单显示最低 5 元，将 commission_min 改回 5.0 后重跑
+    # scripts/reevaluate_fees_021bv.py --apply 即完全回退（R11 备份在）。
+    {'keywords': ['银河'], 'commission_rate': 0.0001853, 'commission_min': 0.0},  # 万1.853 免5
+    {'keywords': ['东方财富', '东财'], 'commission_rate': 0.00015, 'commission_min': 5.0},  # 万1.5 最低5元（东财 8 笔实填分厘验证，021BV t1 不动）
 ]
 TRADE_FEE_BROKER_DEFAULT = {'keywords': [], 'commission_rate': 0.00015, 'commission_min': 5.0}
 TRADE_FEE_HK = {

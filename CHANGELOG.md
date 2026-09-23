@@ -1,5 +1,27 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-09-24] 021BV 银河费用修复：免5 裁定落地 + 分项舍入对齐 + 存量重估与持仓重算
+
+用户实测反馈"银河估算偏高"的修复落地（t1 诊断 docs/reports/021bv_fee_diag_20260923.md + 队长按用户预授权裁定情景 A；t4 盘中速览卡 v2 另见上方独立条目区/当日条目）。
+
+- **config 银河档免 5**（`TRADE_FEE_BROKERS` 银河 `commission_min: 5.0→0.0`，费率万1.853 不动）：裁定依据=①09-09「交割单实测」数学上未被任何一笔验证（全部银河流水金额 <26,983 元地板门槛，佣金分量恒 5.00）；②用户"偏高 2~4 元/笔"反馈与地板高估形态唯一自洽（银河"万一免五"类套餐常见）；③东财对照组 8/8 分厘拟合证明 min=5 模型无误、属银河档参数错。**回退路径**：交割单若显示最低 5 元，改回 5.0 后重跑 `scripts/reevaluate_fees_021bv.py --apply` 即完全回退（R11 备份在）。
+- **分项舍入对齐交割单**（`modules/trade_fees.py`，t1 §5.3 顺手项）：估算由"总和先加后舍"改为分项（佣金/过户费/印花税）各自 round 到分再求和——消除 id=59 型 1 分差；存量断言全部同值。
+- **重估脚本**（新 `scripts/reevaluate_fees_021bv.py`）：默认 dry-run 零写库；`--apply` 先 `db_manager.backup_database`（R11，失败即中止零写入）→ 单事务仅回写 `commission_estimated=1` 行（est=0 用户实填/33 笔 comm=0 导入旧行 SQL 层即排除绝不碰）→ 涉及（股票,账户）逐对 `_recalculate_holding` 全量重算（等值行幂等重算兼作持仓行缺失修复）→ 按 021BK/eaf9369 语义清重算口径持仓 `is_cost_adjusted`（审计记录保留）；est 标记保持 1。
+- **真实库执行结果**（2026-09-24，备份 `db_backup_20260924_010021_021bv_fee_reeval.db`）：回写 10 笔——银河 7 笔 56.92→36.94（id=50 因分项舍入 14.97，余与 t1 情景 A 逐分一致：1.00/2.51/1.01/4.88/3.06/9.51）+ 东财 3 笔 ±0.01 分项舍入对齐；合计 372.23→352.24（Δ−19.99）。持仓重算 7 组：银河恒瑞 600 股成本 51.2903→51.2750、中免 1400 股 59.3894→59.3843、五粮液 100 股 74.0058→73.9688；东财拓尔思/无线传媒幂等不变；**数据修复**：东财缺失持仓行自动重建——中免 1000 股 @53.6686（**active**，此前持仓页不可见的真实分仓）、富祥收敛 cleared（realized 538.32）。
+- **测试**：`tests/test_trade_fees_021bk.py` 更新至新口径（银河免5 小额/大额走费率/旧门槛 26,983 两侧连续/分项舍入自搜索锁定/东财地板回归；并修正一处历史误绿——银河 API 用例原断言 5.1 实际命中的是 init 预置默认账户档，现显式 account_id 指向银河并补默认档地板回归例）；新增 `tests/test_reevaluate_fees_021bv.py` 5 例（dry-run 零写库/计划对齐 t1/apply 全管线含自动建行与清标记/二次 apply 幂等/备份失败中止零写入）。
+
+## [2026-09-24] 021BV 盘中速览卡 v2（t4）：当日盈亏列 + 排序切换 + 行动作指引 + 交易时段自动刷新 + 当日流水概览
+
+看板盘中速览卡升级（零写库契约不变：新增代码仅 SELECT，写库面仍仅 price_cache 巡检）：
+
+- **①当日浮动盈亏列**（`modules/intraday_patrol.py build_snapshot` 行增量 `total_qty/avg_cost/market_value/unrealized_pnl/unrealized_pnl_pct`）：holdings 账户无关聚合（与持仓列表端点 `unrealized_pnl` 公式同源），无价/零成本显式 None；前端 `_intradayPnlCell` 红盈绿亏、title 载成本×数量，与距止损列并列。
+- **②排序切换 chips**：距止损%（默认，破线/最贴近在前）/当日盈亏%（亏损最大在前）/涨跌幅%（跌幅最大在前）——纯前端 `_intradaySortRows` 纯函数（键缺失殿后、同值按严重度+代码），localStorage 记忆（隐私模式静默回默认）；`_intradaySeverity` 收编删除。
+- **③行动作指引列**：`_scan_today_top_actions`——stored `key_factors.trader.top_action`（日报预计算）零重算优先；stored 缺失且行∈(触线,逼近) 经 `derive_trader_signal_summary` live 只读兜底（普通行沉默控成本；021BS R2 N01「一面沉默一面报警」在速览卡的复发防线）；前端已触发红色加粗🎯、收盘口径 tooltip 与盘中 state 并列不混同。
+- **④交易时段自动刷新开关**（默认关）：90s 间隔（60-120 区间取中），服务端 `session.in_session`（权威）+本地时钟（9:15-11:35/12:55-15:05 工作日）双信号，休市自动停零请求；只 GET 重读快照+行动清单（内存读零网络零写库），不触发 POST 行情请求（021BN-c 风控）；卡片不在 DOM 跳过；开关状态随卡片重渲染恢复。
+- **⑤当日已录流水概览行**：`_read_today_trades`（trade_records 只读聚合，buy/sell 笔数+金额，dividend/跨日排除）读取时现查——录流水刷新即见；前端🧾概览行载「金额不含费」注记。
+- **契约与文案**：`blueprints/dashboard.py` docstring 增量键契约；文案三层禁裸 '<'（端点副本断言/JS 中文字面量契约测试/动态值 escapeHtml）。
+- **测试**：新增 `tests/test_intraday_v2.py` 16 例（盈亏 5：实时/缓存/无价/多账户加权/零成本；流水 4；指引 5：stored/live 门控/普通沉默/异常静默/坏 JSON；端点契约 1；node 排序包装 1）+ `tests/js/intraday_sort_test.js` node 契约 8 断言（三键排序/纯函数/null 殿后/严重度平局/记忆持久化/文案无裸 '<'）；顺手修复 `test_intraday_patrol.py` 6 例日期腐坏（`_seed_snapshot` 写死 2026-09-23 跨日全哑，改真实北京时间今日滚动）。终验 fast **1191 passed** + ruff 绿 + mypy 57 文件 0 错 + 红线 **28/28** + `node --check` 过。
+
 ## [2026-09-23] 021BT t5 收尾修复：checker F1（非时段盘中项门控）+ F2（逼近阈值单一来源）
 
 终验（docs/reports/021bt_verify_20260923.md §9）两项低危 findings 修复，提醒语义收紧、展示不受影响。
