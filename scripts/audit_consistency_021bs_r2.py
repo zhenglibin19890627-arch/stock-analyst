@@ -308,10 +308,15 @@ def main():
                 True, '核对两处取的市场与分数来源；纯读取面修复（B24 外）')
         elif note_stored and note_live:
             ok('N08', f'{label} 落库×读取面注记一致')
-        # markdown 迟滞行 × 口径说明行 互斥
+        # markdown 迟滞行 × 口径说明行 互斥（行级判定——021BU t5 终验实测修正：
+        # 口径说明行的解释文字自带「评级迟滞保持态（021AG）」字样，全文子串匹配
+        # 会把单行误判为两行并存）
         md = rep.get('markdown_content') or ''
-        has_hyst_line = '评级迟滞' in md
-        has_note_line = '评级口径说明' in md
+        md_lines = md.splitlines()
+        has_note_line = any('评级口径说明' in ln for ln in md_lines)
+        has_hyst_line = any(
+            ('评级迟滞' in ln) and ('评级口径说明' not in ln) for ln in md_lines
+        )
         if has_hyst_line and has_note_line:
             add('N08', 'P1', label,
                 'markdown 同时含「评级迟滞」行与「评级口径说明」行',
