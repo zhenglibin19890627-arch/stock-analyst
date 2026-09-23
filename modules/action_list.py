@@ -12,8 +12,9 @@
   路3 alert_history 当日触发（未读）
   路4 （经路1 的 overview 行透出操盘手阶段/分歧，供卡片副表）
 
-排序约定（"今日应做"，021BR 起持仓纪律置顶）：
-  P1 持仓纪律·止损已触发（纪律无条件最高）> P1 评级升降 > P2 卖出信号·持仓
+排序约定（"今日应做"，021BT 起盘中触线置顶）：
+  P0 盘中触线提醒（路0b，021BT：交易时段时效性；标注『盘中口径，以收盘确认为准』）
+  > P1 持仓纪律·止损已触发（收盘口径纪律无条件最高）> P1 评级升降 > P2 卖出信号·持仓
   （风控优先）> P2 买点信号（共振≥4星优先）> P2 卖出信号·空仓（回避信息垫底）
   > P3 预警未读 > P4 超时缺报股
 
@@ -140,12 +141,17 @@ def get_action_list():
     )
 
 
-def _scan_stop_discipline(cursor, held_map):
+def _scan_stop_discipline(cursor, held_map, price_map=None):
     """持仓纪律扫描（021BR t3 路0，只读）：止损已触发的持仓股逐只列出。
 
     有效止损 = max(聚合成本×0.92 纪律线, 最新 ok 日报 price_advice.stop_loss)
     （与 trader_advisor._stop_level 双源取高者同口径）；现价 = raw_kline 最新
     日K收盘（与操盘手矩阵触发判定同一价格源）。任一数据缺失降级跳过。
+
+    021BT 参数化（只增不改）：price_map={stock_id: {'price','as_of'}} 提供时，
+    触发判定改用其现价（盘中口径），行内增量携带 'price_source'='intraday' 与
+    'as_of'；None（默认；生产路径 get_action_list 不传）→ 既有收盘判定行为
+    逐字保持（行内不带增量键）。
 
     Returns: [{'stock_id','total_qty','avg_cost','close','close_date',
                'discipline_stop','pa_stop','effective_stop'}]（未触发的股不列出）
@@ -157,15 +163,26 @@ def _scan_stop_discipline(cursor, held_map):
         if not qty or not cost:
             continue
         try:
-            cursor.execute(
-                'SELECT trade_date, close FROM raw_kline '
-                'WHERE stock_id = ? ORDER BY trade_date DESC LIMIT 1',
-                (sid,),
-            )
-            k = cursor.fetchone()
-            if not k or not k['close']:
-                continue
-            close = float(k['close'])
+            if price_map is None:
+                cursor.execute(
+                    'SELECT trade_date, close FROM raw_kline '
+                    'WHERE stock_id = ? ORDER BY trade_date DESC LIMIT 1',
+                    (sid,),
+                )
+                k = cursor.fetchone()
+                if not k or not k['close']:
+                    continue
+                close = float(k['close'])
+                close_date = str(k['trade_date'])
+                price_source = None
+            else:
+                pm = price_map.get(sid) or {}
+                p = pm.get('price')
+                if not p:
+                    continue
+                close = float(p)
+                close_date = str(pm.get('as_of') or '')
+                price_source = 'intraday'
             cursor.execute(
                 "SELECT price_advice FROM daily_reports "
                 "WHERE stock_id = ? AND status = 'ok' AND report_type = 'daily' "
@@ -187,16 +204,20 @@ def _scan_stop_discipline(cursor, held_map):
                 continue
             eff = max(candidates)
             if close < eff:
-                rows.append({
+                row = {
                     'stock_id': sid,
                     'total_qty': qty,
                     'avg_cost': float(cost),
                     'close': close,
-                    'close_date': str(k['trade_date']),
+                    'close_date': close_date,
                     'discipline_stop': disc,
                     'pa_stop': pa_stop,
                     'effective_stop': round(eff, 2),
-                })
+                }
+                if price_source is not None:
+                    row['price_source'] = price_source
+                    row['as_of'] = close_date
+                rows.append(row)
         except Exception as e:  # noqa: BLE001 —— 单股失败不阻塞其余持仓
             logger.warning(f'[行动清单] 持仓纪律扫描跳过 stock_id={sid}: {e}')
     return rows
@@ -246,6 +267,7 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
         'reported_ok_today': 0,
         'failed_today': 0,
         'missing_today': 0,
+        'intraday_alerts': 0,
         'stop_discipline_hits': 0,
         'rating_moves': 0,
         'signal_hits': 0,
@@ -267,17 +289,28 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
             stop_parts.append(f"成本线 {d['discipline_stop']:.2f}")
         if d.get('pa_stop'):
             stop_parts.append(f"建议止损 {d['pa_stop']:.2f}")
+        if d.get('price_source') == 'intraday':
+            # 021BT：盘中口径纪律行（仅当调用方显式传 price_map 时出现；
+            # 生产路径 get_action_list 不传，本分支为未来批次预留，行为可测）
+            reason = (
+                f"止损纪律盘中触发：现价 {d['close']:.2f}（{d.get('as_of') or ''} "
+                f"盘中口径，以收盘确认为准）低于有效止损 {d['effective_stop']:.2f}"
+                f"（{' / '.join(stop_parts)} 取高者）"
+                f"，持仓 {d['total_qty']:,} 股——纪律无条件执行，不等评级、不等反抽"
+            )
+        else:
+            reason = (
+                f"止损纪律已触发：现价 {d['close']:.2f}（{d['close_date']} 日K收盘）"
+                f"低于有效止损 {d['effective_stop']:.2f}"
+                f"（{' / '.join(stop_parts)} 取高者）"
+                f"，持仓 {d['total_qty']:,} 股——纪律无条件执行，不等评级、不等反抽"
+            )
         items.append({
             'priority': 1,
             'priority_label': '持仓纪律',
             'kind': 'stop_discipline',
             'stock_id': s['stock_id'], 'symbol': s['symbol'], 'name': s['name'],
-            'reason': (
-                f"止损纪律已触发：现价 {d['close']:.2f}（{d['close_date']} 日K收盘）"
-                f"低于有效止损 {d['effective_stop']:.2f}"
-                f"（{' / '.join(stop_parts)} 取高者）"
-                f"，持仓 {d['total_qty']:,} 股——纪律无条件执行，不等评级、不等反抽"
-            ),
+            'reason': reason,
             'detail': {
                 'close': d['close'],
                 'close_date': d['close_date'],
@@ -286,6 +319,66 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
                 'pa_stop': d.get('pa_stop'),
                 'total_qty': d['total_qty'],
                 'avg_cost': d['avg_cost'],
+                'price_source': d.get('price_source'),
+            },
+        })
+
+    # ---- 路0b：盘中触线提醒（021BT，kind=intraday_alert，P0 置于持仓纪律之前） ----
+    # 数据源=盘中巡检内存快照（modules.intraday_patrol，只读零网络零写库；
+    # 快照缺失/非今日 → 零盘中项，巡检未运行时不虚构）。所有行带『盘中口径，
+    # 以收盘确认为准』标注，与收盘口径的路0纪律行视觉区分（前端按 kind 区分）。
+    try:
+        from modules.intraday_patrol import get_intraday_alerts
+
+        intraday_alerts = get_intraday_alerts()
+    except Exception as e:  # noqa: BLE001 —— 巡检模块异常不阻塞清单
+        logger.warning(f'[行动清单] 盘中提醒读取失败（本清单无盘中项）: {e}')
+        intraday_alerts = []
+    for a in intraday_alerts:
+        s = stock_by_id.get(a['stock_id'])
+        if s is None:
+            continue
+        stats['intraday_alerts'] += 1
+        price_txt = f"{a['price']:.2f}" if isinstance(a['price'], (int, float)) else '—'
+        as_of = a.get('as_of') or ''
+        state = a.get('state') or ''
+        if state == 'below_stop':
+            head = (
+                f"盘中触及止损线：现价 {price_txt}（{as_of}）已低于有效止损 "
+                f"{a['stop_line']:.2f}"
+            )
+        elif state == 'near_stop':
+            head = (
+                f"盘中逼近止损：现价 {price_txt}（{as_of}）距有效止损 "
+                f"{a['stop_line']:.2f} 不足 1%"
+            )
+        else:
+            pct = a.get('pct_change')
+            pct_txt = f'{pct:+.2f}%' if isinstance(pct, (int, float)) else '—'
+            head = f'盘中快速异动：现价 {price_txt}（{as_of}）较昨收 {pct_txt}'
+        if a.get('vol_spike') and state not in ('below_stop', 'near_stop'):
+            head += '，且量能显著放大'
+        held_qty = int(((held_map or {}).get(a['stock_id']) or {}).get('total_qty') or 0)
+        if held_qty:
+            head += f'，持仓 {held_qty:,} 股'
+        items.append({
+            'priority': 0,
+            'priority_label': '盘中触线',
+            'kind': 'intraday_alert',
+            'stock_id': s['stock_id'], 'symbol': s['symbol'], 'name': s['name'],
+            'reason': f'{head}——盘中口径，以收盘确认为准',
+            'detail': {
+                'intraday': True,
+                'state': state,
+                'price': a.get('price'),
+                'pct_change': a.get('pct_change'),
+                'as_of': as_of,
+                'stop_line': a.get('stop_line'),
+                'distance_pct': a.get('distance_pct'),
+                'swing': a.get('swing'),
+                'vol_spike': a.get('vol_spike'),
+                'updated_at': a.get('updated_at'),
+                'disclaimer': '盘中口径，以收盘确认为准',
             },
         })
 
@@ -574,12 +667,17 @@ def _rating_move_item(prev_row, latest_row, trader):
 
 
 def _sort_key(item):
-    """"今日应做"排序：P1 持仓纪律·止损已触发（021BR 纪律无条件最高）>
+    """"今日应做"排序：P0 盘中触线提醒（021BT，交易时段时效性置顶，类内触线>
+    逼近>异动）> P1 持仓纪律·止损已触发（021BR 纪律无条件最高于收盘口径项）>
     P1 评级升降（降级风控优先，再按评分变动幅度）>
     P2 卖出信号·持仓（风控优先）> P2 买点信号（共振≥4星优先）
     > P2 卖出信号·空仓（回避信息垫底）> P3 预警未读 > P4 缺报补数；类内按代码。"""
     p = item['priority']
     detail = item.get('detail') or {}
+    if p == 0:
+        # 021BT：盘中提醒整体置顶（时效性）；类内 severity：触线 > 逼近 > 异动
+        sev = {'below_stop': 0, 'near_stop': 1}.get(detail.get('state') or '', 2)
+        return (p, sev, item['symbol'])
     if p == 1:
         if item['kind'] == 'stop_discipline':
             dir_rank = -1  # 021BR：持仓纪律置顶于一切评级项

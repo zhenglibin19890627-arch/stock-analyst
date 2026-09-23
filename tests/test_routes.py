@@ -359,6 +359,47 @@ def test_dashboard_action_list(client):
     assert body['date']
 
 
+def test_dashboard_intraday_endpoint(client, monkeypatch):
+    """021BT：盘中速览端点（空库 200 + 契约形态：disclaimer/session/patrol 齐备）"""
+    import modules.intraday_patrol as patrol
+
+    monkeypatch.setattr(patrol, '_LAST_SNAPSHOT', None)
+    monkeypatch.setattr(patrol, '_paused', False)
+    monkeypatch.setattr(patrol, '_consecutive_failures', 0)
+    resp = client.get('/api/dashboard/intraday')
+    _assert_ok(resp)
+    body = resp.get_json()
+    assert body['success'] is True
+    assert body['stocks'] == []
+    assert body['disclaimer'] == '盘中口径，以收盘确认为准'
+    assert 'session' in body and 'in_session' in body['session']
+    assert 'patrol' in body and 'enabled' in body['patrol']
+
+
+def test_dashboard_intraday_refresh_cooldown(client, monkeypatch):
+    """021BT：一键刷新端点——首轮执行、冷却期内二轮被拒且带剩余秒数"""
+    import modules.intraday_patrol as patrol
+
+    monkeypatch.setattr(patrol, '_LAST_SNAPSHOT', None)
+    monkeypatch.setattr(patrol, '_paused', False)
+    monkeypatch.setattr(patrol, '_consecutive_failures', 0)
+    monkeypatch.setattr(patrol, '_last_manual_refresh_ts', 0.0)
+    monkeypatch.setattr(patrol, '_fetch_quote_snapshot_batch', lambda symbols: {})
+
+    r1 = client.post('/api/dashboard/intraday/refresh')
+    _assert_ok(r1)
+    b1 = r1.get_json()
+    assert b1['success'] is True
+    assert b1['ok'] is True  # 空库无持仓 → 零请求空快照轮
+
+    r2 = client.post('/api/dashboard/intraday/refresh')
+    _assert_ok(r2)
+    b2 = r2.get_json()
+    assert b2['success'] is True
+    assert b2['ok'] is False
+    assert b2['cooldown'] > 0  # 60s 冷却内被拒
+
+
 def test_batch_analyze_over_limit_rejected(client):
     """021BP 项4：>20 只直接 400（R16 契约边界——前端拆批依赖单次 ≤20，不放宽）"""
     resp = client.post('/api/batch-analyze', json={'stock_ids': list(range(1, 22))})

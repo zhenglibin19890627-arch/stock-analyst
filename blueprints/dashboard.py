@@ -1,4 +1,8 @@
-"""021BP 决策闭环 项3：今日行动清单聚合 API 蓝图（只读，R9 合规——不写任何表）。"""
+"""021BP 决策闭环 项3：今日行动清单聚合 API 蓝图（只读，R9 合规——不写任何表）。
+
+021BT 增：盘中速览两端点（GET /api/dashboard/intraday 读内存快照零网络兜底 /
+POST /api/dashboard/intraday/refresh 手动一键刷新带冷却）。巡检写库面仅 price_cache。
+"""
 
 import logging
 
@@ -30,3 +34,42 @@ def api_dashboard_action_list():
     except Exception as e:  # noqa: BLE001
         logger.error(f'[行动清单] 聚合失败: {e}', exc_info=True)
         return jsonify({'success': False, 'message': str(e), 'items': []}), 500
+
+
+@bp.route('/api/dashboard/intraday', methods=['GET'])
+def api_dashboard_intraday():
+    """021BT 盘中速览：持仓股盘中状态一屏（读巡检内存快照，缺失时零网络兜底）。
+
+    响应形态（t3 前端速览卡消费契约）：
+    {success, date, updated_at, source('auto'|'manual'|'fallback'),
+     session:{in_session, markets}, stocks:[{stock_id, symbol, name, market,
+       price, pct_change, as_of, quote_ok, note, stop_line, stop_source,
+       distance_pct, state('below_stop'|'near_stop'|'normal'|'unknown'|'no_data'),
+       swing, vol_spike, volume}], counts, patrol:{enabled, interval_min,
+       consecutive_failures, paused}, degraded, degrade_note,
+     disclaimer:'盘中口径，以收盘确认为准'}
+    只读：零写库；无快照兜底亦零网络（price_cache 显示价，禁止归零）。
+    """
+    try:
+        from modules.intraday_patrol import get_snapshot_for_dashboard
+
+        return jsonify(get_snapshot_for_dashboard())
+    except Exception as e:  # noqa: BLE001
+        logger.error(f'[盘中速览] 读取失败: {e}', exc_info=True)
+        return jsonify({
+            'success': False, 'message': str(e), 'stocks': [],
+            'disclaimer': '盘中口径，以收盘确认为准',
+        }), 500
+
+
+@bp.route('/api/dashboard/intraday/refresh', methods=['POST'])
+def api_dashboard_intraday_refresh():
+    """021BT 盘中速览一键刷新：立即跑一轮巡检（60s 冷却；非时段/停用/暂停返回明确 reason）。"""
+    try:
+        from modules.intraday_patrol import request_manual_refresh
+
+        result = request_manual_refresh()
+        return jsonify({'success': True, **result})
+    except Exception as e:  # noqa: BLE001
+        logger.error(f'[盘中速览] 手动刷新失败: {e}', exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500

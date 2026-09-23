@@ -1,10 +1,18 @@
 """数据预填与价格刷新域路由：/api/analytics/prefill + 腾讯实时批量价格 +
-/api/portfolio/refresh-prices（原 portfolio.py 区段逐字搬运）。"""
+/api/portfolio/refresh-prices（原 portfolio.py 区段逐字搬运）。
+
+021BT：`_fetch_realtime_price_batch` 逐字平移至 modules/realtime_quotes.py
+（蓝图与盘中巡检调度器同源复用，消除 modules→blueprints 反向依赖）；
+本文件保留同名再导出——`blueprints.portfolio.market._fetch_realtime_price_batch`
+与 facade `blueprints.portfolio._fetch_realtime_price_batch` 引用面零变化，
+refresh-prices 端点行为零变化（含"刷全部非退市股"的既有范围）。
+"""
 
 from flask import jsonify, request
 
 from blueprints.portfolio import bp
 from database.db_manager import get_connection
+from modules.realtime_quotes import _fetch_realtime_price_batch  # noqa: F401  # 021BT 再导出
 
 
 @bp.route('/api/analytics/prefill', methods=['POST'])
@@ -34,103 +42,6 @@ def api_prefill_analytics():
     conn.commit()
     conn.close()
     return jsonify({'success': True, 'message': '埋点已记录'})
-
-
-def _fetch_realtime_price_batch(symbols_markets):
-    """批量获取实时行情价格（腾讯接口）。
-    symbols_markets: [(stock_id, symbol, market), ...]
-    返回: {stock_id: {'price': float, 'pct_change': float}}
-    019Y T1：腾讯主源缺失的 A股 自动降级 mootdx（通达信行情，TCP socket，不经过 requests patch）。
-    """
-    import logging as _logging019y
-
-    import requests as _requests
-
-    from modules.data_collector import _normalize_hk_symbol
-
-    _log019y = _logging019y.getLogger(__name__)
-
-    result = {}
-    if not symbols_markets:
-        return result
-
-    # 构造腾讯批量请求代码：sh600000,sz000001,hk00700
-    tencent_codes = []
-    stock_id_map = {}
-    for stock_id, symbol, market in symbols_markets:
-        if market == 'hk_stock':
-            # 港股：库内 HK3690 形态 → 腾讯 hk03690（剥离 HK 前缀+左补零至5位）
-            # 021M 修复：原 symbol.zfill(5) 对带前缀代码（'HK3690' 已6字符）无效，
-            # 生成 hkHK3690 错误代码 → 腾讯返回空 → 港股全部降级写入昨收（实测
-            # 2026-08-18：cache 价=08-17 收盘 88.0，实时价实为 84.95）
-            hk_code = _normalize_hk_symbol(symbol)
-            tc = 'hk' + hk_code
-        elif market == 'a_stock':
-            if symbol.startswith('6'):
-                tc = 'sh' + symbol
-            else:
-                tc = 'sz' + symbol
-        else:
-            continue
-        tencent_codes.append(tc)
-        stock_id_map[tc] = stock_id
-
-    if not tencent_codes:
-        return result
-
-    # 腾讯批量行情接口（逗号分隔，最多约50只一次）
-    batch_size = 40
-    for i in range(0, len(tencent_codes), batch_size):
-        batch = tencent_codes[i : i + batch_size]
-        url = 'https://qt.gtimg.cn/q=' + ','.join(batch)
-        try:
-            resp = _requests.get(url, timeout=8)
-            lines = resp.text.strip().split(';')
-            for line in lines:
-                line = line.strip()
-                if not line or '~' not in line:
-                    continue
-                parts = line.split('~')
-                if len(parts) < 5:
-                    continue
-                # 从原始行中提取代码
-                var_match = line.split('=')[0].strip()
-                tc_code = var_match.replace('v_', '').strip()
-                sid = stock_id_map.get(tc_code)
-                if not sid:
-                    continue
-                # parts[1]=名称, parts[3]=最新价, parts[32]=涨跌幅(%)
-                try:
-                    price = float(parts[3]) if parts[3] else 0
-                    pct = float(parts[32]) if len(parts) > 32 and parts[32] else 0
-                    if price > 0:
-                        result[sid] = {'price': price, 'pct_change': pct}
-                except (ValueError, IndexError):
-                    continue
-        except Exception:
-            continue
-
-    # 019Y T1：腾讯主源缺失的 A股 → mootdx 降级（每只一次 socket 查询，量小）
-    missing_a = [
-        (stock_id, symbol)
-        for stock_id, symbol, market in symbols_markets
-        if market == 'a_stock' and stock_id not in result
-    ]
-    if missing_a:
-        try:
-            from modules.data_collector import get_realtime_quote_mootdx
-
-            for stock_id, symbol in missing_a:
-                q = get_realtime_quote_mootdx(symbol)
-                if q and q.get('price') and q['price'] > 0:
-                    result[stock_id] = {'price': q['price'], 'pct_change': q.get('pct_change')}
-                    _log019y.info(
-                        f'[019Y] {symbol} 实时价格走 mootdx 降级: price={q["price"]}'
-                    )
-        except Exception as e:
-            _log019y.warning(f'[019Y] mootdx 实时价格降级失败: {e}')
-
-    return result
 
 
 @bp.route('/api/portfolio/refresh-prices', methods=['POST'])

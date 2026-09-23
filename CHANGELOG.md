@@ -1,5 +1,18 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-09-23] 021BT 盘中操作便利化 t2（后端）：盘中巡检调度器 + 触线/逼近/异动提醒 + 行动清单盘中项
+
+在**收盘确认口径零改动**前提下新增盘中感知层：交易时段每 5 分钟巡检持仓股实时快照（腾讯批量，持仓 8 只=1 请求/轮 ≤48 请求/日），盘中触及止损线/逼近止损/快速异动在看板速览端点与行动清单即时可见，全部标注『盘中口径，以收盘确认为准』。方案：docs/reports/021bt_intraday_plan_20260923.md（t1 产出，四决策点按推荐案落地）。
+
+- **批量取价下沉复用**（新模块 `modules/realtime_quotes.py`）：`_fetch_realtime_price_batch` 自 `blueprints/portfolio/market.py` **逐字平移**（仅加模块级 0.25s 节拍 `_pace()` 防手动连点叠加巡检），market.py 与 facade 再导出面零变化，refresh-prices 行为零变化（仍刷全部非退市股）；新增巡检专用 `_fetch_quote_snapshot_batch`（多解析 快照时间戳[30]/昨收[4]/成交量[6]，零 mootdx 降级零重试）。**2026-09-23 实测核验**：A/H 混合单请求覆盖；快照时间戳 A股 `YYYYMMDDHHMMSS` / 港股 `YYYY/MM/DD HH:MM:SS` 两形态统一去非数字归一。
+- **盘中巡检调度器**（新模块 `modules/intraday_patrol.py`）：镜像 backfill 模式——`threading.Timer` 串联（daemon、无重叠、随主进程存亡），`start_intraday_patrol()` 幂等 + 启动即检（Timer(0)），app.py main() 注册（try/except 不阻断启动）；时段门控复用 `kline._is_intraday_session`（A/H 分别判定，任一在盘中才发其批量请求），非时段 tick 空转=一次布尔判断；**节假日盲区守卫**：快照时间戳非今日 → 该股跳过不写库不报警，连续 2 轮全部非今日暂停至时段边界；**失败静默降级**：轮失败保旧数据（price_cache 旧值不覆盖不归零）+ 连败 3 轮暂停至时段边界，force 手动可绕过，时段边界 tick 自动重置；**写库面仅 price_cache**（INSERT OR REPLACE 幂等，与手动刷新同表同口径），raw_kline/alert_history/新表零写入；状态判定纯函数 `evaluate_stock_state`：触线（实时价≤有效止损，双源取高者与 `_stop_level` 同口径）> 逼近（距止损不足 1%）> 正常，无止损线显式 unknown，异动=|涨跌幅|≥3% 或当日量≥近 5 日均量×1.5，阈值全走 config。
+- **速览端点**（`blueprints/dashboard.py` 增两端点）：`GET /api/dashboard/intraday`（读内存快照；缺失/跨日零网络兜底现算——price_cache 显示价；响应带 session/patrol/counts/disclaimer 契约，t3 前端消费）+ `POST /api/dashboard/intraday/refresh`（一键刷新，60s 冷却，非时段/停用/暂停返回明确 reason）。巡检内存快照不落盘（决策点3：触线不留痕）。
+- **行动清单路0b**（`modules/action_list.py`）：`get_intraday_alerts()` 桥接内存快照 → `kind=intraday_alert` **priority 0 置顶于持仓纪律之前**（`_sort_key` 增 P0 分支，类内触线>逼近>异动），行内固定缀『盘中口径，以收盘确认为准』+ `detail.intraday/disclaimer` 供前端视觉区分；快照缺失/非今日零盘中项不虚构；stats 增量键 `intraday_alerts`。**_scan_stop_discipline 参数化（只增不改）**：`price_map=None`（默认，生产路径不传）收盘判定行为逐字保持，行内不带增量键；传入时判定改用盘中价并增量携带 `price_source='intraday'/as_of`，`build_action_list` 纪律行 reason 按此分支（'止损纪律盘中触发：现价 X（HH:MM 盘中口径，以收盘确认为准）'）。
+- **config.py** 增 021BT 段：`INTRADAY_PATROL_ENABLED=True`（总开关回退）/ `INTRADAY_PATROL_INTERVAL_MIN=5` / `INTRADAY_NEAR_STOP_PCT=1.0` / `INTRADAY_SWING_PCT=3.0` / `INTRADAY_VOL_SPIKE_RATIO=1.5` / `INTRADAY_PATROL_PAUSE_AFTER_FAILS=3` / `INTRADAY_MANUAL_REFRESH_COOLDOWN_SEC=60`。
+- **收盘确认口径零改动清单**：`fetch_kline` 同日跳过/tencent_intraday 回填、`_refresh_kline_today_bar`、15:54 批次与 scan_once、`_scan_stop_discipline` 默认路径（021BR 全部断言原样通过）、`build_operations_matrix`、`_stop_level`、classify_stage、B24 `generate_advice`——零触碰（git status 核验无相关文件）；操盘手矩阵/预警表零触碰。
+- **实测冒烟**（非交易时段，真实库只读）：`run_patrol_round` 零请求跳过；速览兜底 8 只持仓 A/H 全量出状态（恒瑞医药 45.58 距止损 45.42 仅 0.35% → near_stop；中国中免 52.19 低于有效止损 56.16 → below_stop）。
+- **测试**：新增 `tests/test_intraday_patrol.py` 41 例（状态判定纯函数/双源取高/时段门控零请求/节假日守卫+两轮全非今日暂停/price_cache 写库面禁归零/连败暂停+force 绕过+边界重置/冷却/行动清单 P0 置顶与无裸 '<'/参数化回归/realtime_quotes 解析与港股时间戳归一/调度器幂等）；`test_routes.py` +2（速览端点契约形态 + 刷新冷却）。终验 fast **1131 passed**（1 skipped）+ ruff 绿 + mypy 57 文件 0 错 + 红线 **28/28**。
+
 ## [2026-09-21] 021BP 决策闭环项5：扫描加自选后一键衔接批量分析（消除决策链断点）
 
 全市场扫描「加入自选」完成后，原流程断在"请到自选股页手动批量分析"；现弹窗确认后**一键衔接批量分析+评级**——扫描 → 加自选 → 评分拿真评级全程无断点。纯前端改造（复用既有端点，零新表、零后端路由改动、零新依赖）。

@@ -199,6 +199,15 @@ def main():
 
     start_backfill_scheduler()
 
+    # 021BT：盘中巡检调度器（仅交易时段活动；失败静默降级；收盘确认口径零改动；
+    # 巡检写库面仅 price_cache，raw_kline/预警/新表零写入）
+    try:
+        from modules.intraday_patrol import start_intraday_patrol
+
+        start_intraday_patrol()
+    except Exception as e:  # noqa: BLE001 —— 巡检启动失败不阻断主服务
+        logging.getLogger(__name__).warning(f'[盘中巡检] 启动失败（本次运行无盘中感知）: {e}')
+
     print()
     print('  ============================================================')
     print(f'  [OK] 服务就绪，访问地址：http://{FLASK_HOST}:{FLASK_PORT}')
