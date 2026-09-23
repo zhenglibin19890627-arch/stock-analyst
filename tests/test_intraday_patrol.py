@@ -491,8 +491,15 @@ class TestManualRefresh:
 # ============================================================
 
 
-def _seed_snapshot(states_by_sid, date=TODAY, updated_at='10:30:00'):
-    """手工置巡检内存快照（模拟已跑过巡检轮）"""
+def _beijing_day_offset(days=0):
+    """真实北京时间今日±N 日（021BV 日期防腐：_seed_snapshot 默认日期随真实时钟
+    滚动——021BT 曾写死 '2026-09-23'，跨日后 get_intraday_alerts 今日门控全哑）"""
+    tz = _dt.timezone(_dt.timedelta(hours=8))
+    return (_dt.datetime.now(tz) + _dt.timedelta(days=days)).strftime('%Y-%m-%d')
+
+
+def _seed_snapshot(states_by_sid, date=None, updated_at='10:30:00'):
+    """手工置巡检内存快照（模拟已跑过巡检轮）；date 缺省=真实今日（不写死）"""
     rows = []
     for sid, (symbol, name, price, pct, stop, state, swing) in states_by_sid.items():
         rows.append({
@@ -504,7 +511,7 @@ def _seed_snapshot(states_by_sid, date=TODAY, updated_at='10:30:00'):
             'swing': swing, 'vol_spike': False, 'volume': None, 'volume_ref': None,
         })
     patrol._LAST_SNAPSHOT = {
-        'date': date, 'updated_at': updated_at, 'source': 'auto',
+        'date': date or _beijing_day_offset(0), 'updated_at': updated_at, 'source': 'auto',
         'session': {'in_session': True, 'markets': ['a_stock']},
         'stocks': rows,
         'counts': {'below_stop': 0, 'near_stop': 0, 'normal': 0, 'unknown': 0,
@@ -568,10 +575,10 @@ class TestActionListBridge:
         assert result['stats']['intraday_alerts'] == 0
 
     def test_stale_snapshot_no_items(self):
-        """跨日旧快照（昨日）→ 不产生今日盘中项"""
+        """跨日旧快照（昨日）→ 不产生今日盘中项（日期取真实昨日，保证恒非今日）"""
         _seed_snapshot({
             1: ('600276', '恒瑞医药', 9.0, -2.0, 9.2, 'below_stop', False),
-        }, date='2026-09-22')
+        }, date=_beijing_day_offset(-2))
         alerts = patrol.get_intraday_alerts()
         assert alerts == []
 

@@ -230,6 +230,10 @@ def build_snapshot(now, positions, quotes=None, *, source='auto', degraded=False
         quotes: {stock_id: realtime_quotes 快照 dict}（已过"快照时间戳=今日"守卫）；
             缺股 → price_cache 兜底（quote_ok=False）。
         source: 'auto' 定时轮 / 'manual' 手动一键刷新 / 'fallback' 读取时兜底。
+
+    021BV 行增量（纯读组装，零写库）：total_qty/avg_cost（holdings 账户无关
+    聚合，与持仓 summary 端点同源）+ market_value/unrealized_pnl/unrealized_pnl_pct
+    （现价×quantity 对加权成本，公式与持仓列表 unrealized_pnl 一致）。
     """
     today_str = now.strftime('%Y-%m-%d')
     near_pct = float(getattr(config, 'INTRADAY_NEAR_STOP_PCT', 1.0))
@@ -313,11 +317,30 @@ def build_snapshot(now, positions, quotes=None, *, source='auto', degraded=False
         ma20_distance = (
             round((price / ma20 - 1.0) * 100.0, 2) if (ma20 and price) else None
         )
+        # 021BV ①：当日浮动盈亏（现价×quantity 对加权成本；holdings 聚合同源，
+        # 公式与持仓列表端点 unrealized_pnl 一致；价/量/成本任一缺失显式 None）
+        qty = p['total_qty']
+        cost = p['avg_cost']
+        market_value = round(price * qty, 2) if (price is not None and qty) else None
+        if price is not None and qty and cost:
+            cost_f = float(cost)
+            unrealized_pnl = round((price - cost_f) * qty, 2)
+            unrealized_pnl_pct = (
+                round((price / cost_f - 1.0) * 100.0, 2) if cost_f > 0 else None
+            )
+        else:
+            unrealized_pnl = None
+            unrealized_pnl_pct = None
         rows.append({
             'stock_id': sid,
             'symbol': p['symbol'],
             'name': p['name'],
             'market': p['market'],
+            'total_qty': qty,
+            'avg_cost': cost,
+            'market_value': market_value,
+            'unrealized_pnl': unrealized_pnl,
+            'unrealized_pnl_pct': unrealized_pnl_pct,
             'price': price,
             'pct_change': pct,
             'as_of': as_of,
@@ -564,10 +587,121 @@ def _scan_today_signal_labels(stock_ids):
     return labels
 
 
+def _read_stored_top_action(cursor, stock_id):
+    """stored 操盘手矩阵首行动作文（key_factors.trader.top_action，日报期预计算）。
+
+    Returns: (top_action, 'stored') 或 None（无报告/解析失败/摘要缺失——
+    调用方视情况决定是否 live 兜底）。零重算零写库。
+    """
+    cursor.execute(
+        'SELECT key_factors FROM daily_reports '
+        "WHERE stock_id = ? AND status = 'ok' AND report_type = 'daily' "
+        'ORDER BY report_date DESC LIMIT 1',
+        (stock_id,),
+    )
+    r = cursor.fetchone()
+    if not r or not r['key_factors']:
+        return None
+    try:
+        kf = json.loads(r['key_factors'])
+        t = (kf or {}).get('trader') or {}
+        if isinstance(t, dict) and t.get('top_action'):
+            return str(t['top_action']), 'stored'
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _scan_today_top_actions(rows):
+    """行动作指引 overlay（021BV ③，只读零写库）：per-stock 操盘手矩阵首行动作文。
+
+    读取策略（控成本）：
+    1. stored key_factors.trader.top_action（日报预计算）优先——零重算；
+    2. stored 缺失且该行触线/逼近（below_stop/near_stop）→ 经
+       derive_trader_signal_summary live 兜底（只读现算；仅警示行启用，
+       消除「一面沉默一面报警」的 021BS R2 N01 形态在速览卡的复发）；
+    3. 其余行 stored 缺失即沉默（top_action=None，前端显示"—"）。
+
+    注意：top_action 为收盘口径（矩阵触发判定基于日K收盘），行内盘中状态
+    以 speed 卡 state 字段为准——前端将两者并列展示，不混同。
+
+    Returns: {stock_id: {'top_action': str, 'top_action_source': 'stored'|'live'}}
+    """
+    acts: dict = {}
+    if not rows:
+        return acts
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        for r in rows:
+            sid = r.get('stock_id')
+            if sid is None:
+                continue
+            stored = None
+            try:
+                stored = _read_stored_top_action(cursor, sid)
+            except Exception as e:  # noqa: BLE001 —— 单股失败不阻塞其余
+                logger.warning(f'[盘中速览] stored top_action 读取失败 stock_id={sid}: {e}')
+            if stored:
+                acts[sid] = {'top_action': stored[0], 'top_action_source': 'stored'}
+                continue
+            if r.get('state') in ('below_stop', 'near_stop'):
+                try:
+                    from modules.trader_advisor import derive_trader_signal_summary
+
+                    t = derive_trader_signal_summary(None, stock_id=sid)
+                except Exception as e:  # noqa: BLE001 —— 兜底失败静默
+                    logger.warning(f'[盘中速览] top_action live 兜底失败 stock_id={sid}: {e}')
+                    t = None
+                if t and t.get('top_action'):
+                    acts[sid] = {'top_action': str(t['top_action']),
+                                 'top_action_source': 'live'}
+        return acts
+    finally:
+        conn.close()
+
+
+def _read_today_trades(today_str):
+    """当日已录流水概览（021BV ⑤，只读）：今日 buy/sell 笔数与金额。
+
+    amount 口径与流水表一致（成交金额不含手续费）；dividend 不计（速览卡
+    只概览买卖）。零写库。
+
+    Returns: {'buy_count','buy_amount','sell_count','sell_amount','total_count'}
+    """
+    out = {'buy_count': 0, 'buy_amount': 0.0,
+           'sell_count': 0, 'sell_amount': 0.0, 'total_count': 0}
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT trade_type, COUNT(*) AS n, COALESCE(SUM(amount), 0) AS amt "
+            'FROM trade_records '
+            "WHERE substr(trade_date, 1, 10) = ? AND trade_type IN ('buy', 'sell') "
+            'GROUP BY trade_type',
+            (today_str,),
+        )
+        for r in cursor.fetchall():
+            n = int(r['n'] or 0)
+            amt = float(r['amt'] or 0.0)
+            if r['trade_type'] == 'buy':
+                out['buy_count'] = n
+                out['buy_amount'] = round(amt, 2)
+            elif r['trade_type'] == 'sell':
+                out['sell_count'] = n
+                out['sell_amount'] = round(amt, 2)
+        out['total_count'] = out['buy_count'] + out['sell_count']
+        return out
+    finally:
+        conn.close()
+
+
 def get_snapshot_for_dashboard():
     """速览端点读路径：今日内存快照优先；缺失/跨日 → 零网络兜底现算（price_cache 显示价）。
 
-    读取时叠加"今日信号标记"（零网络离线复算，仅持仓 id）与实时巡检状态。
+    读取时叠加三路只读 overlay：今日信号标记（零网络离线复算，仅持仓 id）、
+    行动作指引（操盘手矩阵首行动作文，stored 优先/警示行 live 兜底）、当日
+    已录流水概览（trade_records 只读聚合）；最后叠加实时巡检状态。
     """
     global _LAST_SNAPSHOT
     snap = _LAST_SNAPSHOT
@@ -584,11 +718,24 @@ def get_snapshot_for_dashboard():
     out = dict(snap)
     rows = [dict(r) for r in snap.get('stocks') or []]
     sig_labels = _scan_today_signal_labels([r['stock_id'] for r in rows])
+    top_actions: dict = {}
+    try:
+        top_actions = _scan_today_top_actions(rows)
+    except Exception as e:  # noqa: BLE001 —— 行动作指引失败不阻塞速览卡
+        logger.warning(f'[盘中速览] 行动作指引 overlay 失败（留空）: {e}')
     for r in rows:
         r['signal_labels'] = sig_labels.get(r['stock_id']) or []
+        act = top_actions.get(r['stock_id']) or {}
+        r['top_action'] = act.get('top_action')
+        r['top_action_source'] = act.get('top_action_source')
     out['stocks'] = rows
     out['patrol'] = _patrol_state()
     out['success'] = True
+    try:
+        out['today_trades'] = _read_today_trades(today_str)
+    except Exception as e:  # noqa: BLE001 —— 流水概览失败不阻塞速览卡
+        logger.warning(f'[盘中速览] 当日流水概览读取失败: {e}')
+        out['today_trades'] = None
     return out
 
 

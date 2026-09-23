@@ -1333,6 +1333,7 @@
                     return;
                 }
                 _dashData = { summary: summary, stocks: scores.stocks || [], reportDate: scores.report_date, reportDateMin: scores.report_date_min, generatedAt: scores.generated_at, actionList: (actionList && actionList.success) ? actionList : null, intraday: (intraday && intraday.success) ? intraday : null };
+                if (_dashData.intraday) _intradayAutoLastData = _dashData.intraday; // ④ 自动刷新时段判定参考
                 renderDashboard(_dashData);
             })
             .catch(function(e) {
@@ -1681,20 +1682,187 @@
         return html;
     }
 
-    // ========== ⏱ 盘中速览卡（021BT：持仓盘中状态一屏 + 一键刷新） ==========
+    // ========== ⏱ 盘中速览卡（021BT：持仓盘中状态一屏 + 一键刷新；021BV v2） ==========
     // 数据源 GET /api/dashboard/intraday（loadDashboard 第4路并行；行字段见端点 docstring 契约）。
     // 刷新走 POST /api/dashboard/intraday/refresh（仅持仓 8 只批量取价+写 price_cache，
     // 后端 60s 冷却权威节流——比全自选 refresh-prices 更克制，021BN-c 数据源风控）。
+    // 021BV v2 增量：①当日浮动盈亏列（holdings 聚合同源）②排序切换（纯前端+记忆）
+    // ③行动指引列（操盘手矩阵首行动作文）④交易时段自动刷新开关（默认关）
+    // ⑤当日已录流水概览行。零写库契约不变。
     var _intradayLastRefreshAt = 0;
     var _intradayRefreshing = false;
     var INTRADAY_DISCLAIMER = '盘中口径，以收盘确认为准';
+    // ---- 021BV v2 状态 ----
+    var _intradaySort = 'stop';          // 'stop' 距止损 | 'pnl' 当日盈亏 | 'pct' 涨跌幅
+    var _intradayAutoOn = false;         // 自动刷新开关（默认关；不跨会话记忆）
+    var _intradayAutoTimer = null;
+    var _intradayAutoLastData = null;    // 最近一次成功快照（自动刷新时段判定参考）
+    var INTRADAY_AUTO_INTERVAL_SEC = 90; // 60~120s 区间内取中
 
-    function _intradaySeverity(r) {
-        // 行排序严重度：触线(0) > 逼近(1) > 异动(2) > 其余(3)；同级按代码
-        if (r.state === 'below_stop') return 0;
-        if (r.state === 'near_stop') return 1;
-        if (r.swing) return 2;
-        return 3;
+    (function () {
+        // 排序状态记忆：localStorage 持久（隐私模式等不可用时静默回默认）
+        try {
+            var saved = window.localStorage.getItem('intradaySort');
+            if (saved === 'stop' || saved === 'pnl' || saved === 'pct') _intradaySort = saved;
+        } catch (e) { /* localStorage 不可用：保持默认 */ }
+    })();
+
+    function _intradayPersistSort(key) {
+        try { window.localStorage.setItem('intradaySort', key); } catch (e) { /* 忽略 */ }
+    }
+
+    function intradaySetSort(key) {
+        // 排序 chips（纯前端重排，不重发请求；重复点击保持当前项）
+        _intradaySort = key;
+        _intradayPersistSort(key);
+        var el = document.getElementById('intradayCard');
+        if (el && typeof _dashData !== 'undefined' && _dashData && _dashData.intraday) {
+            el.outerHTML = renderIntradayCard(_dashData.intraday);
+        }
+    }
+
+    function _intradaySortRows(rows, sortKey) {
+        // 纯函数排序（可被 node 契约测试直接加载验证，勿引外部 helper）：
+        // 'stop' 距止损% 升序——已破线/最接近止损在前（风控优先）；
+        // 'pnl'  当日浮动盈亏% 升序——亏损最大在前；
+        // 'pct'  盘中涨跌幅% 升序——跌幅最大在前。
+        // 键缺失（null/undefined）一律殿后；同值按严重度（触线>逼近>其余）再按代码。
+        var key = sortKey || _intradaySort;
+        var sev = { below_stop: 0, near_stop: 1 };
+        function val(r) {
+            if (key === 'pnl') return r.unrealized_pnl_pct;
+            if (key === 'pct') return r.pct_change;
+            return r.distance_pct;
+        }
+        return rows.slice().sort(function (a, b) {
+            var va = val(a), vb = val(b);
+            if (va == null && vb != null) return 1;
+            if (vb == null && va != null) return -1;
+            if (va != null && vb != null && va !== vb) return va - vb;
+            var sa = sev[a.state] != null ? sev[a.state] : 2;
+            var sb = sev[b.state] != null ? sev[b.state] : 2;
+            if (sa !== sb) return sa - sb;
+            var ta = a.symbol || '', tb = b.symbol || '';
+            return ta < tb ? -1 : (ta > tb ? 1 : 0);
+        });
+    }
+
+    function _intradaySortChip(key, label, title) {
+        var active = _intradaySort === key;
+        var bg = active ? '#34495e' : 'var(--bg-light,#f0f0f0)';
+        var fg = active ? '#fff' : 'var(--text-2,#666)';
+        return '<span onclick="intradaySetSort(\'' + key + '\')" title="' + title + '" style="cursor:pointer;user-select:none;font-size:12px;padding:2px 10px;border-radius:10px;background:' + bg + ';color:' + fg + ';white-space:nowrap;">' + label + '</span>';
+    }
+
+    function _intradayPnlCell(r) {
+        // ① 当日浮动盈亏：现价×持仓数量 − 加权成本（holdings 账户无关聚合，
+        // 与持仓列表端点 unrealized_pnl 公式同源）；红盈绿亏；缺失显式"—"
+        var pnl = r.unrealized_pnl, pct = r.unrealized_pnl_pct;
+        if (pnl == null && pct == null) return '<span style="color:#ccc;">—</span>';
+        var main = pnl != null ? formatPnl(pnl) : '—';
+        var pctTxt = pct != null ? ' <span style="font-size:10.5px;">(' + (pct > 0 ? '+' : '') + pct.toFixed(2) + '%)</span>' : '';
+        var tip = '现价×持仓数量 − 加权成本（holdings 聚合，与持仓页同源）';
+        if (r.avg_cost != null && r.total_qty) {
+            tip = '成本 ' + r.avg_cost.toFixed(2) + ' × ' + r.total_qty.toLocaleString() + ' 股；' + tip;
+        }
+        var color = pnlColor(pnl != null ? pnl : pct);
+        return '<span style="font-weight:600;color:' + color + ';white-space:nowrap;" title="' + escapeHtml(tip) + '">' + main + pctTxt + '</span>';
+    }
+
+    function _intradayActionCell(r) {
+        // ③ 行动作指引：操盘手矩阵 held_rows 首行动作文（如「止损·56.16（已触发）」）。
+        // stored（日报预计算）为收盘口径；行内盘中状态以本行状态徽标为准——
+        // 盘中破线但矩阵未标已触发时两者并列、互不覆盖。
+        var t = r.top_action;
+        if (!t) return '<span style="color:#ccc;">—</span>';
+        var triggered = String(t).indexOf('已触发') >= 0;
+        var color = triggered ? '#c0392b' : (r.state === 'near_stop' ? '#e65100' : 'var(--text-2,#555)');
+        var weight = triggered ? '700' : '600';
+        var srcTip = (r.top_action_source === 'live')
+            ? '操盘手矩阵首行动作（最新报告缺摘要，读取时只读现算）'
+            : '操盘手矩阵首行动作（最新日报预计算，收盘口径；盘中状态见左列）';
+        return '<span style="font-size:11px;font-weight:' + weight + ';color:' + color + ';white-space:nowrap;" title="' +
+            escapeHtml(srcTip + '：' + t) + '">' + (triggered ? '🎯 ' : '') + escapeHtml(String(t)) + '</span>';
+    }
+
+    function _intradayClockInSession() {
+        // 本地时钟粗判 A 股交易时段（工作日 09:15-11:35 / 12:55-15:05，边界含缓冲）；
+        // 节假日盲区与后端一致（020R-59 已知边界）：误判时本卡仅做零网络内存读，无害
+        var n = new Date();
+        var dow = n.getDay();
+        if (dow === 0 || dow === 6) return false;
+        var hm = n.getHours() * 100 + n.getMinutes();
+        return (hm >= 915 && hm <= 1135) || (hm >= 1255 && hm <= 1505);
+    }
+
+    function _intradayAutoSessionActive() {
+        // 服务端 session 判定（权威）优先；本地时钟兜底（冷启动/快照陈旧时仍可启动）
+        if (_intradayAutoLastData && _intradayAutoLastData.session &&
+                _intradayAutoLastData.session.in_session === true) {
+            return true;
+        }
+        return _intradayClockInSession();
+    }
+
+    function _intradayAutoStatusText(txt) {
+        var el = document.getElementById('intradayAutoStatus');
+        if (el) el.textContent = txt;
+    }
+
+    function intradayToggleAuto(on) {
+        // ④ 交易时段自动刷新开关：默认关；开启后每 90s 一跳，仅交易时段生效，
+        // 休市自动停（不请求，状态行标注）。只 GET 重读快照（内存读零网络零写库），
+        // 不触发行情请求——实时取价仍由后端巡检按其间隔执行（021BN-c 数据源风控）。
+        _intradayAutoOn = !!on;
+        if (_intradayAutoTimer) { clearInterval(_intradayAutoTimer); _intradayAutoTimer = null; }
+        if (!_intradayAutoOn) {
+            _intradayAutoStatusText('已关闭');
+            return;
+        }
+        _intradayAutoTimer = setInterval(intradayAutoTick, INTRADAY_AUTO_INTERVAL_SEC * 1000);
+        intradayAutoTick(); // 开启即先刷一轮
+    }
+
+    function intradayAutoTick() {
+        if (!_intradayAutoOn) return;
+        if (!document.getElementById('intradayCard')) return; // 不在看板视图：零请求
+        if (!_intradayAutoSessionActive()) {
+            _intradayAutoStatusText('休市 · 已暂停');
+            return;
+        }
+        _intradayAutoStatusText('刷新中...');
+        Promise.all([
+            fetch('/api/dashboard/intraday', {cache: 'no-store'}).then(function(x) { return safeJson(x); }).catch(function() { return null; }),
+            fetch('/api/dashboard/action-list', {cache: 'no-store'}).then(function(x) { return safeJson(x); }).catch(function() { return null; })
+        ]).then(function(pair) {
+            if (!_intradayAutoOn) return; // 轮询期间被用户关闭
+            var intraday = (pair[0] && pair[0].success) ? pair[0] : null;
+            var actionList = (pair[1] && pair[1].success) ? pair[1] : null;
+            var cardEl = document.getElementById('intradayCard');
+            if (cardEl && intraday) cardEl.outerHTML = renderIntradayCard(intraday);
+            var alEl = document.getElementById('actionListCard');
+            if (alEl && actionList) alEl.outerHTML = renderActionListCard(actionList);
+            if (_dashData) {
+                if (intraday) { _dashData.intraday = intraday; _intradayAutoLastData = intraday; }
+                if (actionList) _dashData.actionList = actionList;
+            }
+            _intradayAutoStatusText('开启 · 每' + INTRADAY_AUTO_INTERVAL_SEC + '秒（休市自动停）');
+        }).catch(function(err) {
+            console.error('[intradayAutoTick] 网络错误:', err);
+            _intradayAutoStatusText('上次刷新失败 · 将自动重试');
+        });
+    }
+
+    function _intradayTodayTradesLine(d) {
+        // ⑤ 当日已录流水概览行（后端 trade_records 只读聚合，金额不含费）
+        var tt = d.today_trades;
+        if (tt && tt.total_count > 0) {
+            return '<div style="margin-top:8px;font-size:12.5px;color:var(--text-2,#555);">🧾 今日已录流水：买 <b>' +
+                tt.buy_count + '</b> 笔 ' + formatCNY(tt.buy_amount) + ' · 卖 <b>' + tt.sell_count +
+                '</b> 笔 ' + formatCNY(tt.sell_amount) +
+                ' <span style="color:var(--text-3,#999);font-size:11.5px;">（成交金额不含费用，完整流水见「交易流水」页）</span></div>';
+        }
+        return '<div style="margin-top:8px;font-size:12.5px;color:var(--text-3,#999);">🧾 今日暂无已录流水</div>';
     }
 
     function _intradayStateBadge(r) {
@@ -1749,10 +1917,18 @@
                 patrolNote = '<span style="color:#e65100;font-size:12px;margin-left:8px;" title="数据源连续失败/疑似节假日保护，下一交易时段自动恢复">⏸ 巡检暂停中</span>';
             }
         }
+        // ④ 自动刷新开关（默认关；仅交易时段轮询，休市自动停）
+        var autoToggle = '';
+        if (d) {
+            autoToggle = '<label style="font-size:12px;color:var(--text-2,#666);cursor:pointer;font-weight:normal;user-select:none;display:inline-flex;align-items:center;gap:4px;" title="开启后每90秒自动重读盘中快照（仅交易时段生效，休市自动暂停）。只重读快照，不触发行情请求——实时取价仍由后端巡检按其间隔执行。">' +
+                '<input type="checkbox" id="intradayAutoChk" style="vertical-align:middle;cursor:pointer;"' + (_intradayAutoOn ? ' checked' : '') + ' onchange="intradayToggleAuto(this.checked)"> 自动刷新</label>' +
+                '<span id="intradayAutoStatus" style="font-size:11.5px;color:var(--text-3,#999);margin-left:2px;">' + (_intradayAutoOn ? '开启 · 每' + INTRADAY_AUTO_INTERVAL_SEC + '秒' : '已关闭') + '</span>';
+        }
         var html = '<div class="card" id="intradayCard" style="margin-bottom:20px;">';
         html += '<div class="card-title" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">';
         html += '<span>⏱ 盘中速览' + sessionBadge + degradedNote + patrolNote + '</span>';
-        html += '<span style="font-weight:normal;display:flex;align-items:center;gap:10px;">';
+        html += '<span style="font-weight:normal;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">';
+        html += autoToggle;
         if (d && d.updated_at) {
             html += '<span style="color:var(--text-3,#888);font-size:12px;">快照 ' + escapeHtml(String(d.updated_at)) + '</span>';
         }
@@ -1767,16 +1943,22 @@
             if (d.session && !d.session.in_session) {
                 html += '<div style="margin-bottom:8px;font-size:12.5px;color:var(--text-3,#888);">⚪ 当前非交易时段，以下为最近快照（价格可能为缓存/收盘口径）——收盘确认判定以批量评分表与个股报告为准。</div>';
             }
-            var rows = d.stocks.slice().sort(function(a, b) {
-                var sa = _intradaySeverity(a), sb = _intradaySeverity(b);
-                return sa !== sb ? sa - sb : (a.symbol < b.symbol ? -1 : 1);
-            });
+            // ② 排序切换 chips（纯前端排序；距止损默认——风控优先）
+            html += '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px;">';
+            html += '<span style="font-size:12px;color:var(--text-3,#888);">排序：</span>';
+            html += _intradaySortChip('stop', '距止损', '距止损%升序：已破线/最接近止损的排前（无止损参考殿后）');
+            html += _intradaySortChip('pnl', '当日盈亏', '当日浮动盈亏%升序：亏损最大的排前');
+            html += _intradaySortChip('pct', '涨跌幅', '盘中涨跌幅%升序：跌幅最大的排前');
+            html += '</div>';
+            var rows = _intradaySortRows(d.stocks || [], _intradaySort);
             html += '<table style="width:100%;border-collapse:collapse;font-size:12.5px;">';
             html += '<tr style="color:var(--text-3,#888);text-align:left;"><th style="padding:4px 8px 4px 0;font-weight:normal;">股票</th>' +
                     '<th style="font-weight:normal;text-align:right;">现价</th><th style="font-weight:normal;text-align:right;">涨跌%</th>' +
-                    '<th style="font-weight:normal;text-align:right;" title="现价相对有效止损（成本线与建议止损取高者）的百分比，负值=已低于止损线">距止损 ↕</th>' +
+                    '<th style="font-weight:normal;text-align:right;" title="现价×持仓数量 − 加权成本（holdings 聚合，与持仓页同源）；红盈绿亏">当日盈亏</th>' +
+                    '<th style="font-weight:normal;text-align:right;" title="现价相对有效止损（成本线与建议止损取高者）的百分比，负值=已低于止损线">距止损</th>' +
                     '<th style="font-weight:normal;text-align:right;" title="现价相对20日均线（收盘口径）的百分比">距MA20</th>' +
-                    '<th style="font-weight:normal;text-align:left;">今日信号</th><th style="font-weight:normal;text-align:left;">状态</th></tr>';
+                    '<th style="font-weight:normal;text-align:left;">今日信号</th><th style="font-weight:normal;text-align:left;">状态</th>' +
+                    '<th style="font-weight:normal;text-align:left;" title="操盘手操作矩阵首行动作文（收盘口径）；盘中破线以状态列为准">行动指引</th></tr>';
             rows.forEach(function(r) {
                 var isBelow = r.state === 'below_stop';
                 var rowBg = isBelow ? 'background:#fdecea;' : '';
@@ -1787,6 +1969,8 @@
                 var noteTip = r.note ? ' title="' + escapeHtml(r.note) + '"' : '';
                 html += '<td style="text-align:right;white-space:nowrap;"' + noteTip + '>' + priceTxt + asOfTxt + (r.quote_ok ? '' : ' <span style="color:#bbb;font-size:10.5px;">缓存</span>') + '</td>';
                 html += '<td style="text-align:right;">' + _intradayPctCell(r.pct_change) + '</td>';
+                // ① 当日浮动盈亏（现价×quantity 对加权成本；与距止损列并列）
+                html += '<td style="text-align:right;">' + _intradayPnlCell(r) + '</td>';
                 // 距止损：负值（已低于止损线）红色加粗警示；逼近带内琥珀。
                 // 021BT 终验 F2：逼近高亮消费端点 state 字段（后端按 config 阈值判定），
                 // 前端不自行计算 1%——阈值调整（config.INTRADAY_NEAR_STOP_PCT）单点生效。
@@ -1804,6 +1988,8 @@
                 html += '<td style="text-align:right;">' + _intradayPctCell(r.ma20_distance_pct) + '</td>';
                 html += '<td style="padding:5px 8px 5px 8px;white-space:nowrap;">' + _intradaySignalBadges(r) + '</td>';
                 html += '<td style="padding:5px 4px 5px 0;">' + _intradayStateBadge(r) + '</td>';
+                // ③ 行动作指引（操盘手矩阵首行动作文，如「止损·56.16（已触发）」）
+                html += '<td style="padding:5px 0 5px 8px;max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + _intradayActionCell(r) + '</td>';
                 html += '</tr>';
             });
             html += '</table>';
@@ -1811,6 +1997,8 @@
             if (c.alerts > 0) {
                 html += '<div style="margin-top:8px;font-size:12.5px;color:#c0392b;font-weight:600;">🛑 ' + c.alerts + ' 只持仓存在盘中提醒（触线/逼近/异动），详见行动清单置顶项。</div>';
             }
+            // ⑤ 当日已录流水概览行
+            html += _intradayTodayTradesLine(d);
         }
         html += '</div>';
         var intervalMin = (d && d.patrol && d.patrol.interval_min) ? d.patrol.interval_min : 5;
@@ -1866,7 +2054,7 @@
                 var alEl = document.getElementById('actionListCard');
                 if (alEl && actionList) alEl.outerHTML = renderActionListCard(actionList);
                 if (_dashData) {
-                    if (intraday) _dashData.intraday = intraday;
+                    if (intraday) { _dashData.intraday = intraday; _intradayAutoLastData = intraday; }
                     if (actionList) _dashData.actionList = actionList;
                 }
             })

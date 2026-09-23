@@ -46,13 +46,21 @@ def api_dashboard_intraday():
        price, pct_change, as_of, quote_ok, note, stop_line, stop_source,
        distance_pct, ma20, ma20_distance_pct,
        state('below_stop'|'near_stop'|'normal'|'unknown'|'no_data'),
-       swing, vol_spike, volume, signal_labels:[{side,label,date}]}], counts,
+       swing, vol_spike, volume, signal_labels:[{side,label,date}],
+       top_action, top_action_source('stored'|'live')}], counts,
       thresholds:{near_stop_pct, swing_pct},
       patrol:{enabled, interval_min, consecutive_failures, paused},
+      today_trades:{buy_count, buy_amount, sell_count, sell_amount, total_count},
       degraded, degrade_note, disclaimer:'盘中口径，以收盘确认为准'}
     ma20/ma20_distance_pct 为收盘口径 MA20 参照（不足 20 根为 null）；signal_labels
     为读取时零网络离线复算的"最新K线日"信号标记（买卖两侧，失败留空数组）；
     thresholds 透出 config 阈值（F2 单一来源：前端高亮消费 state 字段，不自行算 1%）。
+    021BV 行增量：total_qty/avg_cost/market_value/unrealized_pnl/unrealized_pnl_pct
+    （holdings 账户无关聚合，与持仓列表 unrealized_pnl 公式同源；价/量/成本缺失
+    为 null）；top_action/top_action_source 为操盘手矩阵首行动作文（stored 日报
+    预计算优先，触线/逼近行 live 只读兜底；收盘口径，与行内盘中 state 并列展示）；
+    today_trades 为当日已录买卖流水概览（trade_records 只读聚合，金额不含费；
+    读取失败为 null）。
     提醒语义（F1）：仅 source∈(auto,manual) 的快照产行动清单盘中项，fallback 兜底
     快照仅供本端点展示。
     只读：零写库；无快照兜底亦零网络（price_cache 显示价，禁止归零）。
