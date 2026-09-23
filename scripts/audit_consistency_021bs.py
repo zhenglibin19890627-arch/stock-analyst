@@ -2142,23 +2142,41 @@ def run_audit(only_ids=None):
     return findings, meta
 
 
+def build_rule_stat(findings, oks):
+    """按规则聚合统计（021BU t4 定稿口径，纯函数供测试锁定）。
+
+    口径：**「触发」列只计非 OK 发现（P0/P1/P2/INFO）；OK（一致）列 = 每股规则
+    经 oks 通道的条目 + 全局规则（R16 静态断言 / R18 / F06）随 findings 返回的
+    OK 条目**——两类规则统一口径，修复 t3 复审 §7-2 指出的「全局规则 OK 落不进
+    规则矩阵」统计展示问题（R18 行 OK=0 的根因）。
+    """
+    rule_stat = {}
+    for x in findings:
+        st = rule_stat.setdefault(x['rule'], {'fires': 0, 'sev': {}})
+        if x.get('severity') == 'OK':
+            st.setdefault('ok', 0)
+            st['ok'] += 1
+            continue
+        st['fires'] += 1
+        st['sev'][x['severity']] = st['sev'].get(x['severity'], 0) + 1
+    for x in oks or []:
+        st = rule_stat.setdefault(x['rule'], {'fires': 0, 'sev': {}})
+        st.setdefault('ok', 0)
+        st['ok'] += 1
+    return rule_stat
+
+
 def write_report(findings, meta, out_path):
     now = datetime.now(CN_TZ)
     sev_count = {k: 0 for k in ('P0', 'P1', 'P2', 'INFO', 'OK')}
     for x in findings:
         sev_count[x['severity']] = sev_count.get(x['severity'], 0) + 1
-    ok_count = len(meta.get('oks') or [])
+    # 021BU t4 定稿口径：OK 总数 = 每股规则 oks 通道 + 全局规则随 findings 返回的 OK
+    ok_count = (len(meta.get('oks') or [])
+                + sum(1 for x in findings if x.get('severity') == 'OK'))
     findings_sorted = sorted(
         findings, key=lambda x: (SEV_ORDER.get(x['severity'], 9), x.get('stock_id') or 0, x['rule']))
-    rule_stat = {}
-    for x in findings:
-        st = rule_stat.setdefault(x['rule'], {'fires': 0, 'sev': {}})
-        st['fires'] += 1
-        st['sev'][x['severity']] = st['sev'].get(x['severity'], 0) + 1
-    for x in meta.get('oks') or []:
-        st = rule_stat.setdefault(x['rule'], {'fires': 0, 'sev': {}})
-        st.setdefault('ok', 0)
-        st['ok'] += 1
+    rule_stat = build_rule_stat(findings, meta.get('oks'))
 
     lines = []
     w = lines.append
@@ -2262,6 +2280,11 @@ def write_report(findings, meta, out_path):
         s = st2.get('sev', {})
         w(f'| {rid} | {rule_pairs.get(rid, "")} | {st2.get("fires", 0)} | {s.get("P0", 0)} | '
           f'{s.get("P1", 0)} | {s.get("P2", 0)} | {s.get("INFO", 0)} | {st2.get("ok", 0)} |')
+    w('')
+    w('> 口径（021BU t4 定稿）：「触发」列只计非 OK 发现；「OK（一致）」列统一计入'
+      '每股规则（oks 通道）与全局规则（R16 静态同源断言 / R18 随 findings 返回的 OK）'
+      '——两类规则同口径，避免全局规则 OK 落不进矩阵（t3 复审 §7-2）。'
+      'F06 属数据流规则，其逐股 OK 见 §2 流表与 §0 OK 总数。')
     w('')
     w('---')
     w('')
