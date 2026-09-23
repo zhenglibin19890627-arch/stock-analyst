@@ -1133,10 +1133,12 @@
         html += '</div>';
 
         // 3.6 操盘手建议（2026-09-18）：阶段/主力/对策（异步填充，只读端点）
+        // 021BS R2 N03：卡头副词随 021BR 分域契约统一——021BQ 时代「仓位动作跟评级走」
+        // 的旧措辞与 ④ 操作矩阵「纪律无条件执行」同屏互斥（止损已触发场景读到相反权威声明）
         html += '<div class="card" id="traderAdviceCard">';
         html += '<div class="card-title" style="font-size:15px;margin-bottom:6px;">🎯 操盘手建议' +
                 '<span style="font-size:12px;color:var(--text-3,#888);font-weight:normal;margin-left:8px;">' +
-                '股价阶段 · 主力行为 · 对策与裁决信号｜仓位动作以评级为准</span></div>';
+                '股价阶段 · 主力行为 · 对策与裁决信号｜纪律无条件执行 · 减仓听操盘手 · 加仓看评级</span></div>';
         html += '<div id="traderAdviceBody" style="color:var(--text-3,#999);font-size:13px;">加载中...</div>';
         html += '</div>';
 

@@ -136,6 +136,7 @@ def get_action_list():
         alerts_today=alerts_today, signal_result=signal_result,
         sell_result=sell_result, held_map=held_map,
         discipline_rows=discipline_rows,
+        live_trader_fallback=True,  # 021BS R2 N01：看板端点启用 trader 摘要 live 兜底
     )
 
 
@@ -202,7 +203,8 @@ def _scan_stop_discipline(cursor, held_map):
 
 
 def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
-                      sell_result=None, held_map=None, discipline_rows=None):
+                      sell_result=None, held_map=None, discipline_rows=None,
+                      live_trader_fallback=False):
     """纯逻辑装配今日行动清单（不触库不触网，全部输入由调用方给定）。
 
     Args:
@@ -218,6 +220,9 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
             （holdings 账户无关聚合；None=全部视为空仓）
         discipline_rows: 021BR 持仓纪律扫描行（_scan_stop_discipline 输出；
             None=未扫描，不产行动项）
+        live_trader_fallback: 021BS R2 N01——stored key_factors.trader 缺失
+            （批次后刷新覆盖丢失形态）时 live 现算兜底（只读；会触库）。
+            仅看板端点路径（get_action_list）启用；纯函数默认关闭，行为不变。
 
     Returns: {
         'date', 'items'（排序后行动项）, 'overview'（今日有报告股概览+操盘手摘要）,
@@ -312,6 +317,17 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
 
         kf = _parse_key_factors(latest.get('key_factors'))
         trader = (kf or {}).get('trader') or {}
+        # 021BS R2 N01：stored 摘要缺失/无效（批次后刷新覆盖丢失形态）时
+        # live 现算兜底（只读，零写库；兜底失败静默退化回 stored/空——
+        # 使看板 ⚡/阶段摘要与个股页 live 同面，消除「一面沉默一面报警」）
+        if live_trader_fallback and not (
+                isinstance(trader, dict) and trader.get('stage_name')):
+            try:
+                from modules.trader_advisor import derive_trader_signal_summary
+
+                trader = derive_trader_signal_summary(kf, stock_id=sid) or trader
+            except Exception:  # noqa: BLE001 —— 兜底失败不阻塞清单装配
+                pass
         stats['reported_ok_today'] += 1
         overview.append({
             'stock_id': sid, 'symbol': s['symbol'], 'name': s['name'],

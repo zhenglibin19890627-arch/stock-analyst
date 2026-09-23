@@ -51,7 +51,11 @@
       close>=take_profit、其余按浮盈亏分 S2/S3；action_suggestion 必须包含
       ACTION_MATRIX[评级][状态] 基准词（允许资金面修饰词前后缀）。违反 = P0。
   R03 E内 数字自洽：profit_pct == (close-cost)/cost（±0.15pp）；current_close
-      与 raw_kline 最新收盘一致（不一致 = 报告后数据变更/停牌，P2）。
+      与 raw_kline 最新收盘一致（021BS t4 断言化：同数据日不一致按「生成时点
+      双存储见证」分级——ratings_history.price_at_rating（与 pa.current_close
+      同一 K 线时点写入）== current_close 而 kline 不同 = K 线事后修订型 P2
+      （020I 补采/数据修订覆盖了生成时点 K 线，报告彼时自洽，重生成自愈）；
+      见证不在场或见证亦不符 = P1 采集竞态需排查。跨数据日 = P2 时点差）。
   R04 A×B 分数-档位边界：rating 与 total_score 按市场阈值（A股 80/65/50/30；
       港股 021R overrides 推荐买入≥70/持有观望≤69）核对；不一致时按三层标注面
       断言（021BS 修复契约：失配必须被持续标注）——①markdown 含「迟滞」标注
@@ -91,7 +95,8 @@
   F01 行动清单 vs 报告：overview 行 rating/total_score == 最新报告行（不一致
       = P0）；评级变动项方向与 DB 前后两期一致（不一致 = P0）；持仓纪律项
       的 close/有效止损 与现算一致（不一致 = P0）；overview.has_disagreement
-      与 stored trader 一致（不一致 = P1）；缺报股显式列出（INFO）。
+      与 stored trader 一致（021BS t4：stored 缺失时与 live 兜底一致；不一致
+      = P1）；缺报股显式列出（INFO）。
   F02 看板 top_action chip vs 报告 price_advice：trader_signal.top_action ==
       key_factors.trader.top_action（同源，不一致 = P0）；chip 止损数字 vs
       存量 pa.stop_loss vs 报告期纪律线：互异 = P1（同数据）/ P2（持仓变更
@@ -290,6 +295,19 @@ def load_ratings_tail(cur, stock_id, n=2):
         (stock_id, n),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def load_rating_witness(cur, stock_id):
+    """生成时点见证（021BS t4 R03 断言化）：ratings_history.price_at_rating 按
+    B12-T2 契约取 rating_date 当日 K 线收盘写入，与 daily_reports.price_advice.
+    current_close 构成同一时点的双存储快照。二者一致而现 K 线不符 → K 线事后
+    被补采/修订覆盖（良性时点差）；见证缺失/不符 → 生成即错位（采集竞态）。"""
+    return q1(
+        cur,
+        'SELECT rating_date, price_at_rating FROM ratings_history '
+        'WHERE stock_id=? ORDER BY rating_date DESC LIMIT 1',
+        (stock_id,),
+    )
 
 
 # ================================================================
@@ -579,13 +597,43 @@ def rule_r03_pa_numbers(ctx):
                 True, '确认该报告生成时 _read_cost_price 口径；021BR t3 已收口为聚合口径，存量报告重生成自愈'))
     if ctx['close'] is not None and close is not None and abs(close - ctx['close']) > 1e-6:
         same_day = ctx['kline_date'] == ctx['report_date']
+        # 021BS t4：同数据日不一致按「生成时点双存储见证」分级——
+        # price_at_rating（B12-T2：rating_date 当日 K 线收盘）== pa.current_close
+        # 而现 K 线不同 → K 线事后修订（020I 补采覆盖），报告彼时自洽 = P2；
+        # 见证不在/见证亦不符 → 生成即错位 = P1。
+        witness_ok = False
+        if same_day:
+            wit = ctx.get('price_at_rating_witness') or {}
+            w_price = wit.get('price_at_rating')
+            witness_ok = bool(
+                wit.get('rating_date') == ctx['report_date']
+                and w_price is not None and close is not None
+                and abs(float(close) - float(w_price)) <= 1e-6)
+        if not same_day:
+            sev = 'P2'
+            phenomenon = '价格建议的现价与最新日K收盘不一致（K线晚于报告，时点差）'
+            fix_how = '跨日差异属正常时点差，报告页标注即可'
+        elif witness_ok:
+            sev = 'P2'
+            phenomenon = (
+                '价格建议的现价与最新日K收盘不一致（同数据日·K线事后修订：'
+                f'生成时点双存储见证一致——price_at_rating 与 current_close 同为 {close}，'
+                f'现 K 线已被补采/修订覆盖为 {ctx["close"]}；报告彼时自洽，重生成自愈）')
+            fix_how = 'K线事后修订型：无需修复（数据修订时点差），重生成报告自愈'
+        else:
+            sev = 'P1'
+            phenomenon = ('价格建议的现价与最新日K收盘不一致'
+                          '（同数据日且无生成时点见证——疑似采集竞态，需排查）')
+            fix_how = '同数据日不一致且无生成时点见证：核对采集链时序与数据修订记录'
         f.append(_finding(
-            'R03', '价格建议×K线', ctx, 'P2' if not same_day else 'P1',
+            'R03', '价格建议×K线', ctx, sev,
             f'price_advice.current_close={close}',
             f'raw_kline 最新收盘={ctx["close"]}（{ctx["kline_date"]}）',
-            '价格建议的现价与最新日K收盘不一致' + ('（同数据日）' if same_day else '（K线晚于报告，时点差）'),
-            'daily_report 生成时点的 close 与当前 raw_kline 差异',
-            not same_day, '同数据日不一致才需排查（如采集竞态）；跨日差异属正常时点差，报告页标注即可'))
+            phenomenon,
+            'daily_report 生成时点的 close 与当前 raw_kline 差异'
+            + ('；020I 补采/数据修订链覆盖了生成时点 K 线' if witness_ok and same_day else ''),
+            sev == 'P1',
+            fix_how))
     return f
 
 
@@ -1065,14 +1113,23 @@ def flow_f01_action_list(ctx_list, action_list, stocks, prev_reports, cur):
                 f'报告 total_score={rep.get("total_score")}',
                 f'行动清单 total_score={ov.get("total_score")}',
                 '看板行动清单与报告总分不一致', '同上', True, '同上'))
-        st_dis = bool((ctx['trader_stored'] or {}).get('has_disagreement'))
-        if bool(ov.get('has_disagreement')) != st_dis:
+        # 021BS t4 N01 兜底形态：stored 摘要缺失（批次后刷新覆盖）时，
+        # 行动清单 overview 走 live 兜底 → 以 live 现算为核对基准（一致=兜底调和成立）
+        st = ctx['trader_stored'] or {}
+        if st.get('stage_name'):
+            base_dis, base_src = bool(st.get('has_disagreement')), 'stored'
+        else:
+            base_dis = bool((ctx.get('live_trader') or {}).get('disagreement'))
+            base_src = 'live'
+        if bool(ov.get('has_disagreement')) != base_dis:
             f.append(_finding(
                 'F01', '行动清单×报告', ctx, 'P1',
-                f'报告 key_factors.trader.has_disagreement={st_dis}',
+                f'{base_src} 面 has_disagreement={base_dis}',
                 f'行动清单 overview.has_disagreement={bool(ov.get("has_disagreement"))}',
-                '分歧标记在两个看板读取面不一致（读取同一 JSON 却得到不同值）',
-                'modules/action_list.py _parse_key_factors / 概览装配', True, '核对解析与布尔化路径'))
+                '分歧标记在两个看板读取面不一致（stored 在场时应同读一 JSON；'
+                'stored 缺失时行动清单走 live 兜底，应与 live 现算一致）',
+                'modules/action_list.py trader 摘要读取面（021BS N01 兜底）', True,
+                '核对 trader 摘要读取面是否统一走 derive_trader_signal_summary'))
     # 评级变动项方向核对
     for it in action_list.get('items') or []:
         if it.get('kind') not in ('rating_upgrade', 'rating_downgrade', 'rating_change'):
@@ -1487,6 +1544,22 @@ def selftest():
     c['score_tier_note_live'] = '评级口径说明：总分 70.0 位于「推荐买入」档分数区间'
     cases.append(('失配+读取面注记', c, 'P2', rule_r04_score_tier))
 
+    # 用例13（021BS t4）：R03 同数据日现价不一致 + 双存储见证一致 → K线事后修订 P2
+    c = dict(base)
+    c['pa'] = dict(base['pa'], current_close=8.5)
+    c['close'] = 8.3
+    c['kline_date'] = '2026-09-22'
+    c['price_at_rating_witness'] = {'rating_date': '2026-09-22', 'price_at_rating': 8.5}
+    cases.append(('R03 K线事后修订（见证一致）', c, 'P2', rule_r03_pa_numbers))
+
+    # 用例14（021BS t4）：R03 同数据日不一致且见证缺失 → 采集竞态 P1
+    c = dict(base)
+    c['pa'] = dict(base['pa'], current_close=8.5)
+    c['close'] = 8.3
+    c['kline_date'] = '2026-09-22'
+    c['price_at_rating_witness'] = None
+    cases.append(('R03 同数据日无见证', c, 'P1', rule_r03_pa_numbers))
+
     # 用例7：一致基线（对照中免 021BR 修复后形态）→ 不应触发任何 P0/P1
     fired = []
     for rule in ALL_REPORT_RULES:
@@ -1601,6 +1674,8 @@ def run_audit(only_ids=None):
         ctx['name'] = s['name']
         # 021BS：读取面失配注记（看板 watchlist-scores，纯 GET 可观测标注面③）
         ctx['score_tier_note_live'] = (ws_by_id.get(sid) or {}).get('score_tier_note')
+        # 021BS t4：R03 生成时点双存储见证（price_at_rating）
+        ctx['price_at_rating_witness'] = load_rating_witness(cur, sid)
         ctx_list.append(ctx)
 
         for fn in ALL_REPORT_RULES:

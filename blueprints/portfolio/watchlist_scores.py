@@ -1,5 +1,6 @@
 """看板评分路由：/api/portfolio/watchlist-scores + 价格区间/操盘手信号解析
-（原 portfolio.py 区段逐字搬运；_parse_pa_zone/_derive_trader_signal 为离线纯函数，
+（原 portfolio.py 区段逐字搬运；_parse_pa_zone 为离线纯函数，_derive_trader_signal
+stored 优先、021BS R2 N01 起 stored 缺失时 live 兜底（只读）；
 测试经 blueprints.portfolio facade 导入）。"""
 
 import json
@@ -51,28 +52,20 @@ def _parse_pa_zone(pa_json):
     }
 
 
-def _derive_trader_signal(kf_json):
-    """2026-09-18：从最新报告 key_factors.trader 摘要提取看板分歧标记（零重算）。
+def _derive_trader_signal(kf_json, stock_id=None):
+    """2026-09-18：从最新报告 key_factors.trader 摘要提取看板分歧标记。
 
     日报生成时由 trader_advisor 预计算（阶段名 + 与评级的分歧）；
     无摘要/解析失败返回 None（前端不显示标记，不影响主卡片）。
     021BQ：增量键 top_action（操作矩阵当前视角首行动作摘要；旧键零改动）。
+    021BS R2 N01：stored 摘要缺失/无效（批次后刷新覆盖丢失形态）且提供
+    stock_id 时 live 现算兜底（零写库，统一走
+    trader_advisor.derive_trader_signal_summary）；stock_id 缺省不兜底，
+    既有离线调用面行为不变。
     """
-    if not kf_json:
-        return None
-    try:
-        kf = json.loads(kf_json) if isinstance(kf_json, str) else kf_json
-        t = (kf or {}).get('trader') or {}
-        if not t.get('stage_name'):
-            return None
-        return {
-            'stage_name': t.get('stage_name'),
-            'has_disagreement': bool(t.get('has_disagreement')),
-            'disagreement_text': t.get('disagreement_text'),
-            'top_action': t.get('top_action'),
-        }
-    except (TypeError, ValueError):
-        return None
+    from modules.trader_advisor import derive_trader_signal_summary
+
+    return derive_trader_signal_summary(kf_json, stock_id=stock_id)
 
 
 def _derive_score_tier_note(row):
@@ -240,7 +233,11 @@ def api_portfolio_watchlist_scores():
                 # DEV-TASKS-20260727-003：超买超卖信号（从 key_factors 派生，不暴露原始因子）
                 'obos_signal': _derive_obos_signal(r.get('key_factors')),
                 # 2026-09-18：操盘手阶段×评级分歧标记（日报预计算，零重算）
-                'trader_signal': _derive_trader_signal(r.get('key_factors')),
+                # 021BS R2 N01：有有效报告且 stored 缺失时传 stock_id 启用 live 兜底
+                #（无报告股不兜底——看板不为从未分析的股票凭空造 chip）
+                'trader_signal': _derive_trader_signal(
+                    r.get('key_factors'),
+                    r['id'] if r.get('report_status') == 'ok' else None),
                 # 021BS P1-1：分数×档位失配口径注记（读取面现算，存量报告同覆盖）
                 'score_tier_note': _derive_score_tier_note(r),
                 # 021BM：价格建议区间（最新报告已存 JSON，零重算；建议卡买入侧展示）

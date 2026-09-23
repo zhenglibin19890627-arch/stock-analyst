@@ -1161,3 +1161,55 @@ def generate_trader_advice(stock_id: int,
     except Exception as e:  # noqa: BLE001
         logger.warning(f'[trader-advisor] stock_id={stock_id}: {e}', exc_info=True)
         return {'available': False, 'reason': f'计算异常: {e}'}
+
+
+def derive_trader_signal_summary(kf_json=None, stock_id=None):
+    """看板消费面 trader 摘要统一读取（021BS R2 N01 读取面兜底）。
+
+    背景（021BS R2 N01，5 股实锤）：日报期预计算的 key_factors.trader 摘要
+    （stage_name/has_disagreement/top_action）是看板 top_action chip / ⚡分歧
+    标注 / 行动清单 overview 的唯一落库面；批次后报告被刷新覆盖时（021K 过期
+    重评/手动刷新 → generate_advice 内 019A 回写），key_factors 被
+    _build_key_factors（不含 trader）整体覆盖 → 看板一面沉默、个股页 live 一面
+    仍报警——同一事实两面不一（一面沉默可被读作「无需行动」，中免类高危）。
+
+    兜底契约（B24 合规：generate_advice 与 019A 写库点零触碰，纯读取面）：
+      - stored 摘要在场（stage_name 非空）→ 原样透出，零现算（与日报预计算同源）；
+      - stored 缺失/无效且调用方提供 stock_id → live 现算 generate_trader_advice
+        兜底（只读），输出与 stored 摘要同构；
+      - 兜底失败（数据不足/异常）静默返回 None——不阻塞看板，退化回现状。
+
+    kf_json: daily_reports.key_factors（JSON 字符串或 dict，可为 None）；
+    stock_id: 兜底现算用；缺省（None）不兜底——离线纯函数调用面行为不变。
+
+    Returns:
+        dict(stage_name/has_disagreement/disagreement_text/top_action) 或 None
+    """
+    if kf_json:
+        try:
+            kf = json.loads(kf_json) if isinstance(kf_json, str) else kf_json
+            t = (kf or {}).get('trader') or {}
+            if isinstance(t, dict) and t.get('stage_name'):
+                return {
+                    'stage_name': t.get('stage_name'),
+                    'has_disagreement': bool(t.get('has_disagreement')),
+                    'disagreement_text': t.get('disagreement_text'),
+                    'top_action': t.get('top_action'),
+                }
+        except (TypeError, ValueError):
+            pass  # stored 解析失败 → 走 live 兜底
+    if not stock_id:
+        return None
+    try:
+        ta = generate_trader_advice(stock_id)
+    except Exception as e:  # noqa: BLE001 —— 兜底失败静默，不阻塞看板
+        logger.warning(f'[trader-advisor] trader 摘要兜底失败 stock_id={stock_id}: {e}')
+        return None
+    if not ta.get('available'):
+        return None
+    return {
+        'stage_name': (ta.get('stage') or {}).get('name'),
+        'has_disagreement': bool(ta.get('disagreement')),
+        'disagreement_text': (ta.get('disagreement') or {}).get('text'),
+        'top_action': (ta.get('operations') or {}).get('top_action'),
+    }
