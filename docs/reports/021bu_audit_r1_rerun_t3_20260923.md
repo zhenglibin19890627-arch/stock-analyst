@@ -5,7 +5,7 @@
 > dashboard/action-list / portfolio/watchlist-scores / portfolio/holdings），零写库、零网络采集、
 > 零触碰 advisor.generate_advice（B24）。审计基准面 = daily_reports 存量报告（刻意绕开会触发
 > 实时重评写库的 report-latest 端点）。
-> 运行时刻：2026-09-23 22:35:19；自选股 56 只；有最新 ok 日报 56 只；持仓 8 只；当日预警 79 条。
+> 运行时刻：2026-09-23 22:34:24；自选股 56 只；有最新 ok 日报 56 只；持仓 8 只；当日预警 79 条。
 > 规则集与分级定义见脚本文件头 docstring（规则即注释、注释即规则，脚本可反复重跑供后续轮次复用）。
 
 ---
