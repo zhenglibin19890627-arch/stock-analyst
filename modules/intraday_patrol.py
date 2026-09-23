@@ -166,6 +166,22 @@ def _read_price_cache_map(cursor, stock_ids):
     }
 
 
+def _read_ma20(cursor, stock_id, today_str):
+    """MA20 参照（收盘口径）：今日之前最近 20 根日K收盘均线；不足 20 根返回 None
+    （显式缺失不凑数，速览卡显示"—"）。排除当日行——盘中盘中快报可能残留
+    tencent_intraday 当日行，MA20 必须只基于已完成日K（收盘口径）。"""
+    cursor.execute(
+        'SELECT close FROM raw_kline '
+        "WHERE stock_id = ? AND substr(trade_date, 1, 10) < ? AND close IS NOT NULL "
+        'ORDER BY trade_date DESC LIMIT 20',
+        (stock_id, today_str),
+    )
+    closes = [float(r['close']) for r in cursor.fetchall() if r['close']]
+    if len(closes) < 20:
+        return None
+    return round(sum(closes) / len(closes), 3)
+
+
 # ============================================================
 # 状态判定（纯函数）
 # ============================================================
@@ -223,6 +239,7 @@ def build_snapshot(now, positions, quotes=None, *, source='auto', degraded=False
 
     stop_map = {}
     volref_map = {}
+    ma20_map = {}
     cache_map = {}
     conn = get_connection()
     try:
@@ -239,6 +256,7 @@ def build_snapshot(now, positions, quotes=None, *, source='auto', degraded=False
                 if p['avg_cost'] else None,
             }
             volref_map[sid] = _read_volume_ref(cursor, sid, today_str)
+            ma20_map[sid] = _read_ma20(cursor, sid, today_str)
         cache_map = _read_price_cache_map(cursor, [p['stock_id'] for p in positions])
     finally:
         conn.close()
@@ -291,6 +309,10 @@ def build_snapshot(now, positions, quotes=None, *, source='auto', degraded=False
         if state in ('below_stop', 'near_stop') or swing:
             alert_count += 1
         counts[state] = counts.get(state, 0) + 1
+        ma20 = ma20_map.get(sid)
+        ma20_distance = (
+            round((price / ma20 - 1.0) * 100.0, 2) if (ma20 and price) else None
+        )
         rows.append({
             'stock_id': sid,
             'symbol': p['symbol'],
@@ -306,6 +328,8 @@ def build_snapshot(now, positions, quotes=None, *, source='auto', degraded=False
             'discipline_stop': stop['discipline_stop'],
             'pa_stop': stop['pa_stop'],
             'distance_pct': distance,
+            'ma20': ma20,
+            'ma20_distance_pct': ma20_distance,
             'state': state,
             'swing': swing,
             'vol_spike': vol_spike,
@@ -492,8 +516,56 @@ def get_snapshot():
     return out
 
 
+def _scan_today_signal_labels(stock_ids):
+    """今日信号标记 overlay（只读离线复算，零网络；仅持仓 id，买卖两侧各扫一次）。
+
+    "今日"口径与行动清单路2/2b 一致：命中触发日 == 最新已采集K线日（最新一根
+    K线上的信号，前日巡检已覆盖的历史命中不计）。扫描失败静默返回空表（不阻塞
+    速览卡，信号标记仅辅助信息）。
+
+    Returns: {stock_id: [{'side': 'buy'|'sell', 'label', 'signal', 'date'}]}
+    """
+    labels: dict = {}
+    if not stock_ids:
+        return labels
+    try:
+        from modules.market_screener import (
+            scan_watchlist_sell_signals,
+            scan_watchlist_signals,
+        )
+
+        for side, scan, match_key in (
+            ('buy', scan_watchlist_signals, 'matches'),
+            ('sell', scan_watchlist_sell_signals, 'sell_matches'),
+        ):
+            try:
+                result = scan(stock_ids=stock_ids) or {}
+            except Exception as e:  # noqa: BLE001 —— 单侧失败不阻塞另一侧
+                logger.warning('[盘中速览] %s 信号复算失败（标记留空）: %s', side, e)
+                continue
+            for sig in result.get('results') or []:
+                kline_upto = sig.get('kline_upto')
+                hits = [
+                    h for h in sig.get(match_key) or []
+                    if h.get('trigger_date') == kline_upto
+                ]
+                if not hits:
+                    continue
+                labels.setdefault(sig['stock_id'], []).extend([
+                    {'side': side, 'label': h.get('label') or h.get('signal') or '',
+                     'signal': h.get('signal') or '', 'date': h.get('trigger_date')}
+                    for h in hits
+                ])
+    except Exception as e:  # noqa: BLE001 —— 整体失败静默（信号标记非关键信息）
+        logger.warning('[盘中速览] 信号标记 overlay 失败（留空）: %s', e)
+    return labels
+
+
 def get_snapshot_for_dashboard():
-    """速览端点读路径：今日内存快照优先；缺失/跨日 → 零网络兜底现算（price_cache 显示价）。"""
+    """速览端点读路径：今日内存快照优先；缺失/跨日 → 零网络兜底现算（price_cache 显示价）。
+
+    读取时叠加"今日信号标记"（零网络离线复算，仅持仓 id）与实时巡检状态。
+    """
     global _LAST_SNAPSHOT
     snap = _LAST_SNAPSHOT
     today_str = datetime.now(_CN_TZ).strftime('%Y-%m-%d')
@@ -507,6 +579,11 @@ def get_snapshot_for_dashboard():
         )
         _LAST_SNAPSHOT = snap
     out = dict(snap)
+    rows = [dict(r) for r in snap.get('stocks') or []]
+    sig_labels = _scan_today_signal_labels([r['stock_id'] for r in rows])
+    for r in rows:
+        r['signal_labels'] = sig_labels.get(r['stock_id']) or []
+    out['stocks'] = rows
     out['patrol'] = _patrol_state()
     out['success'] = True
     return out

@@ -44,10 +44,13 @@ def api_dashboard_intraday():
     {success, date, updated_at, source('auto'|'manual'|'fallback'),
      session:{in_session, markets}, stocks:[{stock_id, symbol, name, market,
        price, pct_change, as_of, quote_ok, note, stop_line, stop_source,
-       distance_pct, state('below_stop'|'near_stop'|'normal'|'unknown'|'no_data'),
-       swing, vol_spike, volume}], counts, patrol:{enabled, interval_min,
-       consecutive_failures, paused}, degraded, degrade_note,
-     disclaimer:'盘中口径，以收盘确认为准'}
+       distance_pct, ma20, ma20_distance_pct,
+       state('below_stop'|'near_stop'|'normal'|'unknown'|'no_data'),
+       swing, vol_spike, volume, signal_labels:[{side,label,date}]}], counts,
+     patrol:{enabled, interval_min, consecutive_failures, paused},
+     degraded, degrade_note, disclaimer:'盘中口径，以收盘确认为准'}
+    ma20/ma20_distance_pct 为收盘口径 MA20 参照（不足 20 根为 null）；signal_labels
+    为读取时零网络离线复算的"最新K线日"信号标记（买卖两侧，失败留空数组）。
     只读：零写库；无快照兜底亦零网络（price_cache 显示价，禁止归零）。
     """
     try:

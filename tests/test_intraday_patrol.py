@@ -315,6 +315,33 @@ class TestStatesAndSnapshot:
         assert row['stop_source'] == '纪律/价格建议取高者'
         assert row['state'] == 'near_stop'  # 距 9.6 约 0.52%
 
+    def test_ma20_computed_and_distance(self, pdb, monkeypatch):
+        """t3：距 MA20%——补 20 根 close=10.0 的已完成日K → MA20=10.0，
+        现价 10.5 → 距离 +5.0%（收盘口径，排除当日行）"""
+        conn = db_manager.get_connection()
+        for i in range(20):
+            d = (_dt.date(2026, 8, 20) + _dt.timedelta(days=i)).isoformat()
+            conn.execute(
+                'INSERT INTO raw_kline (stock_id, trade_date, open, close, high, low, volume) '
+                'VALUES (1, ?, 10.0, 10.0, 10.2, 9.8, 1000)', (d,))
+        conn.commit()
+        conn.close()
+        _patch_clock(monkeypatch)
+        _patch_fetch(monkeypatch, quotes={1: _quote(1, 10.5, 1.0)})
+        result = patrol.run_patrol_round()
+        row = result['snapshot']['stocks'][0]
+        assert row['ma20'] == pytest.approx(10.0)
+        assert row['ma20_distance_pct'] == pytest.approx(5.0)
+
+    def test_ma20_insufficient_bars_none(self, pdb, monkeypatch):
+        """t3：不足 20 根已完成日K → ma20 显式缺失（None，前端显示"—"，不凑数）"""
+        _patch_clock(monkeypatch)
+        _patch_fetch(monkeypatch, quotes={1: _quote(1, 10.5, 1.0)})
+        result = patrol.run_patrol_round()
+        row = result['snapshot']['stocks'][0]
+        assert row['ma20'] is None
+        assert row['ma20_distance_pct'] is None
+
     def test_volume_spike(self, pdb, monkeypatch):
         """当日量 3000 ≥ 近 5 日均量 1000 ×1.5 → 量能异动"""
         _patch_clock(monkeypatch)
@@ -734,3 +761,65 @@ class TestSchedulerLifecycle:
         assert timer_secs == [0]  # 启动即检（Timer(0) 立即跑首个 tick）
         patrol.stop_intraday_patrol()
         assert patrol._started is False
+
+
+# ============================================================
+# 十一、t3 速览卡后端增量：今日信号标记 overlay + 读路径行键
+# ============================================================
+
+
+class TestTodaySignalOverlay:
+    def test_scan_today_signal_labels(self, pdb, monkeypatch):
+        """信号 overlay：仅"最新K线日"命中计入（与行动清单路2 口径一致）；
+        买/卖两侧分别聚合，side/label 正确"""
+        import modules.market_screener as ms
+
+        def fake_buy(stock_ids=None, **kw):
+            return {'results': [{'stock_id': 1, 'kline_upto': '2026-09-22',
+                                 'matches': [
+                                     {'signal': 'res_double_golden', 'label': '日线周线双金叉',
+                                      'trigger_date': '2026-09-22'},
+                                     {'signal': 'macd_golden', 'label': 'MACD金叉',
+                                      'trigger_date': '2026-09-18'},  # 非最新K线日：不计
+                                 ]}]}
+
+        def fake_sell(stock_ids=None, **kw):
+            return {'results': [{'stock_id': 2, 'kline_upto': '2026-09-22',
+                                 'sell_matches': [
+                                     {'signal': 'kdj_dead_high', 'label': 'KDJ高位死叉',
+                                      'trigger_date': '2026-09-22'}]}]}
+
+        monkeypatch.setattr(ms, 'scan_watchlist_signals', fake_buy)
+        monkeypatch.setattr(ms, 'scan_watchlist_sell_signals', fake_sell)
+        labels = patrol._scan_today_signal_labels([1, 2])
+        assert len(labels[1]) == 1  # 历史命中被过滤
+        assert labels[1][0]['side'] == 'buy'
+        assert labels[1][0]['label'] == '日线周线双金叉'
+        assert labels[2][0]['side'] == 'sell'
+        assert labels[2][0]['label'] == 'KDJ高位死叉'
+
+    def test_scan_screener_failure_silent(self, pdb, monkeypatch):
+        """信号复算整体失败 → 静默空表（标记非关键信息，不阻塞速览卡）"""
+        import modules.market_screener as ms
+
+        def _boom(stock_ids=None, **kw):
+            raise RuntimeError('复算失败')
+
+        monkeypatch.setattr(ms, 'scan_watchlist_signals', _boom)
+        monkeypatch.setattr(ms, 'scan_watchlist_sell_signals', _boom)
+        assert patrol._scan_today_signal_labels([1]) == {}
+
+    def test_scan_empty_ids_short_circuit(self):
+        """无持仓 → 零扫描（不导入 screener 不触库）"""
+        assert patrol._scan_today_signal_labels([]) == {}
+
+    def test_dashboard_snapshot_row_keys(self, pdb, monkeypatch):
+        """t3 读路径契约：stocks 行携带 ma20/ma20_distance_pct/signal_labels 键
+        （真实 screener 在临时库上跑，5根K线不足门槛 → 空标记）"""
+        _patch_clock(monkeypatch)
+        snap = patrol.get_snapshot_for_dashboard()
+        assert snap['success'] is True
+        row = snap['stocks'][0]
+        assert 'ma20' in row and 'ma20_distance_pct' in row
+        assert row['ma20'] is None  # pdb 仅 5 根K线
+        assert row['signal_labels'] == []

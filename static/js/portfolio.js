@@ -1310,24 +1310,29 @@
         var container = document.getElementById('dashboardContent');
         container.innerHTML = '<div class="report-loading">正在加载总览看板...</div>';
 
-        // 并行请求 summary + watchlist-scores + action-list
+        // 并行请求 summary + watchlist-scores + action-list + intraday
         // 021E：no-store 规避服务端 ETag 304 空响应导致的静默失败（同 refreshDashboardData）
         // 021O：移除 index-ratings 请求——大盘指数移至市场行情页查看，看板聚焦持仓/自选
         var summaryPromise = fetch('/api/portfolio/summary', {cache: 'no-store'}).then(function(r) { return safeJson(r); });
         var scoresPromise  = fetch('/api/portfolio/watchlist-scores', {cache: 'no-store'}).then(function(r) { return safeJson(r); });
         // 021BP 项3：今日行动清单（四路只读聚合；失败静默降级不阻塞看板）
         var actionPromise  = fetch('/api/dashboard/action-list', {cache: 'no-store'}).then(function(r) { return safeJson(r); });
+        // 021BT：盘中速览（持仓盘中状态一屏；失败/网络异常静默降级 null，不阻塞看板）
+        var intradayPromise = fetch('/api/dashboard/intraday', {cache: 'no-store'})
+            .then(function(r) { return safeJson(r); })
+            .catch(function() { return null; });
 
-        Promise.all([summaryPromise, scoresPromise, actionPromise])
+        Promise.all([summaryPromise, scoresPromise, actionPromise, intradayPromise])
             .then(function(results) {
                 var summary = results[0];
                 var scores = results[1];
                 var actionList = results[2];
+                var intraday = results[3];
                 if (!scores.success) {
                     container.innerHTML = '<div class="report-empty"><p style="color:#e74c3c;">加载失败</p></div>';
                     return;
                 }
-                _dashData = { summary: summary, stocks: scores.stocks || [], reportDate: scores.report_date, reportDateMin: scores.report_date_min, generatedAt: scores.generated_at, actionList: (actionList && actionList.success) ? actionList : null };
+                _dashData = { summary: summary, stocks: scores.stocks || [], reportDate: scores.report_date, reportDateMin: scores.report_date_min, generatedAt: scores.generated_at, actionList: (actionList && actionList.success) ? actionList : null, intraday: (intraday && intraday.success) ? intraday : null };
                 renderDashboard(_dashData);
             })
             .catch(function(e) {
@@ -1386,6 +1391,9 @@
 
         // ---- 1.2 今日行动清单（021BP 项3：四路只读聚合，30 秒看完今天该关注什么） ----
         html += renderActionListCard(data.actionList);
+
+        // ---- 1.25 盘中速览卡（021BT：持仓盘中状态一屏 + 一键刷新；失败静默收缩） ----
+        html += renderIntradayCard(data.intraday);
 
         // ---- 1.5 操作建议卡片（评级×持仓盈亏 自动生成） ----
         html += '<div class="card" style="margin-bottom:20px;">';
@@ -1643,6 +1651,204 @@
         html += '<div style="margin-top:8px;font-size:12px;color:var(--text-3,#aaa);">买卖点信号均为离线快照参考口径（基于已采集K线复算，截止最新采集日；卖出信号同为离线快照参考，持仓标记来自持仓账户聚合），不构成投资建议。</div>';
         html += '</div>';
         return html;
+    }
+
+    // ========== ⏱ 盘中速览卡（021BT：持仓盘中状态一屏 + 一键刷新） ==========
+    // 数据源 GET /api/dashboard/intraday（loadDashboard 第4路并行；行字段见端点 docstring 契约）。
+    // 刷新走 POST /api/dashboard/intraday/refresh（仅持仓 8 只批量取价+写 price_cache，
+    // 后端 60s 冷却权威节流——比全自选 refresh-prices 更克制，021BN-c 数据源风控）。
+    var _intradayLastRefreshAt = 0;
+    var _intradayRefreshing = false;
+    var INTRADAY_DISCLAIMER = '盘中口径，以收盘确认为准';
+
+    function _intradaySeverity(r) {
+        // 行排序严重度：触线(0) > 逼近(1) > 异动(2) > 其余(3)；同级按代码
+        if (r.state === 'below_stop') return 0;
+        if (r.state === 'near_stop') return 1;
+        if (r.swing) return 2;
+        return 3;
+    }
+
+    function _intradayStateBadge(r) {
+        // 状态徽标（A股惯例：风控=绿系、逼近=琥珀、正常=灰、无参考=浅灰）
+        if (r.state === 'below_stop') return '<span style="background:#e8f5e9;color:#1b5e20;font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap;">🛑 触及止损</span>';
+        if (r.state === 'near_stop') return '<span style="background:#fff3e0;color:#e65100;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;white-space:nowrap;">⚠ 逼近止损</span>';
+        if (r.state === 'no_data') return '<span style="background:#f5f5f5;color:#999;font-size:11px;padding:2px 8px;border-radius:10px;white-space:nowrap;">无数据</span>';
+        if (r.state === 'unknown') return '<span style="background:#eee;color:#888;font-size:11px;padding:2px 8px;border-radius:10px;white-space:nowrap;">无止损参考</span>';
+        return '<span style="background:#f5f5f5;color:#888;font-size:11px;padding:2px 8px;border-radius:10px;white-space:nowrap;">正常</span>';
+    }
+
+    function _intradayPctCell(v, opts) {
+        // 百分比单元格：红涨绿跌；opts.bold 距止损破线时加粗
+        if (v == null || isNaN(v)) return '<span style="color:#ccc;">—</span>';
+        var color = pnlColor(v);
+        var txt = (v > 0 ? '+' : '') + v.toFixed(2) + '%';
+        var weight = opts && opts.bold ? 'font-weight:700;' : '';
+        return '<span style="color:' + color + ';' + weight + '">' + txt + '</span>';
+    }
+
+    function _intradaySignalBadges(r) {
+        // 今日信号标记（后端离线复算 overlay；买点蓝系/卖点绿系，与行动清单徽标同族）
+        var labels = r.signal_labels || [];
+        if (!labels.length) return '<span style="color:#ccc;">—</span>';
+        return labels.map(function(s) {
+            var buy = s.side === 'buy';
+            var bg = buy ? '#e3f2fd' : '#e8f5e9';
+            var fg = buy ? '#1565c0' : '#2e7d32';
+            var icon = buy ? '🔵' : '🟢';
+            return '<span style="background:' + bg + ';color:' + fg + ';font-size:10.5px;font-weight:600;padding:1px 6px;border-radius:8px;margin-right:4px;white-space:nowrap;" title="' +
+                (buy ? '买点' : '卖点') + '信号·最新K线日(' + escapeHtml(s.date || '') + ')">' + icon + ' ' + escapeHtml(s.label || '') + '</span>';
+        }).join('');
+    }
+
+    function renderIntradayCard(d) {
+        var sessionBadge;
+        if (d && d.session) {
+            sessionBadge = d.session.in_session
+                ? '<span style="background:#e8f5e9;color:#2e7d32;font-size:12px;font-weight:600;padding:2px 10px;border-radius:10px;margin-left:8px;">🟢 交易时段</span>'
+                : '<span style="background:#eee;color:#888;font-size:12px;font-weight:600;padding:2px 10px;border-radius:10px;margin-left:8px;">⚪ 休市</span>';
+        } else {
+            sessionBadge = '';
+        }
+        var degradedNote = (d && d.degraded)
+            ? '<span style="color:#e65100;font-size:12px;margin-left:8px;" title="' + escapeHtml(d.degrade_note || '') + '">🟡 数据源暂不可达，显示缓存价</span>'
+            : '';
+        var patrolNote = '';
+        if (d && d.patrol) {
+            if (d.patrol.enabled === false) {
+                patrolNote = '<span style="color:#888;font-size:12px;margin-left:8px;">⏸ 巡检已停用</span>';
+            } else if (d.patrol.paused) {
+                patrolNote = '<span style="color:#e65100;font-size:12px;margin-left:8px;" title="数据源连续失败/疑似节假日保护，下一交易时段自动恢复">⏸ 巡检暂停中</span>';
+            }
+        }
+        var html = '<div class="card" id="intradayCard" style="margin-bottom:20px;">';
+        html += '<div class="card-title" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">';
+        html += '<span>⏱ 盘中速览' + sessionBadge + degradedNote + patrolNote + '</span>';
+        html += '<span style="font-weight:normal;display:flex;align-items:center;gap:10px;">';
+        if (d && d.updated_at) {
+            html += '<span style="color:var(--text-3,#888);font-size:12px;">快照 ' + escapeHtml(String(d.updated_at)) + '</span>';
+        }
+        html += '<button class="btn btn-sm" id="intradayRefreshBtn" onclick="intradayManualRefresh()" title="立即巡检一轮持仓股实时快照（仅持仓，60s 冷却）">🔄 盘中刷新</button>';
+        html += '</span></div>';
+        html += '<div id="intradayCardBody">';
+        if (!d) {
+            html += '<div style="padding:10px 0;font-size:13px;color:var(--text-3,#999);">盘中速览暂不可用（巡检模块未响应），刷新页面重试。</div>';
+        } else if (!d.stocks || !d.stocks.length) {
+            html += '<div style="padding:10px 0;font-size:13px;color:var(--text-3,#999);">当前无持仓——盘中速览仅覆盖持仓股。</div>';
+        } else {
+            if (d.session && !d.session.in_session) {
+                html += '<div style="margin-bottom:8px;font-size:12.5px;color:var(--text-3,#888);">⚪ 当前非交易时段，以下为最近快照（价格可能为缓存/收盘口径）——收盘确认判定以批量评分表与个股报告为准。</div>';
+            }
+            var rows = d.stocks.slice().sort(function(a, b) {
+                var sa = _intradaySeverity(a), sb = _intradaySeverity(b);
+                return sa !== sb ? sa - sb : (a.symbol < b.symbol ? -1 : 1);
+            });
+            html += '<table style="width:100%;border-collapse:collapse;font-size:12.5px;">';
+            html += '<tr style="color:var(--text-3,#888);text-align:left;"><th style="padding:4px 8px 4px 0;font-weight:normal;">股票</th>' +
+                    '<th style="font-weight:normal;text-align:right;">现价</th><th style="font-weight:normal;text-align:right;">涨跌%</th>' +
+                    '<th style="font-weight:normal;text-align:right;" title="现价相对有效止损（成本线与建议止损取高者）的百分比，负值=已低于止损线">距止损 ↕</th>' +
+                    '<th style="font-weight:normal;text-align:right;" title="现价相对20日均线（收盘口径）的百分比">距MA20</th>' +
+                    '<th style="font-weight:normal;text-align:left;">今日信号</th><th style="font-weight:normal;text-align:left;">状态</th></tr>';
+            rows.forEach(function(r) {
+                var isBelow = r.state === 'below_stop';
+                var rowBg = isBelow ? 'background:#fdecea;' : '';
+                html += '<tr style="' + rowBg + 'border-bottom:1px solid var(--border-light,#f0f0f0);cursor:pointer;" onclick="viewReport(' + r.stock_id + ')">';
+                html += '<td style="padding:5px 8px 5px 0;white-space:nowrap;"><b>' + escapeHtml(r.name || '') + '</b> <span style="color:var(--text-3,#888);font-size:11.5px;">' + escapeHtml(r.symbol || '') + '</span></td>';
+                var priceTxt = (r.price != null && !isNaN(r.price)) ? r.price.toFixed(2) : '—';
+                var asOfTxt = r.as_of ? ' <span style="color:var(--text-3,#aaa);font-size:10.5px;">' + escapeHtml(r.as_of) + '</span>' : '';
+                var noteTip = r.note ? ' title="' + escapeHtml(r.note) + '"' : '';
+                html += '<td style="text-align:right;white-space:nowrap;"' + noteTip + '>' + priceTxt + asOfTxt + (r.quote_ok ? '' : ' <span style="color:#bbb;font-size:10.5px;">缓存</span>') + '</td>';
+                html += '<td style="text-align:right;">' + _intradayPctCell(r.pct_change) + '</td>';
+                // 距止损：负值（已低于止损线）红色加粗警示；逼近带内琥珀
+                var stopCell;
+                if (r.stop_line == null) {
+                    stopCell = '<span style="color:#bbb;" title="无有效止损参考（无成本与建议止损）">无止损</span>';
+                } else {
+                    var dv = r.distance_pct;
+                    var near = dv != null && dv > 0 && dv < 1;
+                    stopCell = _intradayPctCell(dv, { bold: isBelow });
+                    if (near) stopCell = '<span style="color:#e65100;font-weight:600;">' + (dv > 0 ? '+' : '') + dv.toFixed(2) + '%</span>';
+                    if (isBelow) stopCell = '<span style="color:#c0392b;font-weight:700;">' + (dv > 0 ? '+' : '') + dv.toFixed(2) + '%</span>';
+                }
+                html += '<td style="text-align:right;white-space:nowrap;">' + stopCell + '</td>';
+                html += '<td style="text-align:right;">' + _intradayPctCell(r.ma20_distance_pct) + '</td>';
+                html += '<td style="padding:5px 8px 5px 8px;white-space:nowrap;">' + _intradaySignalBadges(r) + '</td>';
+                html += '<td style="padding:5px 4px 5px 0;">' + _intradayStateBadge(r) + '</td>';
+                html += '</tr>';
+            });
+            html += '</table>';
+            var c = d.counts || {};
+            if (c.alerts > 0) {
+                html += '<div style="margin-top:8px;font-size:12.5px;color:#c0392b;font-weight:600;">🛑 ' + c.alerts + ' 只持仓存在盘中提醒（触线/逼近/异动），详见行动清单置顶项。</div>';
+            }
+        }
+        html += '</div>';
+        var intervalMin = (d && d.patrol && d.patrol.interval_min) ? d.patrol.interval_min : 5;
+        html += '<div style="margin-top:8px;font-size:12px;color:var(--text-3,#aaa);">⏱ 定时巡检每 ' + intervalMin +
+            ' 分钟（仅交易时段，数据写入价格缓存）· ' + INTRADAY_DISCLAIMER + '。</div>';
+        html += '</div>';
+        return html;
+    }
+
+    function intradayManualRefresh() {
+        // 一键刷新（t3 ②）：后端巡检一轮（仅持仓）→ 原位重渲染速览卡 + 行动清单卡。
+        // 节流双层：前端 60s 记忆 + 后端冷却权威（cooldown>0 时提示稍候）。
+        if (_intradayRefreshing) return;
+        var now = Date.now();
+        if (now - _intradayLastRefreshAt < 60000) {
+            var remain = Math.ceil((60000 - (now - _intradayLastRefreshAt)) / 1000);
+            _showToast('刷新过于频繁，请稍候（' + remain + 's 后可再次刷新）');
+            return;
+        }
+        var btn = document.getElementById('intradayRefreshBtn');
+        if (btn) { btn.disabled = true; btn.textContent = '🔄 巡检中...'; }
+        _intradayRefreshing = true;
+        _intradayLastRefreshAt = Date.now();  // 无论成败都计时，防连点轰炸
+        fetch('/api/dashboard/intraday/refresh', { method: 'POST', cache: 'no-store' })
+            .then(function(r) { return safeJson(r); })
+            .then(function(r) {
+                if (!r || !r.success) {
+                    _showToast((r && r.message) ? '刷新失败：' + r.message : '刷新失败');
+                    return null;
+                }
+                if (r.ok === false && r.cooldown > 0) {
+                    _showToast('冷却中（' + r.cooldown + 's 后可再次刷新）');
+                    return null;
+                }
+                if (r.ok === false) {
+                    // 非交易时段/巡检停用/连败暂停：明确提示（静默不阻塞页面）
+                    _showToast(r.reason || '当前无法刷新');
+                    return null;
+                }
+                // 刷新成功：并行重拉速览 + 行动清单，两卡原位刷新（不动整页）
+                _showToast('已刷新持仓盘中快照');
+                return Promise.all([
+                    fetch('/api/dashboard/intraday', {cache: 'no-store'}).then(function(x) { return safeJson(x); }).catch(function() { return null; }),
+                    fetch('/api/dashboard/action-list', {cache: 'no-store'}).then(function(x) { return safeJson(x); }).catch(function() { return null; })
+                ]);
+            })
+            .then(function(pair) {
+                if (!pair) return;
+                var intraday = (pair[0] && pair[0].success) ? pair[0] : null;
+                var actionList = (pair[1] && pair[1].success) ? pair[1] : null;
+                var cardEl = document.getElementById('intradayCard');
+                if (cardEl && intraday) cardEl.outerHTML = renderIntradayCard(intraday);
+                var alEl = document.getElementById('actionListCard');
+                if (alEl && actionList) alEl.outerHTML = renderActionListCard(actionList);
+                if (_dashData) {
+                    if (intraday) _dashData.intraday = intraday;
+                    if (actionList) _dashData.actionList = actionList;
+                }
+            })
+            .catch(function(err) {
+                console.error('[intradayManualRefresh] 网络错误:', err);
+                _showToast('刷新失败：网络错误');
+            })
+            .finally(function() {
+                _intradayRefreshing = false;
+                var b2 = document.getElementById('intradayRefreshBtn');
+                if (b2) { b2.disabled = false; b2.textContent = '🔄 盘中刷新'; }
+            });
     }
 
     /**
