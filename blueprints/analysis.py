@@ -369,6 +369,38 @@ def _attach_score_tier_note(result):
         logging.getLogger(__name__).warning(f'失配注记计算失败 stock_id={result.get("stock_id")}: {e}')
 
 
+def _attach_backtest_evidence(result, stock_id):
+    """021BU：报告响应附加回测证据三件套（读取面现算、零落库、零写库；B24 合规外层落点）。
+
+    - rating_evidence：评级旁「历史命中徽章」（backtest_engine.rating_evidence_for，
+      与看板 watchlist-scores 同源同值；C 级样本不足由数据层断流百分数——诚实原则）；
+    - position_note：评级位置分化警示（position_note_for，2026-09-18 既有机制，
+      判定规则零改动，只扩消费面）；
+    - price_advice_evidence：价格建议历史基准（price_advice_evidence_summary，
+      真实锚点主口径市场级聚合）。
+    证据属增强展示：任一失败静默降级（对应键置 None），不阻塞报告主流程。
+    """
+    market = result.get('market') or 'a_stock'
+    rating = result.get('rating')
+    try:
+        from modules.backtest_engine import (
+            position_note_for,
+            price_advice_evidence_summary,
+            rating_evidence_for,
+        )
+
+        result['rating_evidence'] = rating_evidence_for(market, rating) if rating else None
+        result['position_note'] = (
+            position_note_for(stock_id, rating) if rating else None
+        )
+        result['price_advice_evidence'] = price_advice_evidence_summary(market)
+    except Exception as e:  # noqa: BLE001 —— 证据缺失不影响报告主数据
+        logging.getLogger(__name__).warning(f'[021BU] 回测证据计算失败 stock_id={stock_id}: {e}')
+        result.setdefault('rating_evidence', None)
+        result.setdefault('position_note', None)
+        result.setdefault('price_advice_evidence', None)
+
+
 @bp.route('/api/stocks/<int:stock_id>/analyze', methods=['POST'])
 def api_analyze_stock(stock_id):
     """执行四维分析引擎评分（统一走 advisor.generate_advice 入口，与每日报告一致）"""
@@ -469,6 +501,8 @@ def _enrich_advice_result(stock_id, result):
     result['industry_flow_bg'] = _industry_flow_bg_for_stock(stock_id)
     # 021BS P1-1：结构化失配注记（与 markdown 行同源；实时路径评级为最终评级）
     _attach_score_tier_note(result)
+    # 021BU：回测证据三件套（评级徽章/位置注记/价格基准，与看板同源同值）
+    _attach_backtest_evidence(result, stock_id)
     # 2026-09-09：上一轮评分快照（总分+四维分对比展示）——实时路径当前报告日期=今天
     result['prev_report'] = _prev_report_snapshot(
         stock_id, datetime.now(_CN_TZ).strftime('%Y-%m-%d')
@@ -793,6 +827,8 @@ def api_get_report_latest(stock_id):
     _attach_scoring_subitems(stock_id, result)
     # 020R-43：快照路径补齐 risk_warnings（从日报 markdown 解析，与实时路径一致）
     result['risk_warnings'] = _parse_markdown_risks(row['markdown_content'])
+    # 021BU：回测证据三件套（快照路径与实时路径同源；读取面现算零落库）
+    _attach_backtest_evidence(result, stock_id)
 
     return jsonify(result)
 

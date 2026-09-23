@@ -113,6 +113,28 @@
   F05 watchlist-scores 评级 vs 报告：rating/total_score/report_date/engine_version
       与最新 ok daily 行一致（不一致 = P0 数据流断裂）。
 
+021BU 扩展（2026-09-23；⚠ 以下规则编号属审计脚本命名空间，
+与 docs/RED_LINES.md 的红线 R16-R19 无关）：
+  R16 评级徽章三方同源（021BU O1）：①watchlist-scores 响应 rating_evidence
+      ×②审计按生产同款 SQL（ro 直读，真实行 + rating_id 过滤 + 自然键去重）
+      现算基准。同数据日 primary 的 n/m/display 不一致 = P1（数字打架）；
+      有评级有报告而徽章字段缺失 = P2（应接未接，降级展示）。报告页第三面
+      由 check_static_same_source 静态断言消费同一共享函数（report-latest
+      可能触发实时重评写库，审计刻意不调——V8 只读原则优先）。
+  R17 诚实原则展示门（021BU）：响应证据对象中 grade=C（n<20）却含非空 acc
+      或 display 带百分数 = P1（小样本误导）；acc 非空而 n/m 缺失 = P1；
+      display 含百分数而 n/m 缺失 = P1。门槛常量 import 自
+      backtest_engine（EVIDENCE_N_PARTIAL，单一真相，不另设第二套）。
+  R18 价格基准注记同源（021BU O3）：watchlist-scores 顶层 evidence_price
+      ×审计 ro 现算基准（price_backtest_results 真实锚点口径）：三格
+      n/m/display 不一致 = P1；字段缺失（有基准样本时）= P2；证据格
+      同步过 R17 诚实门。非真实锚点口径（重建点/全体）冒充主口径 = P2。
+  F06 看板评分卡证据流（021BU O2）：每股 position_note 与 position-note
+      端点（同一 position_note_for 函数现算）文本一致（不一致 = P1）；
+      端点有显著分化而看板缺失 = P2（应接未接）；看板有而端点无显著
+      分化 = P1（同函数不应异判）。附带：行动清单 items 含 rating_evidence
+      键 = INFO（统计面泄漏进指令面观察，不设门禁——021BR 分域契约）。
+
 =====================================================================
 用法
 =====================================================================
@@ -1429,6 +1451,316 @@ def flow_f05_watchlist_scores_vs_report(ctx_list, ws_by_id):
 
 
 # ================================================================
+# 021BU：回测证据一致性（R16-R18/F06——审计脚本命名空间，非红线编号）
+# ================================================================
+
+# 样本分级门槛：import 生产同源常量（单一真相，不另设第二套门槛）
+from modules.backtest_engine import EVIDENCE_N_FULL, EVIDENCE_N_PARTIAL  # noqa: E402
+
+
+def _audit_evidence_cell(correct, n, label='历史命中'):
+    """审计侧独立复算的证据格（与 backtest_engine.format_evidence_cell 同语义，
+    互为对照——共享门槛常量，展示装配独立实现，防共享代码自身 bug 静默通过）。"""
+    n = int(n or 0)
+    correct = int(correct or 0)
+    if n < EVIDENCE_N_PARTIAL:
+        return {'grade': 'C', 'n': correct, 'm': n, 'acc': None,
+                'display': f'样本不足（n={n}）'}
+    acc = round(correct / n, 4)
+    return {'grade': 'A' if n >= EVIDENCE_N_FULL else 'B', 'n': correct, 'm': n,
+            'acc': acc, 'display': f'{label} {acc * 100:.0f}%（{correct}/{n}）'}
+
+
+def load_evidence_baseline(cur, market):
+    """审计基准（ro 直读，生产同款 SQL 独立复算——021BU R16 对照面）。
+
+    口径与 backtest_engine.rating_evidence_table 相同：排除模拟行与
+    rating_id=-1、自然键 (stock_id, rating_date) 去重取 max(id)、
+    主口径 is_correct 列 + 动态窗口次行。
+    """
+    rows = [dict(r) for r in cur.execute(
+        'SELECT br.id, br.stock_id, br.rating_date, br.rating, br.is_correct, '
+        'br.dynamic_is_correct, rh.engine_version '
+        'FROM backtest_results br '
+        'LEFT JOIN ratings_history rh '
+        'ON rh.stock_id = br.stock_id AND rh.rating_date = br.rating_date '
+        'WHERE br.market = ? '
+        'AND (br.is_simulated IS NULL OR br.is_simulated = 0) '
+        'AND br.rating_id IS NOT NULL AND br.rating_id != -1 '
+        'ORDER BY br.id', (market,)).fetchall()]
+    best = {}
+    for r in rows:
+        key = (r['stock_id'], r['rating_date'])
+        if key not in best or r['id'] > best[key]['id']:
+            best[key] = r
+    agg = {}
+    for r in best.values():
+        cell = agg.setdefault(r['rating'], {'n': 0, 'c': 0, 'dn': 0, 'dc': 0})
+        if r['is_correct'] is not None:
+            cell['n'] += 1
+            if r['is_correct'] == 1:
+                cell['c'] += 1
+        if r['dynamic_is_correct'] in (0, 1):
+            cell['dn'] += 1
+            if r['dynamic_is_correct'] == 1:
+                cell['dc'] += 1
+    return {
+        rating: {
+            'primary': _audit_evidence_cell(cell['c'], cell['n']),
+            'dynamic': (_audit_evidence_cell(cell['dc'], cell['dn'], label='动态窗口命中')
+                        if cell['dn'] else None),
+        }
+        for rating, cell in agg.items()
+    }
+
+
+def _price_evidence_baseline(cur, market):
+    """审计基准（021BU R18 对照面）：price_backtest_results 真实锚点口径独立复算。"""
+    rows = [dict(r) for r in cur.execute(
+        'SELECT buy_range_low, t20_hit_buy_range, t20_hit_target, t20_hit_stop_loss '
+        'FROM price_backtest_results '
+        'WHERE market = ? AND anchor_rating_date IS NOT NULL', (market,)).fetchall()]
+    np_rows = [r for r in rows if r['buy_range_low'] is not None]
+
+    def _cnt(rs, fld):
+        return (sum(1 for r in rs if r[fld] == 1), sum(1 for r in rs if r[fld] is not None))
+
+    bc, bn = _cnt(np_rows, 't20_hit_buy_range')
+    tc, tn = _cnt(np_rows, 't20_hit_target')
+    sc, sn = _cnt(rows, 't20_hit_stop_loss')
+    return {
+        'n': len(rows),
+        'buy_range_t20': _audit_evidence_cell(bc, bn, label='买入区间 20 日内触及'),
+        'target_t20': _audit_evidence_cell(tc, tn, label='目标价 20 日内达成'),
+        'stop_loss_t20': _audit_evidence_cell(sc, sn, label='止损 20 日内触发'),
+    }
+
+
+def _evidence_cell_issues(where, cell):
+    """R17 共享检查：单证据格诚实门（返回 [(severity, msg)]；纯函数供 selftest 复用）。"""
+    issues = []
+    if not isinstance(cell, dict):
+        return issues
+    acc = cell.get('acc')
+    n, m = cell.get('n'), cell.get('m')
+    display = str(cell.get('display') or '')
+    grade = cell.get('grade')
+    if acc is not None and (m is None or m < EVIDENCE_N_PARTIAL):
+        issues.append(('P1', f'{where}: grade={grade} 但 acc 非空（n={n}, m={m}）——'
+                             f'小样本命中率泄漏（诚实原则违规）'))
+    if '%' in display and acc is None:
+        issues.append(('P1', f'{where}: display 含百分数但 acc=None（诚实门失真）'))
+    if acc is not None and (n is None or m is None):
+        issues.append(('P1', f'{where}: acc 非空但 n/m 缺失（命中率未带样本量）'))
+    if '%' in display and (n is None or m is None):
+        issues.append(('P1', f'{where}: display 含百分数但无 n/m（诚实原则：命中率必须带样本量）'))
+    return issues
+
+
+def _empty_evidence_baseline_cell():
+    """零样本档位基准（与 backtest_engine.empty_rating_evidence 同构）。"""
+    return {'primary': _audit_evidence_cell(0, 0), 'dynamic': None}
+
+
+def _cells_mismatch(live_cell, base_cell):
+    """同数据日数字一致性（n/m/display 三元组；acc 为展示派生值不单独比对）。"""
+    if not isinstance(live_cell, dict):
+        return True
+    return (live_cell.get('n'), live_cell.get('m'), str(live_cell.get('display') or '')) != (
+        base_cell.get('n'), base_cell.get('m'), str(base_cell.get('display') or ''))
+
+
+def rule_r16_evidence_badge(ctx):
+    """R16（021BU）评级徽章同源：ws 响应 rating_evidence × ro 现算基准。"""
+    f = []
+    rating = ctx.get('rating')
+    if not rating:
+        return f  # 无评级无徽章（无可核对面）
+    base = (ctx.get('evidence_baseline') or {}).get(rating) or _empty_evidence_baseline_cell()
+    live = ctx.get('rating_evidence_live')
+    if live is None:
+        f.append(_finding(
+            'R16', '看板评分×回测证据', ctx, 'P2',
+            'watchlist-scores 无 rating_evidence 字段',
+            f'审计基准 primary={base["primary"]["display"]}',
+            '评级徽章证据字段缺失（有评级有报告时应接未接，降级展示）',
+            'blueprints/portfolio/watchlist_scores.py（021BU 接入面）', True,
+            '核对看板面是否消费 rating_evidence_table 同源函数'))
+        return f
+    live_p = live.get('primary') or {}
+    if _cells_mismatch(live_p, base['primary']):
+        f.append(_finding(
+            'R16', '看板评分×回测证据', ctx, 'P1',
+            f'看板徽章 primary n/m/display={live_p.get("n")}/{live_p.get("m")}/{live_p.get("display")}',
+            f'审计现算基准={base["primary"]["n"]}/{base["primary"]["m"]}/{base["primary"]["display"]}',
+            '评级徽章与回测现算基准数字不一致（同数据日数字打架）',
+            'watchlist_scores 证据链路 vs backtest_engine 聚合口径', True,
+            '核对两面是否同市场、同去重口径、同门槛常量'))
+    live_d, base_d = live.get('dynamic'), base.get('dynamic')
+    if (live_d or base_d) and _cells_mismatch(live_d or {}, base_d or {}):
+        f.append(_finding(
+            'R16', '看板评分×回测证据', ctx, 'P2',
+            f'看板徽章 dynamic={live_d or "缺失"}',
+            f'审计现算基准 dynamic={base_d or "缺失"}',
+            '动态窗口次行不一致（标注面缺失或口径漂移）',
+            '同上', True, '同上'))
+    if not f:
+        f.append(_ok('R16', ctx, f'评级徽章与现算基准一致（{base["primary"]["display"]}）'))
+    return f
+
+
+def rule_r17_honesty_gate(ctx):
+    """R17（021BU）诚实原则展示门：响应证据对象格式审计（纯函数面）。"""
+    f = []
+    live = ctx.get('rating_evidence_live')
+    if not isinstance(live, dict):
+        return f
+    for sub in ('primary', 'dynamic'):
+        cell = live.get(sub)
+        for sev, msg in _evidence_cell_issues(f'评级徽章.{sub}', cell):
+            f.append(_finding(
+                'R17', '证据×诚实门', ctx, sev, msg,
+                '诚实原则：命中率必须带样本量；C 级（n<20）不展示百分数',
+                '响应证据对象绕过共享诚实门（数据层断流失效）',
+                'modules/backtest_engine.py format_evidence_cell（数据层强制点）', True,
+                '核对消费面是否手工拼装证据响应（绕过共享函数）'))
+    if not f:
+        f.append(_ok('R17', ctx, '评级徽章证据诚实门通过（acc/n/m/display 自洽）'))
+    return f
+
+
+def check_r18_price_evidence_baseline(ws_data, cur):
+    """R18（021BU）价格基准注记同源：ws 顶层 evidence_price × ro 现算基准（全局一次）。"""
+    f = []
+    live_map = (ws_data or {}).get('evidence_price') or {}
+    for market in ('a_stock', 'hk_stock'):
+        base = _price_evidence_baseline(cur, market)
+        if base['n'] == 0:
+            continue  # 无真实锚点样本的市场无基准可核对
+        live = live_map.get(market)
+        if live is None:
+            f.append(_finding(
+                'R18', '看板×价格基准', _base_ctx(), 'P2',
+                f'watchlist-scores evidence_price 无 {market} 键',
+                f'审计基准 n={base["n"]}（真实锚点）',
+                '价格基准注记字段缺失（有基准样本时应接未接）',
+                'blueprints/portfolio/watchlist_scores.py（021BU 接入面）', True,
+                '核对 evidence_price 是否按市场装填'))
+            continue
+        for key, name in (('buy_range_t20', '买入区间'), ('target_t20', '目标价'),
+                          ('stop_loss_t20', '止损')):
+            lc, bc = live.get(key) or {}, base[key]
+            if _cells_mismatch(lc, bc):
+                f.append(_finding(
+                    'R18', '看板×价格基准', _base_ctx(), 'P1',
+                    f'{market} {name} T+20 n/m/display={lc.get("n")}/{lc.get("m")}/{lc.get("display")}',
+                    f'审计现算基准={bc["n"]}/{bc["m"]}/{bc["display"]}',
+                    '价格基准注记与现算基准不一致（同数据日数字打架）',
+                    'evidence_price 装配链路 vs price_advice_evidence_summary 口径', True,
+                    '核对是否非真实锚点口径（重建点/全体）冒充主口径（P2 需口径标注）或聚合口径漂移'))
+            for sev, msg in _evidence_cell_issues(f'{market} 价格基准.{key}', lc):
+                f.append(_finding(
+                    'R18', '看板×价格基准', _base_ctx(), sev, msg,
+                    '诚实原则展示门（R17 同规则）',
+                    '价格基准证据格绕过共享诚实门',
+                    'modules/backtest_engine.py format_evidence_cell', True,
+                    '核对消费面是否手工拼装'))
+        if not any(x['rule'] == 'R18' and x['severity'] in ('P0', 'P1', 'P2') for x in f):
+            f.append(_ok('R18', _base_ctx(),
+                         f'{market} 价格基准与现算一致（真实锚点 n={base["n"]}）'))
+    return f
+
+
+def check_static_same_source():
+    """静态同源断言（021BU R16/R18 配套）：报告页/看板必须消费同一证据函数。
+
+    report-latest 可能触发实时重评写库（B11/021K），审计刻意不调（V8 只读原则）；
+    报告页第三面改由源码静态断言：消费点必须 import 同一共享函数。
+    """
+    f = []
+    checks = [
+        ('blueprints/analysis.py', 'rating_evidence_for', '报告页评级徽章'),
+        ('blueprints/analysis.py', 'price_advice_evidence_summary', '报告页价格基准'),
+        ('blueprints/analysis.py', 'position_note_for', '报告页位置注记'),
+        ('blueprints/portfolio/watchlist_scores.py', 'rating_evidence_table', '看板评级徽章'),
+        ('blueprints/portfolio/watchlist_scores.py', 'price_advice_evidence_summary', '看板价格基准'),
+        ('blueprints/portfolio/watchlist_scores.py', 'position_note_for', '看板位置注记'),
+    ]
+    missing = []
+    for rel, sym, desc in checks:
+        path = os.path.join(_PROJECT_ROOT, rel)
+        try:
+            with open(path, encoding='utf-8') as fh:
+                src = fh.read()
+        except OSError:
+            src = ''
+        if sym not in src:
+            missing.append(f'{rel} 缺 {sym}（{desc}）')
+    if missing:
+        f.append(_finding(
+            'R16', '报告页×看板×共享函数', _base_ctx(), 'P1',
+            '存在未消费共享证据函数的消费面',
+            '；'.join(missing),
+            '同源同值断言破约（存在第二数据路径）',
+            'blueprints 消费面（021BU）', True,
+            '恢复消费共享函数（backtest_engine.rating_evidence_* / price_advice_evidence_summary / position_note_for）'))
+    else:
+        f.append(_ok('R16', _base_ctx(),
+                     '静态同源断言通过（报告页/看板六处消费点均指向共享证据函数）'))
+    return f
+
+
+def flow_f06_evidence_flow(ctx_list, ws_by_id, client, action_list):
+    """F06（021BU）看板评分卡证据流：position_note ws×端点同源 + 分域契约观察。
+
+    注：rating_evidence 的流量核对在 R16（徽章规则）断言，此处不重复计数。
+    """
+    f = []
+    for ctx in ctx_list:
+        sid = ctx['report']['stock_id']
+        ws_note = (ws_by_id.get(sid) or {}).get('position_note')
+        ep = _get_json(client, f'/api/stocks/{sid}/position-note')
+        if ep and ep.get('success'):
+            if not ws_note or not ws_note.get('text'):
+                f.append(_finding(
+                    'F06', '看板评分×位置注记', ctx, 'P2',
+                    'watchlist-scores 无 position_note',
+                    'position-note 端点有显著分化',
+                    '看板位置注记缺失（应接未接，降级展示）',
+                    'blueprints/portfolio/watchlist_scores.py（021BU 接入面）', True,
+                    '核对看板面 position_note 装配'))
+            elif (ws_note.get('text') or '') != (ep.get('text') or ''):
+                f.append(_finding(
+                    'F06', '看板评分×位置注记', ctx, 'P1',
+                    f'看板 text={str(ws_note.get("text"))[:48]}…',
+                    f'端点 text={str(ep.get("text"))[:48]}…',
+                    '看板位置注记与端点现算不一致（同一 position_note_for 函数不应异判）',
+                    'watchlist_scores vs backtest_engine.position_note_for', True,
+                    '核对看板装配是否绕过共享函数或时点差'))
+            else:
+                f.append(_ok('F06', ctx, '位置注记看板×端点同源一致'))
+        elif ws_note and ws_note.get('text'):
+            f.append(_finding(
+                'F06', '看板评分×位置注记', ctx, 'P1',
+                f'看板有 position_note（{str(ws_note.get("text"))[:32]}…）',
+                'position-note 端点无显著分化（404 静默）',
+                '看板有而端点无——同一函数两个消费面异判（同源断裂）',
+                '同上', True, '同上'))
+        # 双侧静默（无显著分化）→ 一致，不产 OK 噪音
+    # 分域契约观察（021BU：统计面不进指令面；只观察不设门禁）
+    items = (action_list or {}).get('items') or []
+    leaked = [it for it in items if isinstance(it, dict) and 'rating_evidence' in it]
+    if leaked:
+        f.append(_finding(
+            'F06', '行动清单×证据分域', _base_ctx(), 'INFO',
+            f'行动清单 {len(leaked)} 项含 rating_evidence 键',
+            '021BR 分域契约：行动清单=指令面，证据徽章=统计面',
+            '统计面数字泄漏进指令面（认知成本观察，不设门禁）',
+            'blueprints/dashboard action-list', True, '维持分域（或另立任务裁定）'))
+    return f
+
+
+# ================================================================
 # 合成用例自检（--selftest）：验证审计规则本身可信，不触库
 # ================================================================
 
@@ -1560,6 +1892,47 @@ def selftest():
     c['price_at_rating_witness'] = None
     cases.append(('R03 同数据日无见证', c, 'P1', rule_r03_pa_numbers))
 
+    # 用例15（021BU）：R16 徽章×基准同数据日数字不一致 → P1
+    c = dict(base)
+    c['rating'] = '持有观望'
+    c['evidence_baseline'] = {'持有观望': {
+        'primary': {'grade': 'A', 'n': 159, 'm': 230, 'acc': 0.6913,
+                    'display': '历史命中 69%（159/230）'},
+        'dynamic': None}}
+    c['rating_evidence_live'] = {'primary': {'grade': 'A', 'n': 100, 'm': 200, 'acc': 0.5,
+                                             'display': '历史命中 50%（100/200）'},
+                                 'dynamic': None}
+    cases.append(('R16 徽章×基准不一致', c, 'P1', rule_r16_evidence_badge))
+
+    # 用例16（021BU）：R16 有评级有报告而徽章字段缺失 → P2（应接未接）
+    c = dict(base)
+    c['rating'] = '持有观望'
+    c['evidence_baseline'] = {'持有观望': {
+        'primary': {'grade': 'A', 'n': 159, 'm': 230, 'acc': 0.6913,
+                    'display': '历史命中 69%（159/230）'},
+        'dynamic': None}}
+    c['rating_evidence_live'] = None
+    cases.append(('R16 徽章字段缺失', c, 'P2', rule_r16_evidence_badge))
+
+    # 用例17（021BU）：R17 C 级证据带百分数 → P1（小样本误导，诚实原则违规）
+    c = dict(base)
+    c['rating_evidence_live'] = {'primary': {'grade': 'C', 'n': 1, 'm': 2, 'acc': 0.5,
+                                             'display': '历史命中 50%（1/2）'},
+                                 'dynamic': None}
+    cases.append(('R17 C级泄漏百分数', c, 'P1', rule_r17_honesty_gate))
+
+    # 用例18（021BU）：R16 徽章与基准一致 → OK
+    c = dict(base)
+    c['rating'] = '持有观望'
+    c['evidence_baseline'] = {'持有观望': {
+        'primary': {'grade': 'A', 'n': 159, 'm': 230, 'acc': 0.6913,
+                    'display': '历史命中 69%（159/230）'},
+        'dynamic': None}}
+    c['rating_evidence_live'] = {'primary': {'grade': 'A', 'n': 159, 'm': 230, 'acc': 0.6913,
+                                             'display': '历史命中 69%（159/230）'},
+                                 'dynamic': None}
+    cases.append(('R16 徽章与基准一致', c, 'OK', rule_r16_evidence_badge))
+
     # 用例7：一致基线（对照中免 021BR 修复后形态）→ 不应触发任何 P0/P1
     fired = []
     for rule in ALL_REPORT_RULES:
@@ -1613,6 +1986,26 @@ def selftest():
     print(f'[自检] t3 前时序残留特征: 期望 P2，实际 {fired[0]} → {"✓" if fired[0] == "P2" else "✗"}')
     ok_cases = ok_cases and fired[0] == 'P2'
 
+    # 用例19（021BU）：诚实门纯函数边界（n=19/20 与 n=29/30；数据层强制——
+    # C 级 acc=None 且 display 无百分数，任何消费面都泄漏不了小样本命中率）
+    from modules.backtest_engine import format_evidence_cell
+
+    c19 = format_evidence_cell(13, 19)
+    c20 = format_evidence_cell(14, 20)
+    c29 = format_evidence_cell(20, 29)
+    c30 = format_evidence_cell(21, 30)
+    _case19_ok = (
+        c19['grade'] == 'C' and c19['acc'] is None and '%' not in c19['display']
+        and '样本不足' in c19['display'] and c19['m'] == 19
+        and c20['grade'] == 'B' and c20['acc'] is not None and '/' in c20['display']
+        and c29['grade'] == 'B'
+        and c30['grade'] == 'A'
+    )
+    print(f'[自检] 诚实门边界 n=19/20/29/30: 期望 C(无%)/B/B/A，实际 '
+          f'{c19["grade"]}/ {c20["grade"]}/ {c29["grade"]}/ {c30["grade"]} → '
+          f'{"✓" if _case19_ok else "✗"}')
+    ok_cases = ok_cases and _case19_ok
+
     passed = ok_hard and ok_cases
     print(f'[自检] 结果：{"全部通过（审计规则可信）" if passed else "存在失败用例（规则需修订）"}')
     return passed
@@ -1625,6 +2018,8 @@ ALL_REPORT_RULES = [
     rule_r10_trigger_crosscheck, rule_r11_compass_vs_stage, rule_r12_markdown,
     rule_r13_trader_stored_vs_live, rule_r14_pa_stored_vs_recomputed,
     rule_r15_weighted_sum,
+    # 021BU：回测证据一致性（徽章同源 + 诚实门；R18/F06 为全局核对见 run_audit）
+    rule_r16_evidence_badge, rule_r17_honesty_gate,
 ]
 
 
@@ -1653,6 +2048,11 @@ def run_audit(only_ids=None):
     holdings_rows = (_get_json(client, '/api/portfolio/holdings') or {}).get('holdings') or []
     ws_by_id = {s['id']: s for s in (ws_data.get('stocks') or [])}
 
+    # 021BU：回测证据审计基准（ro 直读独立复算，按市场一次）
+    evidence_baseline = {}
+    for _m in sorted({s.get('market') or 'a_stock' for s in stocks} | {'a_stock'}):
+        evidence_baseline[_m] = load_evidence_baseline(cur, _m)
+
     findings = []
     oks = []
     ctx_list = []
@@ -1674,6 +2074,9 @@ def run_audit(only_ids=None):
         ctx['name'] = s['name']
         # 021BS：读取面失配注记（看板 watchlist-scores，纯 GET 可观测标注面③）
         ctx['score_tier_note_live'] = (ws_by_id.get(sid) or {}).get('score_tier_note')
+        # 021BU：回测证据（看板面响应字段 + ro 现算基准，供 R16/R17 断言）
+        ctx['rating_evidence_live'] = (ws_by_id.get(sid) or {}).get('rating_evidence')
+        ctx['evidence_baseline'] = evidence_baseline.get(s.get('market') or 'a_stock') or {}
         # 021BS t4：R03 生成时点双存储见证（price_at_rating）
         ctx['price_at_rating_witness'] = load_rating_witness(cur, sid)
         ctx_list.append(ctx)
@@ -1709,6 +2112,18 @@ def run_audit(only_ids=None):
         findings += flow_f05_watchlist_scores_vs_report(ctx_list, ws_by_id)
     except Exception as e:  # noqa: BLE001
         errors.append(f'F05 异常: {e}')
+    try:
+        findings += flow_f06_evidence_flow(ctx_list, ws_by_id, client, action_list)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f'F06 异常: {e}')
+    try:
+        findings += check_r18_price_evidence_baseline(ws_data, cur)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f'R18 异常: {e}')
+    try:
+        findings += check_static_same_source()
+    except Exception as e:  # noqa: BLE001
+        errors.append(f'静态同源检查异常: {e}')
 
     meta = {
         'today': today,
@@ -1814,6 +2229,7 @@ def write_report(findings, meta, out_path):
         'F03': '持仓页价格 vs 矩阵现价（盘中 vs 收盘双口径）',
         'F04': '预警铃铛 vs 报告',
         'F05': 'watchlist-scores 评级 vs 报告评级',
+        'F06': '看板证据流（位置注记同源/分域观察，021BU）',
     }
     w('| 数据流 | 发现数（P0/P1/P2/INFO） | 结论 |')
     w('|---|---|---|')
@@ -1839,8 +2255,9 @@ def write_report(findings, meta, out_path):
         'R07': '总评级×操盘手(裁决)', 'R08': '操盘手矩阵内部', 'R09': '操盘手×价格建议(止损数字)',
         'R10': '操盘手×价格建议(触发状态)', 'R11': '罗盘×阶段', 'R12': '总评级×建议文字',
         'R13': '操盘手存量×现算', 'R14': '价格建议×持仓口径', 'R15': '评分明细×总分',
+        'R16': '评级徽章×回测基准(021BU)', 'R17': '证据×诚实门(021BU)', 'R18': '价格基准×现算(021BU)',
     }
-    for rid in [f'R{n:02d}' for n in range(1, 16)]:
+    for rid in [f'R{n:02d}' for n in range(1, 19)]:
         st2 = rule_stat.get(rid, {})
         s = st2.get('sev', {})
         w(f'| {rid} | {rule_pairs.get(rid, "")} | {st2.get("fires", 0)} | {s.get("P0", 0)} | '

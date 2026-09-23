@@ -1,5 +1,45 @@
 // OPT-4（2026-09-07）：自 app.js 按业务域拆分（纯搬移）；加载顺序见 templates/index.html，core 必须最先。
 
+    // ============================================================
+    // 021BU：回测证据渲染工具（评级旁历史命中徽章 / 价格建议历史基准 /
+    // 位置分化注记）。数据源 = 后端共享纯函数（backtest_engine.rating_evidence_for /
+    // price_advice_evidence_summary / position_note_for），报告页与看板同源同值。
+    // 诚实原则：C 级样本不足由数据层断流百分数（display 无 %，前端无需二次判断）；
+    // B 级 ⚠样本偏小 由前端按 grade 渲染；港股展示暂缓（021BU O8/R20：隐藏不占位）。
+    // 文案禁裸 '<'：所有证据文本渲染前转义（021BN 教训）。
+    // ============================================================
+    function _evEsc(s) {
+        return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    // 评级旁历史命中徽章（primary = T+1 主口径，回测中心同源；dynamic = 动态窗口次行，悬停展示）
+    function _evBadgeHtml(ev) {
+        if (!ev || !ev.primary || !ev.primary.display) return '';
+        var warn = ev.primary.grade === 'B' ? ' ⚠️样本偏小' : '';
+        var tip = '该评级档的历史回测命中率（T+1 主口径，与回测中心市场报告同源同值）';
+        if (ev.dynamic && ev.dynamic.display) tip += '；' + ev.dynamic.display;
+        if (ev.engine_versions && ev.engine_versions.length) tip += '（引擎样本：' + ev.engine_versions.join('/') + '）';
+        return '<span style="font-size:11.5px;color:var(--text-3,#888);background:var(--surface-alt,#f6f8fa);' +
+            'border:1px solid var(--border-light,#e8e8e8);border-radius:10px;padding:2px 9px;cursor:help;white-space:nowrap;" ' +
+            'title="' + _evEsc(tip) + '">📈 ' + _evEsc(ev.primary.display) + _evEsc(warn) + '</span>';
+    }
+    // 位置分化注记（与 /position-note 端点同源文本）
+    function _posNoteHtml(text) {
+        return '<div style="margin:8px 0 2px;padding:8px 12px;border-radius:6px;' +
+            'background:var(--surface-alt,#f8f9fa);border:1px solid var(--border-light,#e8e8e8);' +
+            'font-size:12.5px;color:var(--text-2,#555);line-height:1.7;">' + _evEsc(text) +
+            ' <span style="color:var(--text-3,#999);">（分档×位置矩阵自动标注）</span></div>';
+    }
+    // 价格建议历史基准行（市场级注记，预期管理）
+    function _paEvidenceHtml(ev) {
+        if (!ev || !ev.display) return '';
+        return '<div style="font-size:11.5px;color:var(--text-3,#888);line-height:1.7;margin-top:6px;">' +
+            '📊 ' + _evEsc(ev.display) + '</div>';
+    }
+    // 港股证据隐藏判定（021BU O8：港股展示暂缓——隐藏而非空占位；R20 A/H 独立）
+    function _evMarketHidden(market) {
+        return market === 'hk_stock';
+    }
+
     // ========== 四维分析引擎 ==========
     function analyzeStock(id, symbol) {
         const area = document.getElementById('collectArea');
@@ -117,7 +157,7 @@
             .then(data => {
                 if (data.success) {
                     area.innerHTML = renderAdviceResult(data);
-                    loadPositionNote(id);  // 2026-09-18 回测提升②：评级位置标注（异步，无分化静默）
+                    loadPositionNote(id, data.position_note);  // 回测提升②位置标注（021BU：响应内联优先，缺省回落端点）
                     refreshDashboardIfLoaded();  // 同步看板批量评分表
                 } else {
                     area.innerHTML = '<div class="card"><div class="alert alert-error">建议生成失败：' + (data.message || '未知错误') + '</div></div>';
@@ -130,19 +170,22 @@
 
     // 2026-09-18 回测提升②：评级位置标注——当前位置 × 分档位置矩阵的条件化提示。
     // 端点仅在分化可信（两带各>=10条且差>=15pp）时返回，否则 404 → 静默不显示（不硬造结论）。
-    function loadPositionNote(stockId) {
+    // 021BU：响应已内联 position_note 字段（与端点同源函数现算）——优先直渲，零额外请求；
+    // 无内联值时回落异步端点（兼容旧响应形态）。
+    function loadPositionNote(stockId, inline) {
         var box = document.getElementById('posNoteBox');
         if (!box) return;
         box.innerHTML = '';
+        if (inline && inline.text) {
+            box.innerHTML = _posNoteHtml(inline.text);
+            return;
+        }
         fetch('/api/stocks/' + stockId + '/position-note')
             .then(function(r) { return r.ok ? r.json() : null; })
             .then(function(d) {
                 var box2 = document.getElementById('posNoteBox');
                 if (!d || !d.success || !box2) return;
-                box2.innerHTML = '<div style="margin:8px 0 2px;padding:8px 12px;border-radius:6px;' +
-                    'background:var(--surface-alt,#f8f9fa);border:1px solid var(--border-light,#e8e8e8);' +
-                    'font-size:12.5px;color:var(--text-2,#555);line-height:1.7;">' + d.text +
-                    ' <span style="color:var(--text-3,#999);">（分档×位置矩阵自动标注）</span></div>';
+                box2.innerHTML = _posNoteHtml(d.text);
             })
             .catch(function() { /* 静默：标注是增强，失败不影响评级卡 */ });
     }
@@ -195,6 +238,11 @@
         html += '<span class="big-score">' + data.total_score.toFixed(1) + '</span>';
         html += '<span class="big-rating">' + data.rating + '</span>';
         html += '<div class="score-label">' + (data.rating_label || '') + ' | 评级日期: ' + data.rating_date + '</div>';
+        // 021BU：评级旁历史命中徽章（回测中心同源同值；港股展示暂缓隐藏）
+        if (!_evMarketHidden(data.market)) {
+            var _evHtml = _evBadgeHtml(data.rating_evidence);
+            if (_evHtml) html += '<div style="margin-top:6px;">' + _evHtml + '</div>';
+        }
         html += '<div style="margin-top:8px;"><span class="action-badge ' + actionClass + '">' + data.action_advice + '</span></div>';
         html += '<div id="posNoteBox"></div>';  // 2026-09-18 回测提升②：位置标注容器（generateAdvice 末尾异步填充）
         if (data.previous_score !== null && data.previous_score !== undefined) {
@@ -973,6 +1021,10 @@
                 }
 
                 paSideHtml += '<div class="price-advice-disclaimer">⚠️ 以上价格建议仅供参考，不构成投资建议。股市有风险，投资需谨慎。</div>';
+                // 021BU：价格建议历史基准注记（市场级真实锚点聚合，预期管理；港股隐藏）
+                if (!_evMarketHidden(adviseData.market)) {
+                    paSideHtml += _paEvidenceHtml(adviseData.price_advice_evidence);
+                }
                 paSideHtml += '</div>';
             } else {
                 // available=false: 数据不足
@@ -1006,6 +1058,11 @@
                     ' <span style="color:' + _dColor + ';font-weight:600;">' + _dSign + _diff.toFixed(1) + '</span></div>';
         }
         html += '<div class="rating-badge ' + ratingClass + '" title="' + getRatingTitle(adviseData.rating) + '">评级 ' + adviseData.rating + '</div>';
+        // 021BU：评级旁历史命中徽章（回测中心同源同值；港股展示暂缓隐藏）
+        if (!_evMarketHidden(adviseData.market)) {
+            var _evBadge = _evBadgeHtml(adviseData.rating_evidence);
+            if (_evBadge) html += '<div style="margin-top:6px;">' + _evBadge + '</div>';
+        }
         html += '<div id="posNoteBox"></div>';  // 2026-09-18 回测提升②：位置标注容器（异步填充）
         // 021AR：v5 中文5档 key=label 恒等，标签行/建议行与徽章重复时不再显示
         if (adviseData.rating_label && adviseData.rating_label !== adviseData.rating) {
@@ -1324,8 +1381,9 @@
         // 趋势罗盘异步填充（不阻塞报告主体渲染）；传入 adviseData 供评级×罗盘调和提示
         loadTrendCompass(stockId, adviseData);
 
-        // 2026-09-18 回测提升②：评级位置标注异步填充（分化可信才显示，404 静默）
-        loadPositionNote(stockId);
+        // 2026-09-18 回测提升②：评级位置标注（021BU：响应内联 position_note 优先直渲，
+        // 与看板同源同值；无内联值回落异步端点，404 静默）
+        loadPositionNote(stockId, adviseData.position_note);
 
         // 操盘手建议异步填充（2026-09-18，只读端点，不阻塞主体）
         loadTraderAdvice(stockId);

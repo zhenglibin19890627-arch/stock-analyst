@@ -1503,11 +1503,30 @@
             try { dwList = JSON.parse(st.data_warnings || '[]'); } catch (e) { dwList = []; }
             var dataTag = _dataWarningTag(_dataWarningSummary(dwList, st.generated_at));
 
+            // 021BU：评级旁历史命中徽章 + 位置分化注记 chip（与报告页同源同值——
+            // 消费 watchlist-scores 响应内联的 rating_evidence/position_note；
+            // 港股展示暂缓（O8/R20）：隐藏而非空占位；文案渲染前转义（禁裸 '<'））
+            var evBadge = '';
+            if ((st.market || 'a_stock') !== 'hk_stock' && st.rating_evidence && st.rating_evidence.primary) {
+                var ev = st.rating_evidence;
+                var evWarn = ev.primary.grade === 'B' ? ' ⚠️样本偏小' : '';
+                var evTip = '该评级档的历史回测命中率（T+1 主口径，与回测中心市场报告同源同值）';
+                if (ev.dynamic && ev.dynamic.display) evTip += '；' + ev.dynamic.display;
+                evBadge = '<div style="font-size:10.5px;color:var(--text-3,#999);margin-top:3px;" title="' +
+                    escapeHtml(evTip) + '">📈 ' + escapeHtml(ev.primary.display) + escapeHtml(evWarn) + '</div>';
+            }
+            var posChip = '';
+            if (st.position_note && st.position_note.text) {
+                posChip = '<div style="margin-top:3px;"><span style="font-size:10.5px;color:#8a6d00;background:#fff8e1;' +
+                    'border:1px solid #ffd54f;border-radius:10px;padding:1px 7px;cursor:help;" title="' +
+                    escapeHtml(String(st.position_note.text)) + '">📍位置分化标注</span></div>';
+            }
+
             html += '<tr style="border-bottom:1px solid var(--border-light,#eee);" id="dash-row-' + st.id + '">';
             html += '<td style="padding:10px;"><strong>' + (st.name || '') + obosBadge(st.obos_signal) + '</strong><br><span style="color:var(--text-3,#888);font-size:12px;">' + st.symbol + '</span></td>';
             html += '<td style="padding:10px;">' + engineTag + '</td>';
             html += '<td style="padding:10px;font-size:16px;font-weight:700;color:' + _scoreColor(st.total_score || 0) + ';">' + scoreStr + '</td>';
-            html += '<td style="padding:10px;"><span class="rating-badge ' + getRatingClass(st.rating) + '" title="' + getRatingTitle(st.rating) + '">' + (st.rating || '—') + '</span></td>';
+            html += '<td style="padding:10px;"><span class="rating-badge ' + getRatingClass(st.rating) + '" title="' + getRatingTitle(st.rating) + '">' + (st.rating || '—') + '</span>' + evBadge + posChip + '</td>';
             html += '<td style="padding:10px;">' + changeStr + '</td>';
             html += '<td style="padding:10px;text-align:center;">' + dataTag + '</td>';
             html += '<td style="padding:10px;font-size:12px;color:var(--text-2,#666);white-space:nowrap;">' + _fmtGenTime(st.generated_at) + '</td>';
@@ -1517,6 +1536,15 @@
             html += '<td style="padding:10px;"><button class="btn btn-sm" style="padding:4px 10px;font-size:12px;" onclick="viewReport(' + st.id + ')">📊 详情</button></td>';
             html += '</tr>';
         });
+        // 021BU：价格建议历史基准脚注（市场级真实锚点注记，预期管理；A股行存在才展示，
+        // 港股暂缓隐藏。与报告页价格建议卡消费同一后端函数——同源同值）
+        var _hasA = stocks.some(function(s) { return (s.market || 'a_stock') !== 'hk_stock'; });
+        var _pev = (_dashData && _dashData.evidence_price) ? _dashData.evidence_price.a_stock : null;
+        if (_hasA && _pev && _pev.display) {
+            html += '<tr><td colspan="11" style="padding:8px 10px;font-size:11.5px;color:var(--text-3,#999);' +
+                'border-top:1px dashed var(--border-light,#eee);line-height:1.6;">' +
+                escapeHtml(String(_pev.display)) + '</td></tr>';
+        }
         tbody.innerHTML = html;
         dashUpdateFilterCount(stocks.length, _dashData ? _dashData.stocks.length : stocks.length);
     }

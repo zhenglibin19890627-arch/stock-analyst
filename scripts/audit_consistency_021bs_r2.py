@@ -40,6 +40,12 @@ R1（scripts/audit_consistency_021bs.py，经 t2 断言化）重跑已确认 P0/
   N08 score_tier_note 三面一致性：落库 key_factors.score_tier_note × 读取面
       （watchlist-scores）同源断言（同日同报告二者必须一致 → 不一致 = P1）；
       markdown 迟滞行与「评级口径说明」行互斥（并存 = P1 重复标注）。
+  N09 反落库守卫（021BU，2026-09-23；t1 方案 §4 原「N04」编号——r2 的 N04
+      已被「刷新路径 markdown 数据完整度」占用，故顺延为 N09）：
+      daily_reports.key_factors / markdown_content 中不应存在落库的历史命中率
+      数字副本（021BU O6 设计：证据元素一律读取面现算、零落库，防 stored-vs-live
+      漂移——021BS N01 实锤教训）。发现形如「历史命中 xx%（n/m）」的存储副本
+      = P2（反漂移观察）；其数字与现算基准不符 = P1（冻结快照已打架）。
 
 分级口径与 R1 相同：P0 指令矛盾 / P1 表述误导 / P2 口径差异需标注 /
 INFO 信息性 / OK 核对一致。
@@ -47,6 +53,7 @@ INFO 信息性 / OK 核对一致。
 用法：
   python scripts/audit_consistency_021bs_r2.py            # 全量新维度审计并写报告
   python scripts/audit_consistency_021bs_r2.py --no-report
+  python scripts/audit_consistency_021bs_r2.py --selftest # 合成用例自检（不触库）
 
 红线合规：全程只读（mode=ro + 只读 GET 端点）；复用 R1 脚本的连接与取数面；
 不触碰 advisor.generate_advice（B24）/评分引擎 R7/classify_stage（021BQ 锁）。
@@ -57,6 +64,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import re
 import sys
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -83,6 +91,97 @@ ZONE_CONTRACT = {  # 021BF 区间语义契约
 }
 
 
+# ================================================================
+# 021BU N09：反落库守卫（O6：证据元素读取面现算、零落库）
+# 纯函数供 --selftest 使用（不触库）
+# ================================================================
+
+# 命中率类文案 + 百分数（或 C 级「样本不足」形态）——021BU 证据展示的落库指纹
+_N09_PATTERN = re.compile(
+    r'(?:历史命中|动态窗口命中|命中率|胜率|触及率|达成率|触发率)[^。\n]{0,24}?\d+(?:\.\d+)?%'
+    r'(?:\s*（\d+/\d+）)?'
+    r'|样本不足（n=\d+）')
+_N09_PAIR = re.compile(r'（(\d+)/(\d+)）')
+_N09_NSINGLE = re.compile(r'n=(\d+)')
+_N09_PCT = re.compile(r'(\d+(?:\.\d+)?)%')
+
+
+def n09_find_copies(text):
+    """检测落库文本中的历史命中率副本（返回 [dict(text, pct, c, n)]；纯函数）。"""
+    out = []
+    if not text:
+        return out
+    for m in _N09_PATTERN.finditer(text):
+        seg = m.group(0)
+        pct = None
+        c = n = None
+        pm = _N09_PAIR.search(seg)
+        if pm:
+            c, n = int(pm.group(1)), int(pm.group(2))
+        else:
+            pn = _N09_NSINGLE.search(seg)  # C 级「样本不足（n=4）」形态
+            if pn:
+                n = int(pn.group(1))
+        pp = _N09_PCT.search(seg)
+        if pp:
+            pct = float(pp.group(1))
+        out.append({'text': seg, 'pct': pct, 'c': c, 'n': n})
+    return out
+
+
+def n09_severity(copies, baseline_cell):
+    """N09 分级（纯函数）：副本在场 = P2（反漂移观察）；数字与现算失真 = P1。
+
+    baseline_cell 为审计现算基准（r1.load_evidence_baseline 的 primary 格）；
+    None/C 级（acc 缺失）时不可比 → 维持 P2。
+    """
+    if not copies:
+        return None
+    if isinstance(baseline_cell, dict) and baseline_cell.get('acc') is not None:
+        base_pct = round(baseline_cell['acc'] * 100)
+        for cp in copies:
+            if cp['pct'] is not None and abs(cp['pct'] - base_pct) > 0.5:
+                return 'P1'
+    return 'P2'
+
+
+def selftest():
+    """N09 合成用例自检（021BU，不触库）：检测器与分级器可信性。"""
+    ok_all = True
+
+    # 用例1：A 级副本检出（含百分数 + c/n）
+    copies = n09_find_copies('评级旁注：历史命中 69%（159/230）')
+    t1 = bool(copies and copies[0]['pct'] == 69.0
+              and copies[0]['c'] == 159 and copies[0]['n'] == 230)
+    print(f'[自检] A级副本检出: {"✓" if t1 else "✗"}')
+    ok_all = ok_all and t1
+
+    # 用例2：C 级副本检出（样本不足，无百分数）
+    copies = n09_find_copies('强烈推荐买入：样本不足（n=4）')
+    t2 = bool(copies and copies[0]['pct'] is None and copies[0]['n'] == 4)
+    print(f'[自检] C级副本检出: {"✓" if t2 else "✗"}')
+    ok_all = ok_all and t2
+
+    # 用例3：普通百分数不误报（数据完整度等非证据文案）
+    t3 = n09_find_copies('技术面数据完整度 85%；消息面 60%') == []
+    print(f'[自检] 非证据百分数不误报: {"✓" if t3 else "✗"}')
+    ok_all = ok_all and t3
+
+    # 用例4：分级——在场均 P2；数字失真 P1；无副本 None
+    base = {'grade': 'A', 'n': 159, 'm': 230, 'acc': 0.6913, 'display': '历史命中 69%（159/230）'}
+    copies = n09_find_copies('历史命中 69%（159/230）')
+    s_p2 = n09_severity(copies, base)
+    s_p1 = n09_severity(n09_find_copies('历史命中 50%（100/200）'), base)
+    s_none = n09_severity([], base)
+    t4 = s_p2 == 'P2' and s_p1 == 'P1' and s_none is None
+    print(f'[自检] N09 分级（在场 P2/失真 P1/无副本 None）: 实际 {s_p2}/{s_p1}/{s_none} '
+          f'→ {"✓" if t4 else "✗"}')
+    ok_all = ok_all and t4
+
+    print(f'[自检] 结果：{"全部通过（N09 规则可信）" if ok_all else "存在失败用例（规则需修订）"}')
+    return ok_all
+
+
 def main():
     for _s in (sys.stdout, sys.stderr):
         if _s is not None and hasattr(_s, 'reconfigure'):
@@ -92,9 +191,13 @@ def main():
                 pass
     parser = argparse.ArgumentParser(description='021BS R2 新维度复审审计（只读）')
     parser.add_argument('--no-report', action='store_true')
+    parser.add_argument('--selftest', action='store_true', help='只跑合成用例自检（不触库）')
     parser.add_argument('--out', default=os.path.join(
         _PROJECT_ROOT, 'docs', 'reports', '021bs_audit_r2_20260922.md'))
     args = parser.parse_args()
+
+    if args.selftest:
+        sys.exit(0 if selftest() else 1)
 
     from datetime import datetime, timedelta, timezone
     cn = timezone(timedelta(hours=8), name='Asia/Shanghai')
@@ -359,6 +462,40 @@ def main():
             '按 021BF 契约核对 _gen_no_position 分支；该报告重生成自愈或代码回归按契约修复')
     else:
         ok('N07', f'无持仓股 zone_label×rating 全映射符合 021BF 契约（{zone_ok} 只）')
+
+    # ---------- N09：反落库守卫（021BU O6：证据元素读取面现算、零落库） ----------
+    evidence_baseline = {}
+    for _m in sorted({s.get('market') or 'a_stock' for s in stocks} | {'a_stock'}):
+        evidence_baseline[_m] = r1.load_evidence_baseline(cur, _m)
+    n09_scan = 0
+    for sid, rep in latest_reports.items():
+        s = stock_by_id.get(sid, {})
+        market = s.get('market') or 'a_stock'
+        label = f"{s.get('symbol')} {s.get('name')}"
+        for surface, text in (('key_factors', rep.get('key_factors')),
+                              ('markdown_content', rep.get('markdown_content'))):
+            copies = n09_find_copies(text)
+            if not copies:
+                continue
+            n09_scan += 1
+            base_cell = ((evidence_baseline.get(market) or {}).get(rep.get('rating')) or {}).get('primary')
+            sev09 = n09_severity(copies, base_cell)
+            if sev09 == 'P1':
+                add('N09', 'P1', label,
+                    f'{surface} 存储命中率副本：{copies[0]["text"]}',
+                    f'现算基准：{base_cell["display"] if base_cell else "样本不足"}',
+                    '落库的命中率数字与现算不符（冻结快照已打架，违反 021BU O6 读取面现算设计）',
+                    'daily_reports 落库面出现证据数字副本（021BU 后不应存在）', True,
+                    '移除落库副本；展示面改消费共享证据函数现算（与看板同源同值）')
+            else:
+                add('N09', 'P2', label,
+                    f'{surface} 存在命中率文案副本：{copies[0]["text"]}',
+                    '021BU O6 设计约束：证据元素一律读取面现算、零落库（防 stored-vs-live 漂移）',
+                    '落库副本为反漂移观察对象（当前数字与现算一致或暂不可比）',
+                    '021BU 前存量文案或非证据文案的巧合命中', False,
+                    '观察即可；若后续批次再现，核对生成链是否新增证据落库点')
+    if n09_scan == 0:
+        ok('N09', '全部存量报告无落库命中率副本（O6 反落库守卫通过）')
 
     # ---------- 汇总 ----------
     sev = {}

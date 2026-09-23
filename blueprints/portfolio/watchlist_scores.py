@@ -164,6 +164,45 @@ def api_portfolio_watchlist_scores():
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).warning(f'[020R-54] 行业资金背景加载失败: {e}')
 
+    # 021BU：回测证据看板面（与报告页消费同一证据函数——同源同值，读取面现算零落库）。
+    # 每市场一次聚合后查表（勿每股一查）；价格基准为市场级注记，顶层 evidence_price。
+    evidence_by_market = {}
+    price_evidence = {}
+    _ws_markets = sorted({r.get('market') or 'a_stock' for r in rows})
+    try:
+        from modules.backtest_engine import (
+            price_advice_evidence_summary,
+            rating_evidence_table,
+        )
+
+        for _m in _ws_markets:
+            evidence_by_market[_m] = rating_evidence_table(_m)
+            price_evidence[_m] = price_advice_evidence_summary(_m)
+    except Exception as e:  # noqa: BLE001 —— 证据属增强展示，失败不阻塞主卡片
+        logging.getLogger(__name__).warning(f'[021BU] 回测证据表加载失败: {e}')
+
+    def _rating_evidence_of(r):
+        """每股评级徽章证据：查表命中或诚实空档（与 rating_evidence_for 同构同值）。"""
+        rating = r.get('rating')
+        if not rating:
+            return None
+        from modules.backtest_engine import empty_rating_evidence
+
+        table = evidence_by_market.get(r.get('market') or 'a_stock') or {}
+        return table.get(rating) or empty_rating_evidence(
+            r.get('market') or 'a_stock', rating)
+
+    def _position_note_of(r):
+        """每股位置分化注记（position_note_for 同源调用，判定规则零改动）。"""
+        if not r.get('rating') or r.get('report_status') != 'ok':
+            return None
+        try:
+            from modules.backtest_engine import position_note_for
+
+            return position_note_for(r['id'], r['rating'])
+        except Exception:  # noqa: BLE001 —— 注记缺失不阻塞
+            return None
+
     stocks = []
     for r in rows:
         qty = r.get('quantity') or 0
@@ -242,6 +281,9 @@ def api_portfolio_watchlist_scores():
                 'score_tier_note': _derive_score_tier_note(r),
                 # 021BM：价格建议区间（最新报告已存 JSON，零重算；建议卡买入侧展示）
                 'pa_zone': _parse_pa_zone(r.get('price_advice')),
+                # 021BU：回测证据（评级徽章 + 位置分化注记；与报告页同源同值）
+                'rating_evidence': _rating_evidence_of(r),
+                'position_note': _position_note_of(r),
             }
         )
 
@@ -252,6 +294,8 @@ def api_portfolio_watchlist_scores():
         'generated_at': report_generated_at or datetime.now(_CN_TZ).isoformat(),
         'stocks': stocks,
         'total': len(stocks),
+        # 021BU：价格建议历史基准（市场级注记，{market: summary}；前端 A股展示/港股隐藏）
+        'evidence_price': price_evidence,
     }
 
     # ETag 缓存（排除 generated_at 避免时间戳波动）
