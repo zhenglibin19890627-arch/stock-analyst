@@ -47,10 +47,14 @@ def api_dashboard_intraday():
        distance_pct, ma20, ma20_distance_pct,
        state('below_stop'|'near_stop'|'normal'|'unknown'|'no_data'),
        swing, vol_spike, volume, signal_labels:[{side,label,date}]}], counts,
-     patrol:{enabled, interval_min, consecutive_failures, paused},
-     degraded, degrade_note, disclaimer:'盘中口径，以收盘确认为准'}
+      thresholds:{near_stop_pct, swing_pct},
+      patrol:{enabled, interval_min, consecutive_failures, paused},
+      degraded, degrade_note, disclaimer:'盘中口径，以收盘确认为准'}
     ma20/ma20_distance_pct 为收盘口径 MA20 参照（不足 20 根为 null）；signal_labels
-    为读取时零网络离线复算的"最新K线日"信号标记（买卖两侧，失败留空数组）。
+    为读取时零网络离线复算的"最新K线日"信号标记（买卖两侧，失败留空数组）；
+    thresholds 透出 config 阈值（F2 单一来源：前端高亮消费 state 字段，不自行算 1%）。
+    提醒语义（F1）：仅 source∈(auto,manual) 的快照产行动清单盘中项，fallback 兜底
+    快照仅供本端点展示。
     只读：零写库；无快照兜底亦零网络（price_cache 显示价，禁止归零）。
     """
     try:

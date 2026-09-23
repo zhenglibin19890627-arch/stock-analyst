@@ -347,6 +347,9 @@ def build_snapshot(now, positions, quotes=None, *, source='auto', degraded=False
         },
         'stocks': rows,
         'counts': {**counts, 'alerts': alert_count},
+        # 021BT 终验 F2：阈值单一来源透出（config 常量）——前端/文案不再硬编码，
+        # 调整 config.INTRADAY_NEAR_STOP_PCT / INTRADAY_SWING_PCT 单点生效
+        'thresholds': {'near_stop_pct': near_pct, 'swing_pct': swing_pct},
         'degraded': degraded,
         'degrade_note': degrade_note,
         'disclaimer': DISCLAIMER,
@@ -592,15 +595,26 @@ def get_snapshot_for_dashboard():
 def get_intraday_alerts():
     """行动清单路0b 数据源：当前快照中需要提醒的持仓股（触线/逼近/异动）。
 
-    只读内存快照；快照非今日（跨日/重启后）不产生提醒（巡检未运行时不虚构）。
+    只读内存快照；两道门控收紧提醒语义（021BT 终验 F1 修复——"巡检未运行时
+    不虚构"真正成立）：
+    1. 快照来源门：仅 source ∈ ('auto','manual')（巡检真实跑过一轮）产提醒；
+       'fallback'（速览读取时兜底现算，价格源=price_cache 缓存）仅供速览卡展示，
+       不产盘中触线行动项——非交易时段打开看板不再凭缓存价虚构 P0 提醒；
+    2. 行级实时门：仅 quote_ok=True（本_round拿到今日实时快照）的行参与提醒，
+       混合市场轮中休市市场（如 A盘中/港休市）的缓存兜底行不产提醒。
+    快照非今日（跨日/重启后）同样不提醒。
     Returns: [{'stock_id','symbol','name','price','pct_change','as_of','stop_line',
                'distance_pct','state','swing','vol_spike','updated_at'}]
     """
     snap = _LAST_SNAPSHOT
     if not snap or snap.get('date') != datetime.now(_CN_TZ).strftime('%Y-%m-%d'):
         return []
+    if snap.get('source') not in ('auto', 'manual'):
+        return []
     alerts = []
     for row in snap.get('stocks') or []:
+        if not row.get('quote_ok'):
+            continue
         if row.get('state') in ('below_stop', 'near_stop') or row.get('swing'):
             alerts.append({
                 'stock_id': row['stock_id'],

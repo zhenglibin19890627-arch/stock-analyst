@@ -348,9 +348,15 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
                 f"{a['stop_line']:.2f}"
             )
         elif state == 'near_stop':
+            # 021BT 终验 F2：逼近阈值单一来源——读 config.INTRADAY_NEAR_STOP_PCT，
+            # 不再硬编码 1%（阈值调整时文案单点生效；%g 去尾零：1.0→'1'，0.5→'0.5'）
+            import config as _config
+
+            near_pct = float(getattr(_config, 'INTRADAY_NEAR_STOP_PCT', 1.0))
+            near_txt = f'{near_pct:g}'
             head = (
                 f"盘中逼近止损：现价 {price_txt}（{as_of}）距有效止损 "
-                f"{a['stop_line']:.2f} 不足 1%"
+                f"{a['stop_line']:.2f} 不足 {near_txt}%"
             )
         else:
             pct = a.get('pct_change')

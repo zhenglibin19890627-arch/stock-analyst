@@ -823,3 +823,88 @@ class TestTodaySignalOverlay:
         assert 'ma20' in row and 'ma20_distance_pct' in row
         assert row['ma20'] is None  # pdb 仅 5 根K线
         assert row['signal_labels'] == []
+
+
+# ============================================================
+# 十二、t5 收尾修复：F1 非时段兜底快照不产盘中项 + F2 阈值单一来源
+# ============================================================
+
+
+class TestT5F1FallbackNoAlerts:
+    def test_fallback_snapshot_no_intraday_alerts(self, pdb, monkeypatch):
+        """F1 回归锁：非交易时段打开看板 → fallback 兜底快照（价格源=缓存）不得
+        产生盘中触线行动项（终验实测缺陷复现：缓存价破线曾被 P0 置顶）；
+        速览卡展示不受影响（快照仍生成、状态仍如实标注）"""
+        conn = db_manager.get_connection()
+        conn.execute(
+            "INSERT INTO price_cache (stock_id, latest_price, pct_change, updated_at) "
+            "VALUES (1, 9.0, -2.0, '2026-09-22 15:00:00')")  # 缓存价 9.0 破成本线 9.2
+        conn.commit()
+        conn.close()
+        _patch_clock(monkeypatch, in_session=False)  # 非交易时段
+        snap = patrol.get_snapshot_for_dashboard()
+        assert snap['source'] == 'fallback'
+        assert snap['stocks'][0]['state'] == 'below_stop'  # 展示层如实标注
+        assert patrol.get_intraday_alerts() == []  # 提醒层被门控
+        result = build_action_list(
+            TODAY, [{'stock_id': 1, 'symbol': '600276', 'name': '恒瑞医药'}], [], [], None)
+        assert not [it for it in result['items'] if it['kind'] == 'intraday_alert']
+
+    def test_auto_round_cached_row_no_alert(self, pdb, monkeypatch):
+        """F1 行级实时门：auto 轮中 quote_ok=False（如混合市场休市侧缓存兜底行）
+        不产提醒——提醒必须来自本_round今日实时快照"""
+        _seed_snapshot({
+            1: ('600276', '恒瑞医药', 9.0, -2.0, 9.2, 'below_stop', False),
+            2: ('003816', '广弘控股', 4.5, -1.0, 4.6, 'below_stop', False),
+        })
+        patrol._LAST_SNAPSHOT['stocks'][0]['quote_ok'] = False  # 缓存兜底行
+        alerts = patrol.get_intraday_alerts()
+        assert [a['stock_id'] for a in alerts] == [2]  # 仅实时快照行
+
+    def test_auto_round_alerts_still_flow(self, pdb, monkeypatch):
+        """F1 语义边界：门控仅收紧非巡检来源，巡检真实轮（auto）提醒不受影响"""
+        _patch_clock(monkeypatch)
+        _patch_fetch(monkeypatch, quotes={1: _quote(1, 9.0, -2.0)})
+        patrol.run_patrol_round()  # 真实轮 → source='auto'
+        alerts = patrol.get_intraday_alerts()
+        assert len(alerts) == 1
+        assert alerts[0]['state'] == 'below_stop'
+
+
+class TestT5F2ThresholdSingleSource:
+    def _stocks(self):
+        return [{'stock_id': 1, 'symbol': '600276', 'name': '恒瑞医药'}]
+
+    def test_near_text_follows_config(self, monkeypatch):
+        """F2：逼近文案读 config.INTRADAY_NEAR_STOP_PCT——改阈值文案单点生效"""
+        _seed_snapshot({
+            1: ('600276', '恒瑞医药', 9.28, 0.1, 9.2, 'near_stop', False),
+        })
+        monkeypatch.setattr(config, 'INTRADAY_NEAR_STOP_PCT', 2.0)
+        result = build_action_list(TODAY, self._stocks(), [], [], None)
+        near_items = [it for it in result['items'] if it['kind'] == 'intraday_alert']
+        assert len(near_items) == 1
+        assert '不足 2%' in near_items[0]['reason']
+        assert '不足 1%' not in near_items[0]['reason']
+
+    def test_default_near_text_is_one_pct(self, monkeypatch):
+        """默认阈值 1.0 → 文案'不足 1%'（回归基线）"""
+        _seed_snapshot({
+            1: ('600276', '恒瑞医药', 9.28, 0.1, 9.2, 'near_stop', False),
+        })
+        result = build_action_list(TODAY, self._stocks(), [], [], None)
+        near_items = [it for it in result['items'] if it['kind'] == 'intraday_alert']
+        assert '不足 1%' in near_items[0]['reason']
+
+    def test_snapshot_thresholds_block(self, pdb, monkeypatch):
+        """F2：快照透出 thresholds（config 值），前端高亮消费 state 的数据基础；
+        巡检判定本身同步跟随阈值（9.28 距 9.2 约 0.87%：1% 下 near，2.5% 下 normal）"""
+        _patch_clock(monkeypatch)
+        monkeypatch.setattr(config, 'INTRADAY_NEAR_STOP_PCT', 2.5)
+        monkeypatch.setattr(config, 'INTRADAY_SWING_PCT', 4.0)
+        _patch_fetch(monkeypatch, quotes={1: _quote(1, 9.28, 0.1)})
+        result = patrol.run_patrol_round()
+        snap = result['snapshot']
+        assert snap['thresholds']['near_stop_pct'] == 2.5
+        assert snap['thresholds']['swing_pct'] == 4.0
+        assert snap['stocks'][0]['state'] == 'near_stop'  # 0.87% 在 2.5% 带内

@@ -1,5 +1,13 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-09-23] 021BT t5 收尾修复：checker F1（非时段盘中项门控）+ F2（逼近阈值单一来源）
+
+终验（docs/reports/021bt_verify_20260923.md §9）两项低危 findings 修复，提醒语义收紧、展示不受影响。
+
+- **F1 非时段兜底快照不产盘中项**（`modules/intraday_patrol.py get_intraday_alerts`）：终验实测非交易时段打开看板时，`get_snapshot_for_dashboard` 的兜底现算快照（source='fallback'，价格源=price_cache 缓存）被持久化为 `_LAST_SNAPSHOT`，绕过"快照非今日不提醒"防线，行动清单凭缓存价虚构 P0「盘中触线」项。修复加两道门控：①快照来源门——仅 `source∈('auto','manual')`（巡检真实跑过一轮，二者仅在交易时段内产生）产提醒，fallback 仅供速览卡展示；②行级实时门——仅 `quote_ok=True`（本_round 今日实时快照）的行参与提醒，混合市场轮中休市侧缓存兜底行不产提醒。速览卡展示与状态标注完全不变。
+- **F2 逼近阈值单一来源**：`INTRADAY_NEAR_STOP_PCT` 曾在行动清单文案（"不足 1%"）与前端逼近高亮（`dv<1`）硬编码。收敛：①行动清单 near_stop 文案改读 `config.INTRADAY_NEAR_STOP_PCT`（`%g` 去尾零，1.0→'1'）；②快照根增 `thresholds:{near_stop_pct,swing_pct}` 透出（端点 docstring 契约同步）；③前端逼近高亮改**消费端点 `state==='near_stop'` 字段**（后端按 config 判定），不再自行算 1%——阈值调整三处联动收敛为 config 单点。
+- **测试**：`tests/test_intraday_patrol.py` +6（F1：fallback 快照零盘中项回归锁/行级 quote_ok 门/auto 轮提醒不受影响；F2：文案随 config 生效/默认 1% 基线/thresholds 透出+判定跟随）。终验 fast **1143 passed** + ruff 绿 + mypy 57 文件 0 错 + 红线 **28/28** + `node --check portfolio.js` 通过；真实库复现 F1 场景冒烟：fallback 快照 8 只照常展示（600276/601888 破线如实标注）而 `get_intraday_alerts()`=0。
+
 ## [2026-09-23] 021BT 盘中操作便利化 t3（前端）：看板「⏱ 盘中速览」卡 + 一键刷新整合
 
 总览看板新增盘中速览卡：持仓股一屏一行——现价/涨跌%/距止损%（破线红色加粗警示）/距 MA20%/今日信号标记/状态徽标，触及止损行红色置顶；卡标题交易时段标识（🟢 交易时段 / ⚪ 休市，端点透出非前端复刻）；「🔄 盘中刷新」一键原位刷新速览卡+行动清单卡。纯前端改造 + 速览端点两列增量，固定脚注『盘中口径，以收盘确认为准』。

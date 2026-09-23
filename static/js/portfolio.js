@@ -1759,13 +1759,15 @@
                 var noteTip = r.note ? ' title="' + escapeHtml(r.note) + '"' : '';
                 html += '<td style="text-align:right;white-space:nowrap;"' + noteTip + '>' + priceTxt + asOfTxt + (r.quote_ok ? '' : ' <span style="color:#bbb;font-size:10.5px;">缓存</span>') + '</td>';
                 html += '<td style="text-align:right;">' + _intradayPctCell(r.pct_change) + '</td>';
-                // 距止损：负值（已低于止损线）红色加粗警示；逼近带内琥珀
+                // 距止损：负值（已低于止损线）红色加粗警示；逼近带内琥珀。
+                // 021BT 终验 F2：逼近高亮消费端点 state 字段（后端按 config 阈值判定），
+                // 前端不自行计算 1%——阈值调整（config.INTRADAY_NEAR_STOP_PCT）单点生效。
                 var stopCell;
                 if (r.stop_line == null) {
                     stopCell = '<span style="color:#bbb;" title="无有效止损参考（无成本与建议止损）">无止损</span>';
                 } else {
                     var dv = r.distance_pct;
-                    var near = dv != null && dv > 0 && dv < 1;
+                    var near = r.state === 'near_stop';
                     stopCell = _intradayPctCell(dv, { bold: isBelow });
                     if (near) stopCell = '<span style="color:#e65100;font-weight:600;">' + (dv > 0 ? '+' : '') + dv.toFixed(2) + '%</span>';
                     if (isBelow) stopCell = '<span style="color:#c0392b;font-weight:700;">' + (dv > 0 ? '+' : '') + dv.toFixed(2) + '%</span>';
