@@ -143,8 +143,11 @@ def api_market_scan():
 def api_market_scan_signals():
     """第②段 技术信号精筛（单批 ≤50 只）：逐票拉腾讯K线 → 检测信号。
 
-    Body: {entries: [{symbol, name}], signals: [key...], window: 3}
+    Body: {entries: [{symbol, name, industry?}], signals: [key...], window: 3}
     前端分批驱动 + 进度条（避免单请求超长阻塞）。
+    021BY C2：响应附行业资金流软联动（读库零网络，匹配不上不硬造）——
+    每只命中股附 industry_flow_bg（东财板块背景，与看板同型同源），
+    批统计 industry_match_hit/total 供观察新浪↔东财行业名匹配率。
     """
     try:
         from modules.market_screener import run_signal_chunk
@@ -155,9 +158,65 @@ def api_market_scan_signals():
         window = int(body.get('window') or 3)
         window = min(max(window, 1), 10)
         result = run_signal_chunk(entries, signals=signals, window=window)
+        # 021BY C2：行业资金流 × 候选软联动（读库已落表，零外部请求）
+        bg_map = _scan_industry_bg_map()
+        if bg_map and result.get('results'):
+            from modules.market_overview import match_board_name
+
+            ind_by_sym = {}
+            for ent in entries:
+                sym = ent.get('symbol')
+                if sym:
+                    ind_by_sym[sym] = (ent.get('industry') or '').strip() or None
+            board_names = list(bg_map.keys())
+            hit = 0
+            for item in result['results']:
+                bg = None
+                industry = ind_by_sym.get(item.get('symbol'))
+                if industry:
+                    try:
+                        board = match_board_name(industry, board_names)
+                        bg = bg_map.get(board) if board else None
+                    except Exception:  # noqa: BLE001 —— 单股匹配失败不阻塞
+                        bg = None
+                item['industry_flow_bg'] = bg
+                if bg:
+                    hit += 1
+            result['industry_match_hit'] = hit
+            result['industry_match_total'] = len(result['results'])
         return jsonify({'success': True, **result})
     except Exception as e:  # noqa: BLE001
         return jsonify({'success': False, 'error': f'{e!s}'}), 500
+
+
+# 021BY C2：批间缓存（同一次扫描 12 批共享一次读库；key=交易日|库路径，跨库不串）
+_industry_flow_cache: dict = {'key': None, 'bg_map': {}}
+
+
+def _scan_industry_bg_map():
+    """最新交易日全板块资金背景映射（读库 industry_fund_flow，零网络）。
+
+    与 watchlist_scores 看板行业背景同型同源（get_industry_flow_bg_map）；
+    模块级缓存避免同一次扫描的多批请求重复全查。失败返回空 dict 不阻塞扫描。
+    """
+    from database.db_manager import DB_PATH
+
+    try:
+        from modules.market_overview import get_industry_flow_bg_map
+
+        bg_map = get_industry_flow_bg_map()
+    except Exception as e:  # noqa: BLE001 —— 联动属增强展示，失败降级为无行业列
+        logger.warning('[021BY] 行业资金背景读库失败（本次无行业列）: %s', e)
+        return {}
+    if not bg_map:
+        return {}
+    trade_date = next(iter(bg_map.values())).get('trade_date')
+    key = f'{trade_date}|{DB_PATH}'
+    if _industry_flow_cache['key'] == key:
+        return _industry_flow_cache['bg_map']
+    _industry_flow_cache['key'] = key
+    _industry_flow_cache['bg_map'] = bg_map
+    return bg_map
 
 
 @bp.route('/api/market/scan/library', methods=['GET'])

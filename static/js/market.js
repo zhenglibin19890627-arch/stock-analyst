@@ -3,8 +3,14 @@
     // ========== 021BI: 全市场选股扫描器 ==========
     var _msSignals = {};      // 信号库 {key: {label, note}}
     var _msRows = [];         // 粗筛全量（卫生线已在服务端应用，量比仅前300有值）
-    var _msSignalHits = [];   // 信号扫描命中 [{symbol, name, matches}]
+    var _msSignalHits = [];   // 信号扫描命中 [{symbol, name, matches, pos_pctile, pos_band}]
     var _msAbort = false;
+    // 021BY C3：会话内新命中对比基线（上一轮完成的命中 symbol 集；纯内存，刷新即失）
+    var _msPrevHits = null;
+    // 021BY C7：粗筛表三态排序状态（与 021T flowSort 同型交互）
+    var _msCoarseSortState = { key: null, order: 'none' };
+    // 021BY C6：分组下拉已加载标记（懒加载一次）
+    var _msGroupsLoaded = false;
 
     function initMarketScanner() {
         fetch('/api/market/scan/library').then(function(r) { return r.json(); }).then(function(d) {
@@ -32,6 +38,13 @@
         });
         var resOnly = document.getElementById('msResOnly');
         if (resOnly) resOnly.addEventListener('change', function() { if (_msSignalHits.length) msRenderSignals(); });
+        // 021BY C1：位置分位筛选/低位优先排序（纯前端，重渲命中区）
+        ['msPosFilter', 'msPosSort'].forEach(function(id) {
+            var el = document.getElementById(id);
+            if (el) el.addEventListener('change', function() { if (_msSignalHits.length) msRenderSignals(); });
+        });
+        // 021BY C4：本地方案下拉恢复（仅记忆上次使用的方案名，不自动改值）
+        msRenderPresets();
     }
 
     function _msFilters() {
@@ -70,6 +83,27 @@
         });
     }
 
+    /**
+     * 021BY C7/F1 修复：服务端筛选载荷——板块/行业改传复数数组键（boards/industries）。
+     * 修复前前端传单数 board/industry，服务端 apply_filters 只认复数键 → 行业筛选
+     * 实际仅本地生效，且服务端 500 行截断发生在行业筛选之前（小行业候选被静默丢弃）。
+     * 修复后服务端在第①段筛选阶段（截断之前）即应用板块/行业条件，二者口径一致。
+     */
+    function _msFiltersPayload() {
+        var f = _msFilters();
+        var payload = {};
+        Object.keys(f).forEach(function(k) {
+            if (k === 'board') {
+                if (f.board) payload.boards = [f.board];
+            } else if (k === 'industry') {
+                if (f.industry) payload.industries = [f.industry];
+            } else {
+                payload[k] = f[k];
+            }
+        });
+        return payload;
+    }
+
     function msRunCoarse() {
         var btn = document.getElementById('msScanBtn');
         var status = document.getElementById('msCoarseStatus');
@@ -77,7 +111,7 @@
         status.textContent = '扫描中（新浪约56页，预计1分钟，请勿关闭页面）…';
         fetch('/api/market/scan', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ refresh: true, filters: _msFilters() })
+            body: JSON.stringify({ refresh: true, filters: _msFiltersPayload() })
         }).then(function(r) { return r.json(); }).then(function(d) {
             btn.disabled = false;
             if (!d.available) {
@@ -109,18 +143,67 @@
         if (keys.indexOf(cur) >= 0) sel.value = cur;
     }
 
+    // 021BY C7：粗筛表三态排序（与 021T 行业资金流表同型交互：↓降序 → ↑升序 → ↕默认市值序）
+    function msCoarseSort(key) {
+        if (_msCoarseSortState.key === key) {
+            _msCoarseSortState.order = _msCoarseSortState.order === 'desc'
+                ? 'asc' : (_msCoarseSortState.order === 'asc' ? 'none' : 'desc');
+        } else {
+            _msCoarseSortState = { key: key, order: 'desc' };
+        }
+        if (_msRows.length) msRenderCoarse();
+    }
+
+    /** 021BY C7：可排序表头（三态箭头） */
+    function _msCoarseTh(label, key) {
+        var active = _msCoarseSortState.key === key && _msCoarseSortState.order !== 'none';
+        var arrow = active ? (_msCoarseSortState.order === 'desc' ? ' ↓' : ' ↑')
+                           : ' <span style="color:#bbb;">↕</span>';
+        var style = 'cursor:pointer;user-select:none;white-space:nowrap;' + (active ? 'color:#1565c0;' : '');
+        return '<th style="' + style + '" onclick="msCoarseSort(\'' + key + '\')">' + label + arrow + '</th>';
+    }
+
+    /** 021BY C7：按排序状态重排（None 殿后；未启用排序 = 服务端市值降序原序） */
+    function _msCoarseSorted(rows) {
+        if (!_msCoarseSortState.key || _msCoarseSortState.order === 'none') return rows;
+        var key = _msCoarseSortState.key;
+        var dir = _msCoarseSortState.order === 'desc' ? -1 : 1;
+        var arr = rows.slice();
+        arr.sort(function(a, b) {
+            var va = a[key], vb = b[key];
+            var aNull = va == null || isNaN(va), bNull = vb == null || isNaN(vb);
+            if (aNull && bNull) return 0;
+            if (aNull) return 1;
+            if (bNull) return -1;
+            if (va === vb) return 0;
+            return (va > vb ? 1 : -1) * dir;
+        });
+        return arr;
+    }
+
     function msRenderCoarse() {
         var box = document.getElementById('msCoarseResult');
-        var rows = _msLocalFiltered();
+        var rows = _msCoarseSorted(_msLocalFiltered());
         var shown = rows.slice(0, 100);
+        var csvBtn = document.getElementById('msCoarseCsvBtn');
+        if (csvBtn) csvBtn.style.display = _msRows.length ? '' : 'none';
         if (!rows.length) {
             box.innerHTML = '<p style="color:var(--text-3,#999);font-size:13px;">无匹配结果</p>';
             return;
         }
+        // 021BY C7：说明行随排序状态动态化
+        var sortTxt = '按市值降序';
+        if (_msCoarseSortState.key && _msCoarseSortState.order !== 'none') {
+            var keyName = { price: '现价', change_pct: '涨跌%', turnover: '换手%',
+                            volume_ratio: '量比', mkt_cap: '市值' }[_msCoarseSortState.key] || '';
+            sortTxt = '按' + keyName + (_msCoarseSortState.order === 'desc' ? '降序' : '升序');
+        }
         var html = '<p style="font-size:12px;color:var(--text-3,#999);margin-bottom:6px;">共 ' + rows.length +
-            ' 只，展示前 ' + shown.length + ' 只（按市值降序）。调整条件即时收窄；放宽需重新扫描。</p>';
+            ' 只，展示前 ' + shown.length + ' 只（' + sortTxt + '，点击表头可排序）。调整条件即时收窄；放宽需重新扫描。</p>';
         html += '<table class="dash-table"><thead><tr><th>代码</th><th>名称</th><th>板块</th><th>行业</th>' +
-            '<th>现价</th><th>涨跌%</th><th>换手%</th><th>量比</th><th>市值(亿)</th></tr></thead><tbody>';
+            _msCoarseTh('现价', 'price') + _msCoarseTh('涨跌%', 'change_pct') +
+            _msCoarseTh('换手%', 'turnover') + _msCoarseTh('量比', 'volume_ratio') +
+            _msCoarseTh('市值(亿)', 'mkt_cap') + '</tr></thead><tbody>';
         shown.forEach(function(r) {
             var pct = r.change_pct;
             var pctCls = pct > 0 ? 'pa-up' : (pct < 0 ? 'pa-down' : '');
@@ -155,6 +238,11 @@
             if (_msAbort || done >= chunks.length) {
                 document.getElementById('msSignalBtn').disabled = false;
                 document.getElementById('msStopBtn').style.display = 'none';
+                // 021BY C3：本轮正常完成 → 命中集成为下一轮的对比基线（中途停止不改基线）
+                if (!_msAbort) {
+                    _msPrevHits = {};
+                    _msSignalHits.forEach(function(h) { _msPrevHits[h.symbol] = 1; });
+                }
                 progress.textContent = _msAbort ? '已停止：' : '完成：';
                 progress.textContent += '扫描 ' + Math.min(done * 25, rows.length) + ' 只 / 命中 ' +
                     _msSignalHits.length + ' 只 / 耗时 ' + Math.round((Date.now() - t0) / 1000) + 's';
@@ -167,7 +255,10 @@
             fetch('/api/market/scan-signals', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    entries: chunk.map(function(r) { return { symbol: r.symbol, name: r.name }; }),
+                    // 021BY C2：透传行业名，服务端用于行业资金流软联动匹配
+                    entries: chunk.map(function(r) {
+                        return { symbol: r.symbol, name: r.name, industry: r.industry || '' };
+                    }),
                     signals: wanted, window: windowN
                 })
             }).then(function(r) { return r.json(); }).then(function(d) {
@@ -191,7 +282,70 @@
         res_double_golden:  { icon: '⭐⭐⭐⭐',   note: '双金叉共振：MACD系+KDJ系金叉同窗，同日触发更佳' }
     };
 
-    function _msRowCells(r) {
+    // ---- 021BY C1：位置分位（60日，与回测证据同口径）展示/筛选/排序 ----
+
+    /** 位置单元格：低位/中位/高位 + 百分比；数据不足显示 — 不硬造 */
+    function _msPosCell(h) {
+        if (h.pos_pctile == null) return '<td style="color:var(--text-3,#999);" title="K线不足40根，位置分位无法计算">—</td>';
+        var band = h.pos_band === 'low' ? '低位' : (h.pos_band === 'high' ? '高位' : '中位');
+        var color = h.pos_band === 'low' ? '#27ae60' : (h.pos_band === 'high' ? '#e74c3c' : '#888');
+        return '<td><span style="color:' + color + ';font-weight:600;">' + band + ' ' +
+            Math.round(h.pos_pctile * 100) + '%</span></td>';
+    }
+
+    /** 021BY C1：位置分位筛选（全部 / 低位40%以下 / 中低位70%以下） */
+    function _msPosFilteredHits() {
+        var sel = document.getElementById('msPosFilter');
+        var v = sel ? sel.value : '';
+        if (!v) return _msSignalHits;
+        return _msSignalHits.filter(function(h) {
+            if (v === 'low') return h.pos_band === 'low';
+            if (v === 'below70') return h.pos_pctile != null && h.pos_pctile < 0.7;
+            return true;
+        });
+    }
+
+    /** 021BY C1：组内「低位优先」排序（pos_pctile 升序、数据不足殿后；关闭时维持原序） */
+    function _msMaybePosSort(group) {
+        var cb = document.getElementById('msPosSort');
+        if (!cb || !cb.checked) return group;
+        var arr = group.slice();
+        arr.sort(function(a, b) {
+            var va = a.pos_pctile, vb = b.pos_pctile;
+            if (va == null && vb == null) return 0;
+            if (va == null) return 1;
+            if (vb == null) return -1;
+            return va - vb;
+        });
+        return arr;
+    }
+
+    /** 021BY C3：会话内新命中 🆕（与上一轮完成扫描对比；纯内存，刷新即失） */
+    function _msNewFlag(h) {
+        return (_msPrevHits && !_msPrevHits[h.symbol])
+            ? ' <span style="color:#e67e22;font-weight:600;" title="本次会话内新命中（与上一轮扫描对比）">🆕</span>'
+            : '';
+    }
+
+    /** 021BY C2：行业列 + 资金流软联动 chip（读库数据；匹配不上不显示，不硬造） */
+    function _msIndustryCell(r, h) {
+        var ind = r.industry || '—';
+        var chip = '';
+        var bg = h && h.industry_flow_bg;
+        if (bg && bg.main_net != null && !isNaN(bg.main_net)) {
+            var yi = bg.main_net / 1e8;
+            var color = bg.main_net > 0 ? '#c62828' : (bg.main_net < 0 ? '#1565c0' : '#888');
+            var streak = '';
+            if (bg.streak_days > 0) streak = ' · 连流' + bg.streak_days + '日';
+            else if (bg.streak_days < 0) streak = ' · 连出' + Math.abs(bg.streak_days) + '日';
+            chip = '<span style="font-size:11px;color:' + color + ';margin-left:4px;white-space:nowrap;" title="行业资金流（' +
+                (bg.board || '') + ' ' + (bg.trade_date || '') + '）：当日主力净流入，与个股同行业背景参考">行业净流入 ' +
+                (bg.main_net > 0 ? '+' : '') + yi.toFixed(1) + '亿' + streak + '</span>';
+        }
+        return '<td style="white-space:nowrap;">' + ind + chip + '</td>';
+    }
+
+    function _msRowCells(r, h) {
         var pct = r.change_pct;
         var pctCls = pct > 0 ? 'pa-up' : (pct < 0 ? 'pa-down' : '');
         return '<td>' + (r.price != null ? r.price.toFixed(2) : '—') + '</td>' +
@@ -199,7 +353,7 @@
             '<td>' + (r.volume_ratio != null ? r.volume_ratio.toFixed(2) : '—') + '</td>' +
             '<td>' + (r.turnover != null ? r.turnover.toFixed(2) : '—') + '</td>' +
             '<td>' + (r.mkt_cap != null ? r.mkt_cap.toFixed(0) : '—') + '</td>' +
-            '<td>' + (r.industry || '—') + '</td>';
+            _msIndustryCell(r, h || {});
     }
 
     function _msSelCell(h, r) {
@@ -210,36 +364,49 @@
 
     function msRenderSignals() {
         var box = document.getElementById('msSignalResult');
+        var csvBtn = document.getElementById('msSignalCsvBtn');
+        if (csvBtn) csvBtn.style.display = _msSignalHits.length ? '' : 'none';
         if (!_msSignalHits.length) {
             box.innerHTML = '<p style="color:var(--text-3,#999);font-size:13px;">无信号命中</p>';
             return;
         }
         var rowMap = {};
         _msRows.forEach(function(r) { rowMap[r.symbol] = r; });
+        var hits = _msPosFilteredHits();
+        if (!hits.length) {
+            box.innerHTML = '<p style="color:var(--text-3,#999);font-size:13px;">当前筛选条件下无命中（位置筛选可重置为「全部」）</p>';
+            return;
+        }
         var resOnly = document.getElementById('msResOnly').checked;
         var html = '';
+        // 021BY C3：会话内对比说明（有基线时才可能出现 🆕）
+        if (_msPrevHits) {
+            var newCount = hits.filter(function(h) { return !_msPrevHits[h.symbol]; }).length;
+            html += '<p style="font-size:12px;color:var(--text-2,#666);margin-bottom:6px;">🆕 = 本次会话内新命中（与上一轮扫描对比：' +
+                newCount + ' 只；仅内存对比，刷新页面即清除）</p>';
+        }
 
         // ---- 共振组置顶 ----
         _MS_RES_ORDER.forEach(function(resKey) {
             var meta = _MS_RES_META[resKey];
-            var group = _msSignalHits.filter(function(h) {
+            var group = _msMaybePosSort(hits.filter(function(h) {
                 return (h.resonances || []).some(function(x) { return x.key === resKey; });
-            });
+            }));
             if (!group.length) return;
             html += '<div style="margin-bottom:10px;"><div style="font-weight:600;font-size:13px;margin-bottom:4px;">' +
                 '▸ ' + meta.icon + ' ' + meta.note.replace(/：.*/, '') + '（' + group.length + ' 只）' +
                 '<span style="font-weight:normal;color:var(--text-3,#999);font-size:12px;"> ' + meta.note + '</span></div>' +
-                '<table class="dash-table"><thead><tr><th>加入</th><th>代码</th><th>名称</th><th>共振构成</th>' +
+                '<table class="dash-table"><thead><tr><th>加入</th><th>代码</th><th>名称</th><th>共振构成</th><th>位置</th>' +
                 '<th>现价</th><th>涨跌%</th><th>量比</th><th>换手%</th><th>市值(亿)</th><th>行业</th></tr></thead><tbody>';
             group.forEach(function(h) {
                 var r = rowMap[h.symbol] || {};
                 var res = (h.resonances || []).filter(function(x) { return x.key === resKey; })[0] || {};
                 html += '<tr><td>' + _msSelCell(h, r) + '</td><td>' + (r.code || '—') + '</td>' +
-                    '<td>' + (h.name || r.name || '—') + '</td>' +
+                    '<td>' + (h.name || r.name || '—') + _msNewFlag(h) + '</td>' +
                     '<td style="font-size:12px;">' + (res.signals || '—') +
                     ((res.note || '').indexOf('（') >= 0 ? ' <span style="color:var(--text-3,#999);">' +
                      res.note.substring(res.note.indexOf('（')) + '</span>' : '') + '</td>' +
-                    _msRowCells(r) + '</tr>';
+                    _msPosCell(h) + _msRowCells(r, h) + '</tr>';
             });
             html += '</tbody></table></div>';
         });
@@ -247,33 +414,34 @@
         // ---- 单一信号分组（共振优先时隐藏，但股票已可经共振组勾选） ----
         if (!resOnly) {
             Object.keys(_msSignals).forEach(function(key) {
-                var group = _msSignalHits.filter(function(h) {
+                var group = _msMaybePosSort(hits.filter(function(h) {
                     return h.matches.some(function(m) { return m.signal === key; });
-                });
+                }));
                 if (!group.length) return;
                 var lib = _msSignals[key];
                 html += '<div style="margin-bottom:10px;"><div style="font-weight:600;font-size:13px;margin-bottom:4px;">' +
                     '▸ ' + lib.label + '（' + group.length + ' 只）<span style="font-weight:normal;color:var(--text-3,#999);font-size:12px;"> ' +
                     lib.note + '</span></div><table class="dash-table"><thead><tr><th>加入</th><th>代码</th><th>名称</th>' +
-                    '<th>触发日</th><th>现价</th><th>涨跌%</th><th>量比</th><th>换手%</th><th>市值(亿)</th><th>行业</th></tr></thead><tbody>';
+                    '<th>触发日</th><th>位置</th><th>现价</th><th>涨跌%</th><th>量比</th><th>换手%</th><th>市值(亿)</th><th>行业</th></tr></thead><tbody>';
                 group.forEach(function(h) {
                     var r = rowMap[h.symbol] || {};
                     var m = h.matches.filter(function(x) { return x.signal === key; })[0] || {};
                     html += '<tr><td>' + _msSelCell(h, r) + '</td><td>' + (r.code || '—') + '</td>' +
-                        '<td>' + (h.name || r.name || '—') + '</td>' +
-                        '<td>' + (m.trigger_date || '—') + '</td>' + _msRowCells(r) + '</tr>';
+                        '<td>' + (h.name || r.name || '—') + _msNewFlag(h) + '</td>' +
+                        '<td>' + (m.trigger_date || '—') + '</td>' + _msPosCell(h) + _msRowCells(r, h) + '</tr>';
                 });
                 html += '</tbody></table></div>';
             });
         } else {
-            var resCount = _msSignalHits.filter(function(h) { return (h.resonances || []).length; }).length;
+            var resCount = hits.filter(function(h) { return (h.resonances || []).length; }).length;
             if (resCount) {
                 html += '<p style="font-size:12px;color:var(--text-3,#999);">另有 ' +
-                    (_msSignalHits.length - resCount) + ' 只为单一信号命中，取消勾选「只看共振」可查看。</p>';
+                    (hits.length - resCount) + ' 只为单一信号命中，取消勾选「只看共振」可查看。</p>';
             }
         }
         box.innerHTML = html;
         document.getElementById('msAddBar').style.display = '';
+        msLoadGroups();
         msUpdateSelCount();
     }
 
@@ -321,10 +489,15 @@
                 return;
             }
             var el = checked[idx];
+            var groupSel = document.getElementById('msGroupSel');
+            var gid = groupSel ? parseInt(groupSel.value, 10) : NaN;
+            var body = { symbol: el.getAttribute('data-code'), market: 'a_stock',
+                         name: el.getAttribute('data-name') };
+            // 021BY C6：分组直达（端点已支持 group_id；未选则落未分组）
+            if (!isNaN(gid) && gid > 0) body.group_id = gid;
             fetch('/api/stocks', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ symbol: el.getAttribute('data-code'), market: 'a_stock',
-                                       name: el.getAttribute('data-name') })
+                body: JSON.stringify(body)
             }).then(function(r) { return r.json(); }).then(function(d) {
                 if (d.success) { okCount++; addedIds.push(d.stock_id); el.checked = false; }
                 else {
@@ -342,6 +515,187 @@
             });
         };
         seq(0);
+    }
+
+
+    // ========== 021BY C4: 筛选预设方案（localStorage，零后端零新表） ==========
+    // 不复用 strategy_params 表（其语义是评分优化审计日志，优化器有查询面）——
+    // localStorage 是零新表约束下唯一干净落点（021BY 方案 C4/F5 裁定）。
+    var _MS_PRESET_KEY = 'ms_filter_presets_v1';
+    var _MS_PRESET_LAST = 'ms_filter_presets_last';
+    var _MS_PRESET_MAX = 10;
+
+    function _msLoadPresets() {
+        try {
+            var p = JSON.parse(localStorage.getItem(_MS_PRESET_KEY) || '{}');
+            return (p && typeof p === 'object' && !Array.isArray(p)) ? p : {};
+        } catch (e) { return {}; }
+    }
+
+    function _msSavePresets(presets) {
+        try { localStorage.setItem(_MS_PRESET_KEY, JSON.stringify(presets)); } catch (e) {}
+        msRenderPresets();
+    }
+
+    function msRenderPresets() {
+        var sel = document.getElementById('msPresetSel');
+        if (!sel) return;
+        var presets = _msLoadPresets();
+        var last = '';
+        try { last = localStorage.getItem(_MS_PRESET_LAST) || ''; } catch (e) {}
+        var names = Object.keys(presets).sort();
+        var html = '<option value="">选择方案…</option>' + names.map(function(n) {
+            return '<option value="' + n + '">' + n + '</option>';
+        }).join('');
+        sel.innerHTML = html;
+        if (last && names.indexOf(last) >= 0) sel.value = last;   // 仅记忆方案名，不自动改值
+    }
+
+    function msSavePreset() {
+        var name = prompt('方案名称（最多 20 字）：');
+        if (name == null) return;               // 取消
+        name = name.trim().slice(0, 20);
+        if (!name) { alert('方案名不能为空'); return; }
+        var presets = _msLoadPresets();
+        if (!presets[name] && Object.keys(presets).length >= _MS_PRESET_MAX) {
+            alert('最多保存 ' + _MS_PRESET_MAX + ' 个方案，请先删除不用的方案再保存。');
+            return;
+        }
+        if (presets[name] && !confirm('方案「' + name + '」已存在，覆盖？')) return;
+        var signals = [];
+        document.querySelectorAll('#msSignalChecks input:checked').forEach(function(cb) { signals.push(cb.value); });
+        presets[name] = {
+            filters: _msFilters(),
+            signals: signals,
+            window: parseInt(document.getElementById('msWindow').value, 10) || 3,
+            saved_at: new Date().toISOString().slice(0, 19).replace('T', ' ')
+        };
+        _msSavePresets(presets);
+        try { localStorage.setItem(_MS_PRESET_LAST, name); } catch (e) {}
+        var sel = document.getElementById('msPresetSel');
+        if (sel) sel.value = name;
+    }
+
+    function msApplyPreset() {
+        var sel = document.getElementById('msPresetSel');
+        if (!sel || !sel.value) return;
+        var p = _msLoadPresets()[sel.value];
+        if (!p) return;
+        try { localStorage.setItem(_MS_PRESET_LAST, sel.value); } catch (e) {}
+        var f = p.filters || {};
+        function setVal(id, v) { var el = document.getElementById(id); if (el && v != null) el.value = v; }
+        var cb = document.getElementById('msExSt'); if (cb) cb.checked = f.exclude_st !== false;
+        setVal('msMktMin', f.mkt_cap_min); setVal('msNmcMin', f.nmc_cap_min); setVal('msNmcMax', f.nmc_cap_max);
+        setVal('msTurnMin', f.turnover_min); setVal('msTurnMax', f.turnover_max);
+        setVal('msVrMin', f.volume_ratio_min); setVal('msVrMax', f.volume_ratio_max);
+        setVal('msChgMin', f.change_pct_min); setVal('msChgMax', f.change_pct_max);
+        setVal('msBoard', f.board); setVal('msIndustry', f.industry);
+        // 信号勾选集 + 触发窗口
+        var want = {};
+        (p.signals || []).forEach(function(k) { want[k] = 1; });
+        document.querySelectorAll('#msSignalChecks input[type="checkbox"]').forEach(function(cbx) {
+            cbx.checked = !!want[cbx.value];
+        });
+        if (p.window != null) setVal('msWindow', p.window);
+        // 行业下拉选项来自当前快照，预设恢复时若快照未拉取则行业值暂存于输入框（扫描后可复选）
+        if (_msRows.length) { msRenderCoarse(); msPopulateIndustries(); setVal('msIndustry', f.industry); }
+    }
+
+    function msDeletePreset() {
+        var sel = document.getElementById('msPresetSel');
+        if (!sel || !sel.value) { alert('请先在「方案」下拉中选中要删除的方案'); return; }
+        var name = sel.value;
+        if (!confirm('删除方案「' + name + '」？')) return;
+        var presets = _msLoadPresets();
+        delete presets[name];
+        _msSavePresets(presets);
+        try {
+            if (localStorage.getItem(_MS_PRESET_LAST) === name) localStorage.removeItem(_MS_PRESET_LAST);
+        } catch (e) {}
+    }
+
+
+    // ========== 021BY C5: 扫描结果导出 CSV（前端 Blob，UTF-8 带 BOM 防 Excel 乱码） ==========
+
+    function _msCsvCell(v) {
+        if (v == null) return '';
+        var s = String(v);
+        if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+        return s;
+    }
+
+    function _msDownloadCsv(filename, rows) {
+        var csv = '\ufeff' + rows.map(function(r) { return r.map(_msCsvCell).join(','); }).join('\r\n');
+        var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        var link = document.createElement('a');
+        var stamp = new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '');
+        link.href = URL.createObjectURL(blob);
+        link.download = filename + '_' + stamp + '.csv';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+
+    /** 粗筛结果导出：当前过滤后全集（含排序，非仅展示的前 100 行） */
+    function msExportCoarse() {
+        var rows = _msCoarseSorted(_msLocalFiltered());
+        if (!rows.length) { alert('暂无可导出的粗筛结果，请先完成第①步扫描'); return; }
+        var out = [['代码', '名称', '板块', '行业', '现价', '涨跌%', '换手%', '量比', '市值(亿)']];
+        rows.forEach(function(r) {
+            out.push([r.code, r.name, r.board || '', r.industry || '',
+                r.price, r.change_pct, r.turnover, r.volume_ratio, r.mkt_cap]);
+        });
+        _msDownloadCsv('粗筛结果', out);
+    }
+
+    /** 信号结果导出：位置筛选后全集（含信号/共振/位置列；不受「只看共振」影响） */
+    function msExportSignals() {
+        var hits = _msPosFilteredHits();
+        if (!hits.length) { alert('暂无可导出的信号结果，请先完成第②步扫描'); return; }
+        var rowMap = {};
+        _msRows.forEach(function(r) { rowMap[r.symbol] = r; });
+        var out = [['代码', '名称', '命中信号', '买点共振', '位置', '位置分位%', '现价', '涨跌%',
+                    '量比', '换手%', '市值(亿)', '行业', '行业资金背景', '新命中']];
+        hits.forEach(function(h) {
+            var r = rowMap[h.symbol] || {};
+            var sig = (h.matches || []).map(function(m) { return m.label || m.signal; }).join('；');
+            var res = (h.resonances || []).map(function(x) {
+                return x.signals + (x.stars ? '(' + x.stars + '星)' : '');
+            }).join('；');
+            var bg = h.industry_flow_bg;
+            var bgTxt = '';
+            if (bg && bg.main_net != null) {
+                bgTxt = (bg.board || '') + ' 主力净流入' + (bg.main_net / 1e8).toFixed(1) + '亿' +
+                    (bg.streak_days > 0 ? ' 连流' + bg.streak_days + '日'
+                        : (bg.streak_days < 0 ? ' 连出' + Math.abs(bg.streak_days) + '日' : ''));
+            }
+            out.push([r.code, h.name || r.name, sig, res,
+                h.pos_band === 'low' ? '低位' : (h.pos_band === 'high' ? '高位' : (h.pos_band === 'mid' ? '中位' : '')),
+                h.pos_pctile != null ? Math.round(h.pos_pctile * 100) : '',
+                r.price, r.change_pct, r.volume_ratio, r.turnover, r.mkt_cap,
+                r.industry || '', bgTxt, (_msPrevHits && !_msPrevHits[h.symbol]) ? '是' : '']);
+        });
+        _msDownloadCsv('信号扫描结果', out);
+    }
+
+
+    // ========== 021BY C6: 加自选分组直达（懒加载 GET /api/groups，本地库零外部请求） ==========
+
+    function msLoadGroups() {
+        if (_msGroupsLoaded) return;
+        _msGroupsLoaded = true;
+        fetch('/api/groups?type=watchlist').then(function(r) { return r.json(); }).then(function(d) {
+            var sel = document.getElementById('msGroupSel');
+            if (!sel || !d || !d.success || !Array.isArray(d.groups)) return;
+            var cur = sel.value;
+            d.groups.forEach(function(g) {
+                var opt = document.createElement('option');
+                opt.value = g.id;
+                opt.textContent = g.name + '（' + (g.stock_count != null ? g.stock_count : 0) + '）';
+                sel.appendChild(opt);
+            });
+            if (cur) sel.value = cur;
+        }).catch(function() { _msGroupsLoaded = false; });
     }
 
 

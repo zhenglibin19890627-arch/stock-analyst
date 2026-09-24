@@ -1194,11 +1194,54 @@ def run_coarse_scan(filters=None, refresh=False, enrich_top=2000):
         return {'available': False, 'error': f'粗筛失败: {e}'}
 
 
+# ================================================================
+# 021BY C1: 位置分位（证据驱动选股：仅展示/筛选/排序，不改命中判定、不落库）
+#   021BU 实证：低位买入 90%（9/10）vs 高位 42%（5/12），分化 +48pp。
+#   口径同源声明（唯一真相 = 公式对拍测试锁定）：
+#   - backtest_engine._calc_pos_and_dd20：近 60 根收盘、≥40 根才算、round 3
+#   - trader_advisor._volume_structure.position_pctile：同一公式
+#   - 分带阈值 = POS_BANDS / position_note_for：low < 0.4 ≤ mid < 0.7 ≤ high
+# ================================================================
+
+_POS_LOOKBACK = 60    # 近 60 根收盘（与回测证据同窗）
+_POS_MIN_BARS = 40    # 少于 40 根 → 数据不足，None 不硬造
+_POS_LOW = 0.4
+_POS_HIGH = 0.7
+
+
+def position_pctile_of_klines(kline_rows, lookback=_POS_LOOKBACK, min_bars=_POS_MIN_BARS):
+    """近 `lookback` 根收盘价的现价位置分位 + 分带（纯函数，零网络零落库）。
+
+    Returns: {'pos_pctile': float|None, 'pos_band': 'low'|'mid'|'high'|None}
+    """
+    closes = []
+    for k in kline_rows or []:
+        c = k.get('close') if isinstance(k, dict) else None
+        if c is None:
+            continue
+        try:
+            closes.append(float(c))
+        except (TypeError, ValueError):
+            continue
+    closes = closes[-lookback:]
+    if len(closes) < min_bars:
+        return {'pos_pctile': None, 'pos_band': None}
+    hi, lo, now = max(closes), min(closes), closes[-1]
+    if hi <= lo:
+        return {'pos_pctile': None, 'pos_band': None}
+    pos = round((now - lo) / (hi - lo), 3)
+    band = 'low' if pos < _POS_LOW else ('high' if pos >= _POS_HIGH else 'mid')
+    return {'pos_pctile': pos, 'pos_band': band}
+
+
 def run_signal_chunk(entries, signals=None, window=3):
     """第②段单批：对 ≤50 只候选逐票拉K线检测信号。
 
-    entries: [{'symbol', 'name'}]
-    Returns: {'results': [{symbol, name, matches: [...]}], 'errors': [...]}
+    entries: [{'symbol', 'name', 'industry'?}]
+    Returns: {'results': [{symbol, name, matches, pos_pctile, pos_band,
+                           resonances, industry_flow_bg?}], 'errors': [...]}
+    pos_* 为 021BY C1 位置分位（用已拉取的同一份日K现算，零新增网络请求；
+    仅展示/筛选/排序的条件化标注，不参与 SIGNAL_LIBRARY/RESONANCE_LIBRARY 判定）。
     """
     if len(entries) > 50:
         entries = entries[:50]
@@ -1217,8 +1260,11 @@ def run_signal_chunk(entries, signals=None, window=3):
                     weekly = fetch_kline_weekly(sym)
                 except Exception:  # noqa: BLE001 —— 周K失败只降级为无周线共振
                     weekly = None
+                pos_info = position_pctile_of_klines(klines)
                 results.append({'symbol': sym, 'name': ent.get('name') or '',
                                 'matches': matches,
+                                'pos_pctile': pos_info['pos_pctile'],
+                                'pos_band': pos_info['pos_band'],
                                 'resonances': detect_resonances(matches, klines, weekly)})
         except Exception as e:  # noqa: BLE001
             errors.append({'symbol': sym, 'error': str(e)[:120]})

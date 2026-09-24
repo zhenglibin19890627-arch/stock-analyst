@@ -249,9 +249,17 @@
                 </select>
             </label>
             <label>行业 <select id="msIndustry" style="width:120px;"><option value="">全部</option></select></label>
+            <span style="display:inline-flex;gap:6px;align-items:center;">
+                <label>方案
+                    <select id="msPresetSel" style="width:110px;" onchange="msApplyPreset()"><option value="">选择方案…</option></select>
+                </label>
+                <button class="btn btn-sm" style="padding:3px 10px;font-size:12px;" onclick="msSavePreset()" title="保存当前全部筛选条件与信号勾选为本地方案">💾 存为方案</button>
+                <button class="btn btn-sm" style="padding:3px 10px;font-size:12px;" onclick="msDeletePreset()" title="删除当前选中的方案">🗑</button>
+            </span>
         </div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
             <button class="btn btn-primary btn-sm" id="msScanBtn" onclick="msRunCoarse()">🔍 扫描全市场（约1分钟）</button>
+            <button class="btn btn-sm" id="msCoarseCsvBtn" style="display:none;" onclick="msExportCoarse()">⬇ 导出CSV</button>
             <span id="msCoarseStatus" style="font-size:13px;color:var(--text-3,#888);"></span>
         </div>
         <div id="msCoarseResult" style="margin-top:10px;"></div>
@@ -271,11 +279,23 @@
                 <button class="btn btn-primary btn-sm" id="msSignalBtn" onclick="msStartSignals()">⚡ 开始信号扫描</button>
                 <button class="btn btn-sm" id="msStopBtn" style="display:none;" onclick="msStopSignals()">⏹ 停止</button>
                 <label style="font-size:13px;"><input type="checkbox" id="msResOnly" checked> ⭐ 只看共振</label>
+                <label style="font-size:13px;">位置
+                    <select id="msPosFilter" style="width:120px;">
+                        <option value="">全部</option>
+                        <option value="low">低位（40%以下）</option>
+                        <option value="below70">中低位（70%以下）</option>
+                    </select>
+                </label>
+                <label style="font-size:13px;" title="勾选后各组内按 60 日位置分位升序（低位在前，数据不足殿后）"><input type="checkbox" id="msPosSort"> 低位优先</label>
+                <button class="btn btn-sm" id="msSignalCsvBtn" style="display:none;" onclick="msExportSignals()">⬇ 导出CSV</button>
                 <span id="msSignalProgress" style="font-size:13px;color:var(--text-3,#888);"></span>
             </div>
             <div id="msSignalResult" style="margin-top:10px;"></div>
             <div id="msAddBar" style="margin-top:10px;display:none;">
                 <button class="btn btn-success btn-sm" onclick="msAddSelected()">➕ 加入自选（已选 <span id="msSelCount">0</span>/20）</button>
+                <label style="font-size:13px;color:var(--text-2,#666);margin-left:8px;">加入分组：
+                    <select id="msGroupSel" style="font-size:13px;padding:2px 6px;border:1px solid var(--border,#ccc);border-radius:4px;"><option value="">未分组</option></select>
+                </label>
                 <span style="font-size:12px;color:var(--text-3,#999);margin-left:8px;">加入后请到「自选股」页执行「批量分析+评级」获取真评级</span>
             </div>
         </div>
