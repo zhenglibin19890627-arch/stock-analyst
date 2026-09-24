@@ -253,3 +253,70 @@ class TestScanSignalsBlueprint:
         bgs = {r['symbol']: r['industry_flow_bg'] for r in data['results']}
         assert bgs['sh600000'] is None          # 库内无食品饮料板块 → 匹配不上不硬造
         assert bgs['sz000001'] is None          # 空行业名不参与匹配
+
+
+# ================================================================
+# t4/F-V2: 行业背景缓存——轻查询键探测先行，命中不重复全量装配
+# ================================================================
+
+
+class TestIndustryBgCache:
+    def _reset_cache(self):
+        import blueprints.market as market_bp
+
+        market_bp._industry_flow_cache['key'] = None
+        market_bp._industry_flow_cache['bg_map'] = {}
+        return market_bp
+
+    def _counting_map(self, monkeypatch):
+        """monkeypatch get_industry_flow_bg_map：计数调用次数，委托真实实现。"""
+        import modules.market_overview as mo
+
+        calls = {'n': 0}
+        real = mo.get_industry_flow_bg_map
+
+        def counting():
+            calls['n'] += 1
+            return real()
+
+        monkeypatch.setattr(mo, 'get_industry_flow_bg_map', counting)
+        return calls
+
+    def test_cache_hit_skips_full_assembly(self, flow_db, monkeypatch):
+        """F-V2：同交易日第二次调用命中缓存——全量装配（含 compute_streaks 全表扫描）只跑一次。"""
+        market_bp = self._reset_cache()
+        calls = self._counting_map(monkeypatch)
+        first = market_bp._scan_industry_bg_map()
+        second = market_bp._scan_industry_bg_map()
+        assert calls['n'] == 1                       # 修复前：每次调用都全量装配（n=2）
+        assert first == second
+        assert first['半导体']['main_net'] == 300.0
+
+    def test_empty_table_zero_full_assembly(self, tmp_path, monkeypatch):
+        """F-V2：键探测（MAX(trade_date) 轻查询）先行——空表直接返回空，不进全量装配。"""
+        monkeypatch.setattr(db_manager, 'DB_PATH', str(tmp_path / 'cacheempty021by.db'))
+        monkeypatch.setattr(db_manager, 'BACKUP_DIR', str(tmp_path / 'backups'))
+        db_manager.init_database()
+        market_bp = self._reset_cache()
+        calls = self._counting_map(monkeypatch)
+        assert market_bp._scan_industry_bg_map() == {}
+        assert calls['n'] == 0                       # 键探测即返回，全量装配零次
+
+    def test_new_trade_date_reassembles(self, flow_db, monkeypatch):
+        """F-V2 数据新鲜度：新交易日落库 → 缓存键变化 → 重新全量装配。"""
+        market_bp = self._reset_cache()
+        calls = self._counting_map(monkeypatch)
+        first = market_bp._scan_industry_bg_map()
+        assert calls['n'] == 1
+        # 模拟新交易日数据落库（键随之变化）
+        conn = db_manager.get_connection()
+        conn.execute(
+            'INSERT INTO industry_fund_flow '
+            '(trade_date, code, name, pct_change, main_net, main_pct, super_net, big_net, mid_net, small_net, lead_stock) '
+            "VALUES ('2026-08-15', 'BK1', '半导体', 0, 400.0, 0, 0, 0, 0, 0, NULL)"
+        )
+        conn.commit()
+        conn.close()
+        fresh = market_bp._scan_industry_bg_map()
+        assert calls['n'] == 2                       # 键变化 → 重新装配
+        assert fresh['半导体']['main_net'] == 400.0  # 新数据可见（旧缓存未粘连）

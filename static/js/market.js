@@ -11,6 +11,8 @@
     var _msCoarseSortState = { key: null, order: 'none' };
     // 021BY C6：分组下拉已加载标记（懒加载一次）
     var _msGroupsLoaded = false;
+    // 021BY t4/F-V3：预设行业条件在 fresh 会话（下拉尚无该 option）时挂起，扫描后重应用一次
+    var _msPendingIndustry = null;
 
     function initMarketScanner() {
         fetch('/api/market/scan/library').then(function(r) { return r.json(); }).then(function(d) {
@@ -38,6 +40,9 @@
         });
         var resOnly = document.getElementById('msResOnly');
         if (resOnly) resOnly.addEventListener('change', function() { if (_msSignalHits.length) msRenderSignals(); });
+        // 021BY t4/F-V3：用户手动改行业 → 清除挂起（手动选择优先于预设重应用）
+        var indEl = document.getElementById('msIndustry');
+        if (indEl) indEl.addEventListener('change', function() { _msPendingIndustry = null; });
         // 021BY C1：位置分位筛选/低位优先排序（纯前端，重渲命中区）
         ['msPosFilter', 'msPosSort'].forEach(function(id) {
             var el = document.getElementById(id);
@@ -123,12 +128,36 @@
             document.getElementById('msSnapshotMeta').textContent =
                 '快照截至：' + String(d.snapshot_at).replace('T', ' ');
             msPopulateIndustries();
+            // 021BY t4/F-V3：预设行业条件在 fresh 会话挂起的，扫描成功（下拉已重建）后重应用一次
+            _msApplyPendingIndustry();
             msRenderCoarse();
             document.getElementById('msSignalSection').style.display = 'block';
         }).catch(function(e) {
             btn.disabled = false;
             status.innerHTML = '<span style="color:#e74c3c;">❌ 请求失败: ' + e + '</span>';
         });
+    }
+
+    /** 021BY t4/F-V3：下拉是否已含某值 option（动态下拉赋值前置检查） */
+    function _msHasOption(sel, v) {
+        for (var i = 0; i < sel.options.length; i++) {
+            if (sel.options[i].value === v) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 021BY t4/F-V3：扫描成功后重应用挂起的预设行业（一次性，无论是否命中都清挂起）。
+     * 背景：fresh 会话行业下拉仅有「全部」，msApplyPreset 的行业赋值静默失败，
+     * 用户直接扫描 → 载荷缺 industries，与保存意图不符。修复 = 挂起 + 下拉重建后重应用。
+     */
+    function _msApplyPendingIndustry() {
+        if (_msPendingIndustry == null) return;
+        var sel = document.getElementById('msIndustry');
+        if (sel && _msHasOption(sel, _msPendingIndustry)) {
+            sel.value = _msPendingIndustry;
+        }
+        _msPendingIndustry = null;
     }
 
     function msPopulateIndustries() {
@@ -198,8 +227,15 @@
                             volume_ratio: '量比', mkt_cap: '市值' }[_msCoarseSortState.key] || '';
             sortTxt = '按' + keyName + (_msCoarseSortState.order === 'desc' ? '降序' : '升序');
         }
+        // 021BY t4/F-V4：行业筛选生效时提示下拉收缩语义（结果行仅来自本轮扫描的该行业，切换行业需重扫）
+        var indNote = '';
+        var fCur = _msFilters();
+        if (fCur.industry) {
+            indNote = ' <span style="color:#e65100;">已按行业「' + fCur.industry +
+                '」筛选（本表仅含本轮扫描的该行业结果）；切换行业请重新扫描。</span>';
+        }
         var html = '<p style="font-size:12px;color:var(--text-3,#999);margin-bottom:6px;">共 ' + rows.length +
-            ' 只，展示前 ' + shown.length + ' 只（' + sortTxt + '，点击表头可排序）。调整条件即时收窄；放宽需重新扫描。</p>';
+            ' 只，展示前 ' + shown.length + ' 只（' + sortTxt + '，点击表头可排序）。调整条件即时收窄；放宽需重新扫描。' + indNote + '</p>';
         html += '<table class="dash-table"><thead><tr><th>代码</th><th>名称</th><th>板块</th><th>行业</th>' +
             _msCoarseTh('现价', 'price') + _msCoarseTh('涨跌%', 'change_pct') +
             _msCoarseTh('换手%', 'turnover') + _msCoarseTh('量比', 'volume_ratio') +
@@ -589,7 +625,16 @@
         setVal('msTurnMin', f.turnover_min); setVal('msTurnMax', f.turnover_max);
         setVal('msVrMin', f.volume_ratio_min); setVal('msVrMax', f.volume_ratio_max);
         setVal('msChgMin', f.change_pct_min); setVal('msChgMax', f.change_pct_max);
-        setVal('msBoard', f.board); setVal('msIndustry', f.industry);
+        setVal('msBoard', f.board);
+        // 021BY t4/F-V3：fresh 会话行业下拉仅有「全部」，赋值静默失败 → 挂起待扫描后重应用；
+        // 下拉已有该 option（快照已拉取）则立即生效并清挂起。
+        var indSel = document.getElementById('msIndustry');
+        if (f.industry && indSel && !_msHasOption(indSel, f.industry)) {
+            _msPendingIndustry = f.industry;
+        } else {
+            setVal('msIndustry', f.industry);
+            _msPendingIndustry = null;
+        }
         // 信号勾选集 + 触发窗口
         var want = {};
         (p.signals || []).forEach(function(k) { want[k] = 1; });
@@ -597,8 +642,15 @@
             cbx.checked = !!want[cbx.value];
         });
         if (p.window != null) setVal('msWindow', p.window);
-        // 行业下拉选项来自当前快照，预设恢复时若快照未拉取则行业值暂存于输入框（扫描后可复选）
-        if (_msRows.length) { msRenderCoarse(); msPopulateIndustries(); setVal('msIndustry', f.industry); }
+        // 行业下拉选项来自当前快照：已拉取时重建下拉并按预设行业过滤重渲（option 若重建后存在）
+        if (_msRows.length) {
+            msPopulateIndustries();
+            if (f.industry && indSel && _msHasOption(indSel, f.industry)) {
+                indSel.value = f.industry;
+                _msPendingIndustry = null;
+            }
+            msRenderCoarse();
+        }
     }
 
     function msDeletePreset() {

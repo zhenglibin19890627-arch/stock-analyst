@@ -197,10 +197,28 @@ def _scan_industry_bg_map():
     """最新交易日全板块资金背景映射（读库 industry_fund_flow，零网络）。
 
     与 watchlist_scores 看板行业背景同型同源（get_industry_flow_bg_map）；
-    模块级缓存避免同一次扫描的多批请求重复全查。失败返回空 dict 不阻塞扫描。
+    021BY t4/F-V2 修复：缓存键用轻查询（MAX(trade_date)，毫秒级）先行探测——
+    命中即返回缓存 bg_map，未命中才做全量读库（修复前全量读库在键检查之前
+    无条件执行，缓存只省字典重建，「12 批共享一次读库」不成立）。
+    失败返回空 dict 不阻塞扫描。
     """
-    from database.db_manager import DB_PATH
+    from database.db_manager import DB_PATH, get_connection
 
+    try:
+        conn = get_connection()
+        try:
+            row = conn.execute('SELECT MAX(trade_date) AS d FROM industry_fund_flow').fetchone()
+        finally:
+            conn.close()
+        trade_date = row['d'] if row else None
+    except Exception as e:  # noqa: BLE001 —— 表缺失等场景降级为无行业列
+        logger.warning('[021BY] 行业资金流键探测失败（本次无行业列）: %s', e)
+        return {}
+    if not trade_date:
+        return {}
+    key = f'{trade_date}|{DB_PATH}'
+    if _industry_flow_cache['key'] == key:
+        return _industry_flow_cache['bg_map']
     try:
         from modules.market_overview import get_industry_flow_bg_map
 
@@ -210,10 +228,6 @@ def _scan_industry_bg_map():
         return {}
     if not bg_map:
         return {}
-    trade_date = next(iter(bg_map.values())).get('trade_date')
-    key = f'{trade_date}|{DB_PATH}'
-    if _industry_flow_cache['key'] == key:
-        return _industry_flow_cache['bg_map']
     _industry_flow_cache['key'] = key
     _industry_flow_cache['bg_map'] = bg_map
     return bg_map
