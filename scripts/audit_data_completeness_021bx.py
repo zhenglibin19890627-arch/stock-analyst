@@ -356,14 +356,14 @@ def known_items(cur: sqlite3.Cursor) -> list[dict]:
         "FROM raw_kline")
     items.append({
         'id': 'K1', 'name': '换手率字段断供（raw_kline.turnover 恒 0）',
-        'status': 't2 修复中且修复已在落库（审计运行期间观测到恢复）',
-        'evidence': f'全表 {kt[0]} 行中 turnover>0 共 {kt[1]} 行，最后非零日 {kt[2]}；'
-                    f'其中 {kt[3]} 行出现在 2026-09-23 及之后——**审计运行时（12:21）与 上午（11:05）'
-                    '两次快照对比，09-23/09-24 部分行已由 0 变为真实换手率值，即 t2 修复正在实时落库**；'
-                    '2026-07-16~09-22 历史窗口仍为 0 待回补。本审计不重复给修复方案（协调约定）。',
+        'status': '021BW t2 已修复：采集写回（东财日K换手率旁路）+ 历史回补；'
+                  '余量自愈=重跑 backfill_kline_turnover_021bw.py 或日常采集自动补齐',
+        'evidence': f'全表 {kt[0]} 行中 turnover>0 共 {kt[1]} 行（回补前为 0），'
+                    f'最后非零日 {kt[2]}；根因=fetch_kline 自基线硬编码 0（两源均不提供该字段）；'
+                    '余 36 只历史行受东财 WAF 长窗频控未补齐（021BW t2 实施报告 §2.3 边界）。',
     })
 
-    # ② 港股回测样本停更
+    # ② 港股回测样本停更（K2，021BX t7 已补跑 + 新鲜度断言）
     rh = scalar("SELECT COUNT(*), MAX(rating_date) FROM ratings_history rh "
                 "JOIN stocks s ON s.id=rh.stock_id WHERE s.market='hk_stock' "
                 "AND rh.rating_date > '2026-09-07'")
@@ -372,14 +372,27 @@ def known_items(cur: sqlite3.Cursor) -> list[dict]:
                 "AND rating_date > '2026-09-07'")
     chg = scalar("SELECT COUNT(*), MAX(rating_date) FROM ratings_history rh "
                  "JOIN stocks s ON s.id=rh.stock_id WHERE s.market='hk_stock' AND rh.is_change=1")
+    pend = scalar("SELECT COUNT(*) FROM ratings_history rh JOIN stocks s ON s.id=rh.stock_id "
+                  "WHERE s.market='hk_stock' AND rh.price_at_rating IS NOT NULL "
+                  'AND rh.price_at_rating > 0 AND rh.id NOT IN '
+                  '(SELECT rating_id FROM backtest_results WHERE rating_id IS NOT NULL)')
+    bt_lag = scalar(
+        "SELECT (SELECT MAX(rh.rating_date) FROM ratings_history rh "
+        "JOIN stocks s ON s.id=rh.stock_id WHERE s.market='hk_stock') AS r, "
+        "(SELECT MAX(br.rating_date) FROM backtest_results br WHERE br.market='hk_stock') AS b")
+    lag_days = days_between(bt_lag['b'], bt_lag['r'])
+    if lag_days is None or lag_days > 2:
+        k2_status = f'⚠️ 回测样本落后评级 {lag_days} 天（断言：差距应不大于 2 天）'
+    else:
+        k2_status = f'✅ 回测样本与评级对齐（差 {lag_days} 天，阈值 2 天内）'
     items.append({
-        'id': 'K2', 'name': '港股回测样本 2026-09-07 起停更',
-        'status': '根因修正：非「链路损坏」，是补算机制缺口',
-        'evidence': f'09-07 后港股评级 {rh[0]} 行（至 {rh[1]}，全部 is_change=0）但回测 {bt[0]} 行。'
-                    f'回测行三个来源：auto_trigger_backtest（仅 is_change=1 触发——港股最后一次'
-                    f'评级变更 {chg[1]}，共 {chg[0]} 次）/ 手动 batch_backtest 端点（近期调用仅 a_stock）/'
-                    f'fill_pending_backtests 每日补算（**无任何调用方，未接线**）。'
-                    f'A股样本持续增长纯因近期评级变更仍发生。',
+        'id': 'K2', 'name': '港股回测样本新鲜度（断言化：回测最新评级日与评级最新评级日差 ≤2 天）',
+        'status': f'{k2_status}；021BX t7 已零代码补跑（+122 行），近 30 天待补= {pend[0]}',
+        'evidence': f'09-07 后港股评级 {rh[0]} 行（至 {rh[1]}）现已有回测 {bt[0]} 行（至 {bt[1]}）。'
+                    f'根因=补算机制缺口：auto_trigger 仅 is_change=1 触发（港股最后一次评级变更 '
+                    f'{chg[1]}，共 {chg[0]} 次）、fill_pending_backtests **未接线**（每日补算无调用方）。'
+                    't7 裁定：接线属行为级新增，方案已写入实施报告待用户批准；当前以手动/端点'
+                    ' batch_backtest 定期补跑为运维动作（scripts/backfill_hk_backtest_021bx.py）。',
     })
 
     # ③ acc2 中免 1000 股
@@ -425,12 +438,15 @@ def known_items(cur: sqlite3.Cursor) -> list[dict]:
                      "WHERE dimension='orderbook' AND status='failed' "
                      "AND fetched_at >= datetime('now','localtime','-14 days')")
     items.append({
-        'id': 'K6', 'name': '五档盘口采集停更（mootdx 链路，本审计新发现）',
-        'status': '采集源断连（分级：需排查修复——mootdx/TDX 连通性）',
-        'evidence': f'stock_orderbook 最新采集日 {ob[0]}（A 股 40/46 只）；data_status 近 14 天 '
-                    f'orderbook failed {ob_fail[0]} 次（{ob_fail[1]} ~ {ob_fail[2]}），最后成功 {ob_ok[0]}'
-                    '——停更 15 天且连续失败，021BN 健康度面板应已红。属五档盘口增量维度，'
-                    '不阻塞评分链（评分不消费盘口），影响报告「盘口」卡新鲜度。',
+        'id': 'K6', 'name': '五档盘口采集停更（mootdx 链路，t6 新发现 → t7 已诊断）',
+        'status': '采集源服务端断供（t7 诊断：非本侧代码问题）；健康提示已挂 '
+                  'health/sources orderbook 说明列（021BX）',
+        'evidence': f'stock_orderbook 最新采集日 {ob[0]}；data_status 近 14 天 orderbook failed '
+                    f'{ob_fail[0]} 次（{ob_fail[1]} ~ {ob_fail[2]}），最后成功 {ob_ok[0]}。'
+                    't7 连通性实测：4 台备用池 IP TCP 全通但 quotes/bars 全部返回空载荷，'
+                    'bestip 全网扫描同样空（多股票复测一致）——TDX 服务端自 2026-09-10 起对 '
+                    'mootdx 0.11.7 停止返回数据，属源侧协议/服务变化。盘口为展示维度，'
+                    '评分链不消费，降级可接受；恢复后自动续采。',
     })
     return items
 
@@ -453,8 +469,8 @@ def render(matrix: list[dict], data: dict, g: dict, items: list[dict], meta: dic
                  f'港股 {data["ref"]["hk_stock"]}（生产 020R-19 同语义）')
     lines.append('- 图例：✅ 正常 · ⚠️ 滞后/缺口（附天数或缺失数） · ❌ 缺失 · '
                  '➖ 不适用（无采集源/无事件属正常）。')
-    lines.append('- **协调约定：换手率断供（K线采集）由 021BW t2 修复中，'
-                 '本审计只登记现状、不重复给修复方案。**')
+    lines.append('- **协调约定（021BX 时点）：换手率断供由 021BW t2 修复——采集写回已修复并回补，'
+                 '余量自愈见 021BW t2 实施报告 §2.3。**')
     lines.append('')
     lines.append('## 一、每股 × 全维度缺口矩阵')
     lines.append('')
@@ -484,7 +500,7 @@ def render(matrix: list[dict], data: dict, g: dict, items: list[dict], meta: dic
         'kd': '滞后>3d，或基准日前 30 个交易日有缺口（基准日当日不计——15:54 批次前属日内正常态）',
         'kw': '周线滞后>8d',
         'km': '月线滞后>35d', 'fin': '财报期滞后（A股>150d/港股>400d）',
-        'cap': '近10个交易日缺≥3天（本轮为 4 只港股 westock 覆盖缺口）',
+        'cap': '近10个交易日缺≥3天（021BX t7 已回补 4 只港股历史缺口；当日未到批次属日内正常态）',
         'mgn': '融资余额滞后>7d（港股不适用）',
         'news': '情绪表滞后>7d', 'val': '估值滞后>7d',
         'ob': '盘口滞后>3d（09-09 起全量停更，见 K6）',
@@ -534,8 +550,9 @@ def render(matrix: list[dict], data: dict, g: dict, items: list[dict], meta: dic
         lines.append(f'| {t} | {cnt} | {stocks} | {_d(lo) or "—"} | {_d(hi) or "—"} |')
     lines.append('')
     kt = g['kline_turnover']
-    lines.append(f'- 换手率现状：{kt[0]} 行中 turnover>0 共 {kt[1]} 行（最后非零 {kt[2]}，'
-                 f'其中 {kt[3]} 行为 09-23 起恢复）——**K1，t2 修复中且已开始落库**。')
+    lines.append(f'- 换手率现状：{kt[0]} 行中 turnover>0 共 {kt[1]} 行（最后非零 {kt[2]}）'
+                 '——**K1，021BW t2 已修复采集写回（东财换手率旁路）并回补 60.4%；'
+                 '余量受东财 WAF 长窗频控待续补（幂等脚本/日常采集自愈）**。')
     src_lines = '；'.join(f'{src}·est={est}: {cnt}' for src, est, cnt in g['cap_src'])
     lines.append(f'- 资金面链路标记：{src_lines}——capital_source 仅 westock 行有标（历史行 NULL），'
                  '链序判定不受影响（R2 以行为内容为准），低优登记。')
