@@ -2006,6 +2006,21 @@ def selftest():
           f'{"✓" if _case19_ok else "✗"}')
     ok_cases = ok_cases and _case19_ok
 
+    # 用例20（021BW t4/F1 回归）：表缝小数分数的迟滞保持态标注在场——
+    # 闭区间表缝（49–50 等）曾使 49.7 判 None → 标注静默缺失（600519 实测 P1）；
+    # 连续判定（对齐 _map_rating）后 gap 分数必须产出含两档位名的说明。
+    from modules.rating_hysteresis import score_tier_mismatch_note as _stn
+
+    _gap497 = _stn(49.7, '持有观望')
+    _gap649 = _stn(64.9, '建议减仓')
+    _gap295 = _stn(29.5, '持有观望')
+    _gap_ok = (bool(_gap497) and '建议减仓' in _gap497 and '<' not in _gap497
+               and bool(_gap649) and '持有观望' in _gap649
+               and bool(_gap295) and '强烈建议卖出' in _gap295)
+    print(f'[自检] F1 表缝分数标注（49.7/64.9/29.5）: 期望三条非空且档位名正确 → '
+          f'{"✓" if _gap_ok else "✗"}')
+    ok_cases = ok_cases and _gap_ok
+
     passed = ok_hard and ok_cases
     print(f'[自检] 结果：{"全部通过（审计规则可信）" if passed else "存在失败用例（规则需修订）"}')
     return passed

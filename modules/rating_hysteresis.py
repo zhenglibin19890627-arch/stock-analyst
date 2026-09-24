@@ -116,16 +116,30 @@ def hysteresis_note(info) -> str:
 
 
 def _tier_for_score(score: float, thresholds: dict) -> str | None:
-    """分数 → 档位区间判定（与 _map_rating 同源阈值表，仅区间归属判定）。
+    """分数 → 档位判定（与 _map_rating 同源阈值表 + 同款连续口径）。
 
-    命中区间 [min, max] 返回档位名；不在任何区间（异常分数）返回 None。
+    021BW t4（复审 F1 修复）：原实现按闭区间 [min, max] 归类，而档位表为整数
+    边界（A股 29/49/64/79 与相邻档 min 之间存在表缝），小数分数（如 49.7）
+    落入缝内返回 None → 迟滞保持态标注静默缺失（600519 49.7×持有观望 实测，
+    重生成后依旧无标注——「重生成自愈」假设被复审否定）。
+
+    现改为与 scoring_engine._map_rating 同款连续判定：按 min 降序取首个
+    score >= min 的档位；低于最低档下边界（异常分数）返回 None。
+    仅展示层判定：apply_hysteresis/_map_rating 评级判定本体零改动（R7/B24）。
     """
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        return None
+    tiers = []
     for name, t in thresholds.items():
         try:
-            if float(t['min']) <= score <= float(t['max']):
-                return name
+            tiers.append((float(t['min']), name))
         except (KeyError, TypeError, ValueError):
             continue
+    for mn, name in sorted(tiers, reverse=True):
+        if score >= mn:
+            return name
     return None
 
 
@@ -140,12 +154,14 @@ def score_tier_mismatch_note(score, rating, market='a_stock', margin=None) -> st
     本函数按「总分所处档位区间 × 当前评级」判定失配并生成说明文字：
       - 判定与 apply_hysteresis 同源（get_effective_thresholds：A股 80/65/50/30，
         港股 021R overrides 热加载），不重实现边界映射（R7/D4 合规）；
+      - 档位归属为连续口径（021BW t4 F1：对齐 _map_rating 的 score >= min 判定，
+        表缝小数分数不再漏判）；
       - 只产出说明、不改评级——评级仍由 generate_advice 权威产出（B24 冻结），
         消费方为报告组装/展示层（advisor 因子构建器 / 读取路径消费方门控）。
 
     Returns:
         str: 失配时的人类可读说明；一致或无法判定（分数/评级缺失、档位未知、
-        分数落在任何区间之外）返回 ''。文案不含裸字符 '<'（021BN 教训）。
+        分数低于最低档下边界）返回 ''。文案不含裸字符 '<'（021BN 教训）。
     """
     if margin is None:
         margin = RATING_HYSTERESIS_MARGIN
@@ -163,6 +179,16 @@ def score_tier_mismatch_note(score, rating, market='a_stock', margin=None) -> st
         return ''
     band = thresholds[expected]
     cur = thresholds[rating]
+    band_min = float(band['min'])
+    # 区间展示（稳定优先）：档表内分数维持原展示（min–max，与既有落库注记逐字一致，
+    # 防 stored×live 文本漂移）；仅表缝分数（score 超出档表 max）改用连续换挡边界
+    # （上一档 min）——此类分数修复前不产注记、无既有文本，展示 30–50 才不自相矛盾
+    band_upper = float(band['max'])
+    if score > band_upper:
+        next_mins = [float(t['min']) for n, t in thresholds.items()
+                     if float(t['min']) > band_min]
+        if next_mins:
+            band_upper = min(next_mins)
     # 换挡触发线：升档=目标档 min+margin；降档=原档 min−margin（与 apply_hysteresis 同式）
     if float(band['min']) > float(cur['min']):
         switch_line = float(band['min']) + float(margin)
@@ -172,7 +198,7 @@ def score_tier_mismatch_note(score, rating, market='a_stock', margin=None) -> st
         switch_txt = f'分数持续跌破 {switch_line:g} 分后，评级将在后续报告换至「{expected}」'
     return (
         f'评级口径说明：总分 {score:.1f} 位于「{expected}」档分数区间'
-        f'（{float(band["min"]):g}–{float(band["max"]):g} 分），当前评级「{rating}」与其不一致——'
+        f'（{band_min:g}–{band_upper:g} 分），当前评级「{rating}」与其不一致——'
         f'通常为评级迟滞保持态（021AG）：评级仅在分数坚决越过档位边界'
         f'（±{float(margin):g} 分迟滞带）时才换挡，避免边界抖动；{switch_txt}'
     )

@@ -188,5 +188,56 @@ class TestScoreTierMismatchNote:
         assert self._note(52.0, 'B+') == ''
 
     def test_band_outside_all_tiers_returns_empty(self):
-        assert self._note(150.0, '持有观望') == ''
+        # 低于最低档下边界（异常分数）：连续判定无档可归 → 无法判定返回 ''
         assert self._note(-5.0, '建议减仓') == ''
+
+    def test_gap_scores_are_annotated(self):
+        """021BW t4 F1 回归：档位表整数边界之间的表缝小数分数必须产出标注。
+
+        旧实现闭区间 [min, max] 对 49.7（49–50 表缝）返回 None → 标注静默缺失
+        （600519 实测）；连续判定（对齐 _map_rating）后必须命中档位。
+        """
+        gap_cases = [
+            (49.7, '持有观望', '建议减仓'),     # 49–50 表缝（600519 实测形态）
+            (49.99, '持有观望', '建议减仓'),
+            (64.9, '建议减仓', '持有观望'),     # 64–65 表缝
+            (79.9, '持有观望', '推荐买入'),     # 79–80 表缝
+            (29.5, '持有观望', '强烈建议卖出'),  # 29–30 表缝
+        ]
+        for score, rating, expected_tier in gap_cases:
+            note = self._note(score, rating)
+            assert note, f'{score}×{rating} 未产出标注'
+            assert expected_tier in note, f'{score} 未判入 {expected_tier}'
+            assert rating in note
+            assert '<' not in note
+
+    def test_gap_score_tier_for_score_continuous(self):
+        """_tier_for_score 连续口径与 _map_rating 全程一致（含表缝与边界值）。"""
+        from modules.rating_hysteresis import _tier_for_score
+        from modules.scoring_engine import RATING_THRESHOLDS, _map_rating
+
+        for score in (0, 29.5, 30, 48.0, 49.0, 49.7, 49.99, 50, 52.0, 64.9, 65,
+                      70, 79.9, 80, 95, 100):
+            assert _tier_for_score(score, RATING_THRESHOLDS) == _map_rating(score)[0], score
+        assert _tier_for_score(-5.0, RATING_THRESHOLDS) is None  # 异常分数不判定
+
+    def test_gap_score_interval_display_uses_switch_boundary(self):
+        """表缝分数的区间展示用连续换挡边界：49.7 显示 30–50，非自相矛盾的 30–49。"""
+        note = self._note(49.7, '持有观望')
+        assert '30–50 分' in note
+        assert '30–49' not in note
+
+    def test_in_table_score_interval_display_stable(self):
+        """档表内分数维持既有区间展示（min–max）——防 stored×live 注记文本漂移。"""
+        note = self._note(52.0, '建议减仓')
+        assert '50–64 分' in note  # 持有观望档表原展示，与 021BS 存量注记逐字一致
+
+    def test_hk_gap_score_annotated(self):
+        """港股 021R override 表缝（69–70）：69.9 属持有观望 × 推荐买入 → 标注在场。"""
+        note = self._note(69.9, '推荐买入', 'hk_stock')
+        assert note and '持有观望' in note and '<' not in note
+
+    def test_above_top_tier_annotated_as_top(self):
+        """连续口径下超高分数归最高档（与 _map_rating 同款）：150×持有观望 → 失配标注。"""
+        note = self._note(150.0, '持有观望')
+        assert note and '强烈推荐买入' in note
