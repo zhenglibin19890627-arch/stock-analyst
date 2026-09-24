@@ -144,6 +144,10 @@
   python scripts/audit_consistency_021bs.py --out PATH     # 指定报告输出路径
   python scripts/audit_consistency_021bs.py --no-report    # 只跑核对，不写 md
 
+⚠️ 存档路径（021BU t4 实测教训）：不带 --out 时默认覆写
+   docs/reports/021bs_audit_r1_20260922.md——正式归档或留档比对请务必带 --out
+   指定独立路径，避免覆盖历史档案。
+
 红线合规：全程只读（V8）；不触碰 advisor.generate_advice（B24——涉及其内
 的根因在报告中只给外层调和建议）；不重实现分数→评级映射（R7：仅消费
 config 阈值与 alert_engine.RATING_ORDER）；零网络；零 pip 新依赖。

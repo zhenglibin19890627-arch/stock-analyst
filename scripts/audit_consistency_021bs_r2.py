@@ -63,6 +63,11 @@ INFO 信息性 / OK 核对一致。
   python scripts/audit_consistency_021bs_r2.py            # 全量新维度审计并写报告
   python scripts/audit_consistency_021bs_r2.py --no-report
   python scripts/audit_consistency_021bs_r2.py --selftest # 合成用例自检（不触库）
+  python scripts/audit_consistency_021bs_r2.py --out PATH # 指定报告输出路径
+
+⚠️ 存档路径（021BU t4 实测教训）：不带 --out 时默认覆写
+   docs/reports/021bs_audit_r2_20260922.md——正式归档或留档比对请务必带 --out
+   指定独立路径，避免覆盖历史档案。
 
 红线合规：全程只读（mode=ro + 只读 GET 端点）；复用 R1 脚本的连接与取数面；
 不触碰 advisor.generate_advice（B24）/评分引擎 R7/classify_stage（021BQ 锁）。
