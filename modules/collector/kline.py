@@ -1,15 +1,21 @@
 """K线采集：腾讯主源 + mootdx 兜底 + 当日 bar 刷新 + 周期聚合。
 
 OPT-3（2026-09-07）自 modules/data_collector.py 纯搬移；语义锚点以函数 docstring 为准。
+021BW（2026-09-24）O5①：换手率旁路修复——腾讯 fqkline / mootdx 日K均不提供换手率
+字段，fetch_kline 入库自基线起对 turnover 硬编码 0（全库 25,541 行实测无一非零，
+即 t1 检验发现的「换手率字段失活」根因，非采集源切换丢失）。修复：东财日K
+（push2his kline/get，fields2 末位 f61=换手率）作「换手率旁路」按日对齐合并，
+价格五档仍全部来自腾讯/mootdx 主链（不引入新价格源）；旁路失败优雅降级
+（turnover 保持 0=缺失，不阻塞、不重试退避）；既有非零值不被 0 覆盖（只升不降）。
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
 from config import KLINE_DAYS
 from database.db_manager import get_connection
 from modules.collector._env import _CN_TZ, logger
-from modules.collector.http_client import _http_get, retry
+from modules.collector.http_client import _http_get, _http_get_em, retry
 from modules.collector.mootdx import (
     _ensure_kline_source_column,
     _fetch_kline_mootdx,
@@ -68,6 +74,97 @@ def _fetch_kline_tencent(symbol, market):
         df['涨跌幅'] = df['涨跌幅'].fillna(0)
 
     return df
+
+
+# ============================================================
+# 021BW O5①：换手率旁路（腾讯 fqkline / mootdx 均不提供该字段）
+# ============================================================
+# 诚实口径：raw_kline.turnover 语义为「换手率(%)」，0/负值=缺失（下游
+# bucket_turnover 等消费面同口径）；旁路只补该字段，不是价格源。
+
+_EM_KLINE_TURNOVER_URL = 'https://push2his.eastmoney.com/api/qt/stock/kline/get'
+_EM_KLINE_TURNOVER_MIN_COLS = 11  # fields2 固定列序：f51日期 … f61换手率（末位）
+
+# 250 根K线 ≈ 1 年 → 自然日窗口取 2 倍（500 天），覆盖腾讯主源 KLINE_DAYS 窗口
+_TURNOVER_LOOKBACK_DAYS = KLINE_DAYS * 2
+
+
+def _em_secid(symbol, market):
+    """股票代码 → 东财 secid（沪 1.、深 0.、港股 116.）；不支持返回 None（纯函数）。"""
+    if not symbol or not str(symbol).isdigit():
+        return None
+    symbol = str(symbol)
+    if market == 'hk_stock':
+        return f'116.{symbol}'
+    if market == 'a_stock' and len(symbol) == 6:
+        return f'{"1" if symbol.startswith("6") else "0"}.{symbol}'
+    return None
+
+
+def _parse_em_kline_turnover(payload):
+    """东财日K响应 → {'YYYY-MM-DD': 换手率%}（纯函数；0/负值=缺失不入表）。
+
+    实测 data.keys 为空，按 fields2 固定列序解析：末列 f61=换手率、首列 f51=日期。
+    """
+    out: dict = {}
+    data = (payload or {}).get('data') if isinstance(payload, dict) else None
+    klines = (data or {}).get('klines') or []
+    for line in klines:
+        parts = str(line).split(',')
+        if len(parts) < _EM_KLINE_TURNOVER_MIN_COLS:
+            continue
+        try:
+            tv = float(parts[-1])
+        except ValueError:
+            continue
+        if tv > 0:
+            out[parts[0]] = tv
+    return out
+
+
+def fetch_kline_turnover_em(symbol, market, lookback_days=None):
+    """换手率旁路：东财日K取 {'YYYY-MM-DD': 换手率%}（失败返回 {} 优雅降级）。
+
+    复用 _http_get_em（019X UA 池 / 019Z 全局最小间隔；max_retries=1 单轮封顶，
+    不走 30~60s 轮间退避——换手率是展示/检验维度，旁路失败不得拖慢主采集链）。
+    只读 GET，零写库；调用方负责入库与既有值保护。
+    """
+    secid = _em_secid(symbol, market)
+    if not secid:
+        return {}
+    days = int(lookback_days or _TURNOVER_LOOKBACK_DAYS)
+    beg = (datetime.now(_CN_TZ) - timedelta(days=days)).strftime('%Y%m%d')
+    params = {
+        'secid': secid,
+        'fields1': 'f1,f2,f3,f4,f5,f6',
+        'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
+        'klt': '101',  # 日K
+        'fqt': '1',    # 前复权（日期/换手率不受复权影响，与主源窗口对齐）
+        'beg': beg,
+        'end': '20500101',
+    }
+    try:
+        resp = _http_get_em(_EM_KLINE_TURNOVER_URL, params=params, max_retries=1)
+        return _parse_em_kline_turnover(resp.json())
+    except Exception as e:  # noqa: BLE001 —— 旁路失败零影响主链（诚实降级 0=缺失）
+        logger.warning(f'[{symbol}] 换手率旁路失败（turnover 保持缺失）: {e}')
+        return {}
+
+
+def _merge_turnover(df, turnover_map):
+    """按 日期 列把 {'YYYY-MM-DD': 换手率%} 合入 df['换手率']（纯函数）。
+
+    未命中行 / 非正值 → 0.0（缺失语义）；返回副本，不改入参 df。
+    """
+    if df is None or df.empty or not turnover_map:
+        return df
+    vals = []
+    for d in df['日期']:
+        v = turnover_map.get(str(d).split(' ')[0])
+        vals.append(float(v) if (v is not None and float(v) > 0) else 0.0)
+    out = df.copy()
+    out['换手率'] = vals
+    return out
 
 
 def _is_intraday_session(market='a_stock'):
@@ -246,12 +343,31 @@ def fetch_kline(symbol, market, force_full=False):
 
     try:
         _ensure_kline_source_column()
+        # 021BW O5①：换手率旁路合并（EM 日K f61；失败降级保持缺失，不阻塞主链）
+        try:
+            df = _merge_turnover(df, fetch_kline_turnover_em(symbol, market))
+        except Exception as e_tur:  # noqa: BLE001
+            logger.warning(f'[{symbol}] 换手率旁路合并异常(保持缺失): {e_tur}')
+
         conn = get_connection()
         cursor = conn.cursor()
+
+        # 021BW O5①：既有非零换手率只升不降（旁路失败日，历史真值不被 0 覆盖）
+        existing_turnover: dict = {}
+        for r in cursor.execute(
+            'SELECT trade_date, turnover FROM raw_kline '
+            'WHERE stock_id = ? AND turnover IS NOT NULL AND turnover > 0',
+            (stock_id,),
+        ).fetchall():
+            existing_turnover[str(r['trade_date'])[:10]] = float(r['turnover'])
 
         saved_count = 0
         for _, row in df.iterrows():
             trade_date = str(row['日期']).split(' ')[0]
+            # 换手率：旁路值优先；旁路缺失沿用库内既有非零值（只升不降），否则 0=缺失
+            to_val = float(row.get('换手率', 0) or 0)
+            if to_val <= 0:
+                to_val = existing_turnover.get(trade_date, 0.0)
             try:
                 cursor.execute(
                     """
@@ -268,7 +384,7 @@ def fetch_kline(symbol, market, force_full=False):
                         float(row.get('最低', 0) or 0),
                         float(row.get('成交量', 0) or 0),
                         float(row.get('成交额', 0) or 0),  # 腾讯接口不提供成交额（留空）；mootdx 有
-                        0,  # 换手率（同上）
+                        float(to_val or 0),  # 021BW O5①：换手率旁路值（0=缺失，不再硬编码丢失）
                         float(row.get('涨跌幅', 0) or 0),
                         kline_source,
                     ),

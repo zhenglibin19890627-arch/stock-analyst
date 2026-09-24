@@ -528,6 +528,49 @@ def price_advice_evidence_summary(market='a_stock'):
     }
 
 
+# ============================================================
+# 二·六、情绪代理检验现状（021BW O3：市场报告解读行——常量模板）
+# ============================================================
+# 依据：docs/reports/021bw_sentiment_plan_20260924.md（t1 检验，2026-09-24）。
+# 落点：_build_interpretation 末尾 neutral 行——回测域内自洽，不进个股报告/
+# 行动清单（021BR 分域契约：统计面≠指令面）；零触碰 generate_advice（B24）、
+# 零回灌评分（R7）。R20：A/H 各自独立成行，跨市场数字严禁互推。
+# 文案规则：禁裸 '<'（backtest.js interpLi 走 innerHTML 直插）；数字为 t1
+# 检验时点冻结值（行内标注日期），按批重跑 query_sentiment_evidence_021bw.py
+# 复核后改写本常量（唯一编辑点，报告页/看板同源同值）。
+SENTIMENT_EVIDENCE_NOTE = {
+    'a_stock': (
+        '情绪检验现状（021BW，2026-09-24，670条A股真实样本·T+5）：五类情绪代理'
+        '均未达入模型门槛（两侧各n≥20、分化≥15pp、跨档方向稳定，宁缺毋滥）。'
+        '新闻情绪：总体显著反向（负面58%对比正面42%，+17pp），但评级档内最大增量仅7.7pp'
+        '——已被021BC评分消化（消息面权重0.15已降至0.08），维持现状；'
+        '主力/超大单：减仓档内33pp/28pp单档不稳，列观察项；'
+        '散户：中小单与主力机械镜像（恒等式）非独立情绪源，「户数集中=收集」话术未获支持；'
+        '杠杆情绪：融资余额5日升34%对比降49%（差14.5pp距门槛一线、三档方向一致），观察项之首；'
+        '市场热度：量比+19pp但跨档方向翻转列观察项；换手率因采集字段断供曾不可检验，'
+        '021BW已修复采集写回并回补，待样本按月复核。'
+        '结论：情绪类因子当前均不满足入模型门槛，纪律与位置因子优先；'
+        '复核脚本 scripts/query_sentiment_evidence_021bw.py（按月重跑，数字随样本滚动更新）。'
+    ),
+    'hk_stock': (
+        '情绪检验现状（021BW，2026-09-24，140条港股真实样本）：零档内分化，且总体'
+        '方向与A股相反——港股情绪展示全部暂缓（R20：A/H独立，跨市场数字严禁互推）；'
+        '复核脚本 scripts/query_sentiment_evidence_021bw.py --market hk_stock。'
+    ),
+}
+
+
+def sentiment_evidence_note_for(market):
+    """市场报告「情绪代理检验现状」解读行数据源（021BW O3，纯函数）。
+
+    常量模板 SENTIMENT_EVIDENCE_NOTE 的唯一读取面；未知/缺省市场返回 None
+    （不加行——A股数字不得代表其他市场，R20）。零触碰库与网络。
+    """
+    if not market:
+        return None
+    return SENTIMENT_EVIDENCE_NOTE.get(market)
+
+
 class BacktestEngine:
     """M8 评级有效性监测引擎
 
@@ -1206,6 +1249,12 @@ class BacktestEngine:
                     f'小于其他档（{ot["mean"]:+.1f}%）——评级具备一定避损价值。',
                     'good',
                 )
+
+        # 021BW O3：情绪代理检验现状（透明说明行；常量模板，证据更新只改
+        # SENTIMENT_EVIDENCE_NOTE 一处；R20 分市场成行，未知市场不加行）
+        sentiment_note = sentiment_evidence_note_for(report.get('market'))
+        if sentiment_note:
+            add(sentiment_note, 'neutral')
 
         add('以上为历史回测统计解读，不构成投资建议。')
         # 020R-20/21：逐条观点 + 色调列表（前端卡片化逐条着色展示）

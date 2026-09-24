@@ -46,6 +46,15 @@ R1（scripts/audit_consistency_021bs.py，经 t2 断言化）重跑已确认 P0/
       数字副本（021BU O6 设计：证据元素一律读取面现算、零落库，防 stored-vs-live
       漂移——021BS N01 实锤教训）。发现形如「历史命中 xx%（n/m）」的存储副本
       = P2（反漂移观察）；其数字与现算基准不符 = P1（冻结快照已打架）。
+  N10 市场报告「情绪检验现状」行同源（021BW，2026-09-24；O3 透明说明）：
+      ①静态面——常量模板 SENTIMENT_EVIDENCE_NOTE 结构契约：A/H 分行互异
+      （R20 跨市场严禁互推，同文 = P1）、文案禁裸 '<'（backtest.js interpLi
+      innerHTML 直插，含 = P1）、a_stock 行结构锚点（门槛定义/结论句/复核
+      脚本指针）在场（丢失 = P1，防证据更新改写时静默失真）；
+      ②动态面——有样本市场的 /api/backtest/market-report interpretation_parts
+      必须恰含一行「情绪检验现状…」且与常量同源同值（缺失 = P2 应接未接；
+      重复/不同文 = P1 同源失真）；零样本市场报告必须无该行（诚实早退被
+      绕过 = P1）。
 
 分级口径与 R1 相同：P0 指令矛盾 / P1 表述误导 / P2 口径差异需标注 /
 INFO 信息性 / OK 核对一致。
@@ -178,7 +187,20 @@ def selftest():
           f'→ {"✓" if t4 else "✗"}')
     ok_all = ok_all and t4
 
-    print(f'[自检] 结果：{"全部通过（N09 规则可信）" if ok_all else "存在失败用例（规则需修订）"}')
+    # 用例5：N10 常量结构（021BW O3，不触库）——A/H 分行、禁裸 '<'、结构锚点
+    from modules.backtest_engine import SENTIMENT_EVIDENCE_NOTE as _SEN
+    from modules.backtest_engine import sentiment_evidence_note_for as _sen_for
+    t5 = (bool(_SEN.get('a_stock')) and bool(_SEN.get('hk_stock'))
+          and _SEN['a_stock'] != _SEN['hk_stock']
+          and all('<' not in v for v in _SEN.values())
+          and all(k in _SEN['a_stock'] for k in (
+              '入模型门槛', '纪律与位置因子优先', 'query_sentiment_evidence_021bw.py'))
+          and _sen_for('us_stock') is None and _sen_for(None) is None)
+    print(f'[自检] N10 情绪行常量结构（分行/禁裸小于号/锚点/未知市场不加行）: '
+          f'{"✓" if t5 else "✗"}')
+    ok_all = ok_all and t5
+
+    print(f'[自检] 结果：{"全部通过（N09/N10 规则可信）" if ok_all else "存在失败用例（规则需修订）"}')
     return ok_all
 
 
@@ -501,6 +523,67 @@ def main():
                     '观察即可；若后续批次再现，核对生成链是否新增证据落库点')
     if n09_scan == 0:
         ok('N09', '全部存量报告无落库命中率副本（O6 反落库守卫通过）')
+
+    # ---------- N10：市场报告「情绪检验现状」行同源（021BW O3，2026-09-24） ----------
+    from modules.backtest_engine import SENTIMENT_EVIDENCE_NOTE as _sen_note
+    from modules.backtest_engine import sentiment_evidence_note_for as _sen_note_for
+
+    # ①静态面：常量模板结构契约（禁裸 '<' / R20 分行 / 结构锚点）
+    n10_static = []
+    for _mk, _note in _sen_note.items():
+        if '<' in _note:
+            n10_static.append((_mk, '文案含裸小于号（interpLi innerHTML 直插，渲染风险）'))
+    _a10 = _sen_note.get('a_stock') or ''
+    _hk10 = _sen_note.get('hk_stock') or ''
+    if not _a10 or not _hk10:
+        n10_static.append(('常量', 'a_stock/hk_stock 行缺失（O3 常量模板被删改）'))
+    elif _a10 == _hk10:
+        n10_static.append(('R20', 'A/H 两行同文（跨市场数字互推风险）'))
+    else:
+        _missing = [k for k in ('入模型门槛', '纪律与位置因子优先',
+                                'query_sentiment_evidence_021bw.py') if k not in _a10]
+        if _missing:
+            n10_static.append(('a_stock', '结构锚点丢失：' + '、'.join(_missing)
+                               + '（证据更新改写常量时须保留门槛/结论句/复核脚本指针）'))
+    for _mk, _prob in n10_static:
+        add('N10', 'P1', f'全局（市场报告情绪行·{_mk}）', _prob,
+            '常量模板 SENTIMENT_EVIDENCE_NOTE 结构契约（021BW O3：禁裸小于号/A-H 分行/锚点保留）',
+            '情绪检验现状行结构失真（渲染安全或口径互推风险）',
+            'modules/backtest_engine.py SENTIMENT_EVIDENCE_NOTE', True,
+            '按 021BW O3 契约改写常量（唯一编辑点；改后同步 N10 selftest 用例）')
+
+    # ②动态面：live 市场报告内联（同源同值；零样本诚实早退不加行）
+    for _mk in ('a_stock', 'hk_stock'):
+        rep10 = (r1._get_json(client, f'/api/backtest/market-report?market={_mk}')
+                 or {}).get('report') or {}
+        expect10 = _sen_note_for(_mk)
+        parts10 = [p for p in (rep10.get('interpretation_parts') or [])
+                   if p.startswith('情绪检验现状')]
+        if (rep10.get('total') or 0) == 0:
+            if parts10:
+                add('N10', 'P1', f'全局（市场报告·{_mk}）',
+                    '零样本市场报告却带情绪检验行（早退路径被绕过）',
+                    'O3 设计：零样本早退不加行（诚实原则）',
+                    'modules/backtest_engine.py _build_interpretation 早退分支', True,
+                    '核对零样本早退分支是否在情绪行注入点之前返回')
+            else:
+                ok('N10', f'{_mk} 零样本报告无情绪行（诚实早退成立）')
+            continue
+        if len(parts10) == 1 and parts10[0] == expect10:
+            ok('N10', f'{_mk} 市场报告情绪行同源同值（live == 常量模板）')
+        elif len(parts10) == 0:
+            add('N10', 'P2', f'全局（市场报告·{_mk}）',
+                '有样本的市场报告缺「情绪检验现状」行（应接未接，降级展示）',
+                'O3 设计：解读路径末尾 neutral 行内联（透明说明交付物）',
+                'modules/backtest_engine.py _build_interpretation', True,
+                '核对 _build_interpretation 是否仍消费 sentiment_evidence_note_for')
+        else:
+            add('N10', 'P1', f'全局（市场报告·{_mk}）',
+                f'情绪行出现 {len(parts10)} 次'
+                + ('' if parts10[0] == expect10 else '且与常量不同文'),
+                'O3 设计：恰好一行且与常量同源同值（021BU 证据同源同款约束）',
+                'modules/backtest_engine.py _build_interpretation 注入点', True,
+                '核对行是否被重复添加或绕过常量另写文案')
 
     # ---------- 汇总 ----------
     sev = {}

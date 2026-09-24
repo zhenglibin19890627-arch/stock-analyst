@@ -1,5 +1,16 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-09-24] 021BW 情绪维度深化：市场报告「情绪检验现状」解读行 + 换手率字段断供修复回补（O3+O5①）
+
+对「根据情绪交易」的证据回答落地（t1 检验 docs/reports/021bw_sentiment_plan_20260924.md）：**五类情绪代理均不满足入模型门槛，纪律与位置因子优先**——零新增情绪机制、零权重/评分/classify_stage 改动（O1 不做、O2 观察项随月重跑复核、O4 行为机制不新增、O5② staleness 守卫只记录不修属 §6 域）。
+
+- **O3 市场报告「情绪检验现状」解读行**（`modules/backtest_engine.py`）：新常量模板 `SENTIMENT_EVIDENCE_NOTE`（a_stock/hk_stock 各一行，R20 分市场、文案禁裸 '<'）+ 纯函数 `sentiment_evidence_note_for(market)`（未知市场 None 不加行），`_build_interpretation` 末尾 neutral 行内联——回测中心「客观解读」卡直接展示，报告页/看板同源同值；内容为 t1 检验结论冻结值（标注日期+复核脚本指针 `scripts/query_sentiment_evidence_021bw.py`），证据更新只改常量一处。零触碰 generate_advice（B24，市场报告为回测域）、零回灌评分（R7）。
+- **O5① 换手率断供根因修复**（`modules/collector/kline.py`）：根因实锤——`fetch_kline` 入库自基线起对 turnover 硬编码 0（腾讯 fqkline 与 mootdx 日K均不返回该字段，全库 25,541 行实测无一非零，**非采集源切换丢失**）。修复：东财日K（push2his kline/get，fields2 末位 f61）作「换手率旁路」按日对齐合并——`_em_secid`/`_parse_em_kline_turnover`/`_merge_turnover` 纯函数 + `fetch_kline_turnover_em`（复用 `_http_get_em` 019Z 全局最小间隔，max_retries=1 单轮封顶不走 30~60s 退避，旁路失败零影响主采集链）；**既有非零换手率只升不降**（旁路失败日历史真值不被 0 覆盖，盘中刷新既有保护不变）；价格五档仍全部来自腾讯/mootdx（不引入新价格源，R2 语义不涉及）。诚实口径：0/负值=缺失（下游 bucket_turnover 同口径）。
+- **历史断供段回补**（新 `scripts/backfill_kline_turnover_021bw.py`）：与采集侧同源同函数，只填缺失绝不覆盖非零真值，写库前 `backup_database`（R11，失败即中止）；`--dry-run` 盘点 / `--pause` 防东财 WAF 频控 / 多轮失败重试（WAF 窗口式丢弃如实冷却续跑，幂等）。首轮回补 **15,159/25,541 行**（19/56 只，备份 `db_backup_20260924_113312_backfill_turnover_021bw.db`），WAF 频控致 37 只待续；节流续跑结果与回补后值域核验见实施报告 docs/reports/021bw_impl_20260924.md（回补后 **回测窗口 A股评级日换手率可用率 74.5%（505/678）**——t1 判「不可检验」的 S5a 换手率代理自此可检验；未齐部分随月度复核脚本滚动补齐）。
+- **审计断言化**（`scripts/audit_consistency_021bs_r2.py` 新 N10 规则 + selftest 用例5）：①静态面——SENTIMENT_EVIDENCE_NOTE 结构契约（A/H 分行互异=R20、禁裸 '<'、门槛/结论句/复核脚本三锚点在场）；②动态面——有样本市场的 market-report interpretation_parts 恰含一行且与常量同源同值（缺失 P2 应接未接/重复或不同文 P1），零样本市场诚实早退不加行（被绕过 P1）。
+- **O5③ 港股回测停更再确认**（只读复核，不修）：`ratings_history` 港股链路存活（最新 2026-09-23）而 `backtest_results` 港股行止于 2026-09-07——断点在**回测补算/触发链**而非评级生成，与 021BU 遗留判断一致，独立任务跟进。
+- **测试**：新增 `tests/test_sentiment_evidence_021bw.py` 27 例——O3 纯函数（分市场/未知市场 None/禁裸 '<'/五类代理+结论句+脚本指针锚点）与展示路径（market report 内联同源同值/neutral 色调/零样本早退）；O5① 纯函数（secid 9 参数化/解析缺失规则/合并不改入参）与采集路径（旁路值入库/EM 失败优雅降级不崩溃/既有真值只升不降/0 值可被旁路升级/不支持市场零请求）。终验 fast **1256 passed**（含 021BR 分域层级全绿）+ ruff 绿 + mypy 57 文件 0 错 + 红线 **28/28** + 审计 R1 重跑 P0=0/P1=2（与本轮基线持平，零新增）+ R2 selftest 全过（N10 在场）。
+
 ## [2026-09-24] 021BW 录流水费用实时预估：fee-estimate 端点 + 表单分列实时展示 + broker 字段生效（021BV 备忘 F-5）
 
 持仓页录入买卖流水时按 价格×数量×买卖方向×所属账户券商配置 实时估算费用并分列展示（佣金[含最低佣金规则]/印花税[仅卖出]/过户费[双边]/合计），盘中录入立见成本。方案见 docs/reports/021bw_fee_estimate_plan_20260924.md（t1）。**零写库零新表**（端点至多三条 SELECT）、零新依赖；B24/R7/classify_stage/R16 零触碰。
