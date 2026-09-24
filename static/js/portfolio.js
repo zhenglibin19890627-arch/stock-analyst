@@ -983,6 +983,95 @@
         return '#666';
     }
 
+    // ========== 021BW：录流水费用实时预估（GET /api/portfolio/fee-estimate） ==========
+    // 口径与落库自动估算同源（trade_fees，broker 优先/账户名兜底）；纯增强：
+    // 失败静默隐藏、绝不 alert、绝不阻断录入。applied_rules/broker_label 均为
+    // 服务端 config 派生文案（不含用户输入），可安全进 innerHTML；数字一律 toFixed。
+    var _feeEstTimer = null;
+    var _feeEstSeq = 0;          // 防慢响应回写旧值
+
+    function _feeEstHide() {
+        var box = document.getElementById('feeEstimateBox');
+        if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+    }
+
+    function scheduleFeeEstimate() {
+        // 编辑模式（PUT）无自动估算、佣金以手填为准 → 隐藏预估条防误导
+        if (_editingTradeId) { _feeEstHide(); return; }
+        if (_feeEstTimer) clearTimeout(_feeEstTimer);
+        _feeEstTimer = setTimeout(fetchFeeEstimate, 300);   // 防抖（同 _searchTimer 模式）
+    }
+
+    function fetchFeeEstimate() {
+        var box = document.getElementById('feeEstimateBox');
+        if (!box || !currentTradeStockId || _editingTradeId) return;
+        var tradeType = document.getElementById('tradeType').value;
+        var price = parseFloat(document.getElementById('tradePrice').value);
+        var qty = parseFloat(document.getElementById('tradeQty').value);
+        var amount = parseFloat(document.getElementById('tradeAmount').value);
+        var tAccSel = document.getElementById('tradeAccountSelect');
+        var params = '?trade_type=' + encodeURIComponent(tradeType) +
+            '&stock_id=' + encodeURIComponent(currentTradeStockId);   // 港股印花税口径差异大，建议携带
+        if (!isNaN(price) && price > 0) params += '&price=' + encodeURIComponent(price);
+        if (!isNaN(qty) && qty > 0) params += '&quantity=' + encodeURIComponent(parseInt(qty, 10));
+        if (!isNaN(amount) && amount > 0) params += '&amount=' + encodeURIComponent(amount);
+        if (tAccSel && tAccSel.value && tAccSel.value !== 'all') {
+            params += '&account_id=' + encodeURIComponent(tAccSel.value);
+        }
+
+        var seq = ++_feeEstSeq;
+        fetch('/api/portfolio/fee-estimate' + params)
+            .then(function(r) {
+                var status = r.status;
+                return r.json().then(function(d) { d._status = status; return d; });
+            })
+            .then(function(data) {
+                if (seq !== _feeEstSeq) return;              // 旧响应，丢弃
+                if (!data || data._status !== 200 || !data.success) { _feeEstHide(); return; }
+                renderFeeEstimate(data);
+            })
+            .catch(function() {
+                if (seq === _feeEstSeq) _feeEstHide();       // 预估失败不影响录入
+            });
+    }
+
+    function renderFeeEstimate(d) {
+        var box = document.getElementById('feeEstimateBox');
+        if (!box) return;
+        var fmt = function(v) { return (Number(v) || 0).toFixed(2); };
+        var html = '';
+        // 手填佣金提示：落库尊重手填值（分列仍可参考过户费/印花税）
+        var commissionInput = document.getElementById('tradeCommission');
+        if (commissionInput && String(commissionInput.value).trim() !== '') {
+            html += '<div style="color:#856404;margin-bottom:4px;">已手填佣金，落库以手填值为准</div>';
+        }
+        html += '<div><b>费用预估</b>' +
+            (d.broker_label ? '（' + d.broker_label + '）' : '') + '：' +
+            '佣金 ' + fmt(d.commission) + ' 元' +
+            ' ｜ 印花税 ' + fmt(d.stamp_tax) + ' 元' +
+            ' ｜ 过户费 ' + fmt(d.transfer_fee) + ' 元' +
+            (Number(d.misc_fee) > 0 ? ' ｜ 杂费 ' + fmt(d.misc_fee) + ' 元' : '') +
+            ' ｜ <b>合计 ' + fmt(d.total) + ' 元</b></div>';
+        (d.applied_rules || []).forEach(function(rule) {
+            html += '<div style="color:var(--text-3,#888);font-size:12px;">· ' + rule + '</div>';
+        });
+        html += '<div style="color:var(--text-3,#999);font-size:11.5px;">' + (d.estimation_note || '') + '</div>';
+        box.innerHTML = html;
+        box.style.display = 'block';
+    }
+
+    // 绑定（脚本 body 尾加载、#tradeModal 为静态标记，null-guard 直接绑定）
+    (function _bindFeeEstimateInputs() {
+        ['tradePrice', 'tradeQty', 'tradeAmount', 'tradeCommission'].forEach(function(id) {
+            var el = document.getElementById(id);
+            if (el) el.addEventListener('input', scheduleFeeEstimate);
+        });
+        ['tradeType', 'tradeAccountSelect'].forEach(function(id) {
+            var el = document.getElementById(id);
+            if (el) el.addEventListener('change', scheduleFeeEstimate);
+        });
+    })();
+
     function openTradeModal(stockId, stockName) {
         currentTradeStockId = stockId;
         document.getElementById('tradeStockName').textContent = stockName;
@@ -995,11 +1084,14 @@
         }
         document.getElementById('tradeModal').style.display = 'block';
         loadTrades(stockId);
+        _feeEstHide();          // 021BW：换股打开先清旧预估，再按当前表单值重算
+        scheduleFeeEstimate();
     }
 
     function closeTradeModal() {
         document.getElementById('tradeModal').style.display = 'none';
         currentTradeStockId = null;
+        _feeEstHide();          // 021BW：关闭即收起预估条
     }
 
     function loadTrades(stockId) {
@@ -1034,6 +1126,7 @@
     var _editingTradeId = null;
     function editTrade(tradeId, tradeType, price, qty, tradeDate, notes, commission, amount) {
         _editingTradeId = tradeId;
+        _feeEstHide();   // 021BW：编辑模式（PUT）无自动估算，隐藏预估条防误导
         document.getElementById('tradeType').value = tradeType;
         document.getElementById('tradePrice').value = price || '';
         document.getElementById('tradeQty').value = qty || '';
@@ -1063,6 +1156,7 @@
         btn.setAttribute('onclick', 'addTrade()');
         var cancelBtn = document.getElementById('cancelEditBtn');
         if (cancelBtn) cancelBtn.style.display = 'none';
+        scheduleFeeEstimate();   // 021BW：退出编辑模式，恢复预估条
     }
 
     function saveEditTrade() {
@@ -1232,6 +1326,7 @@
                 document.getElementById('tradeAmount').value = '';
                 document.getElementById('tradeCommission').value = '';
                 document.getElementById('tradeNotes').value = '';
+                scheduleFeeEstimate();   // 021BW：表单已清空 → 预估条回空态
                 loadTrades(currentTradeStockId);
                 loadHoldings();     // 新增流水后也刷新持仓列表
                 loadPortfolioGroups();

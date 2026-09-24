@@ -1,5 +1,16 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-09-24] 021BW 录流水费用实时预估：fee-estimate 端点 + 表单分列实时展示 + broker 字段生效（021BV 备忘 F-5）
+
+持仓页录入买卖流水时按 价格×数量×买卖方向×所属账户券商配置 实时估算费用并分列展示（佣金[含最低佣金规则]/印花税[仅卖出]/过户费[双边]/合计），盘中录入立见成本。方案见 docs/reports/021bw_fee_estimate_plan_20260924.md（t1）。**零写库零新表**（端点至多三条 SELECT）、零新依赖；B24/R7/classify_stage/R16 零触碰。
+
+- **分项纯函数**（`modules/trade_fees.py`）：新增 `estimate_trade_fee_items`（同参同口径，返回 commission/stamp_tax/transfer_fee/misc_fee/total/applied_rules/by_rate/broker_label——分项各自取整到分的 021BV 口径不变）；`estimate_trade_fee` 改为其 `total` 透传（单一事实源，既有签名与对外行为零变化，021BK 全部用例即回归网）。`applied_rules` 逐条中文说明按实际计价方式生成（按费率/按最低佣金/免5/仅卖出/双边/港股简化模型），文案禁裸 '<'（测试全口径扫描锁定）。
+- **方案 A 落地——broker 字段从此生效**：新增 `resolve_broker_profile_for_account(name, broker)`——broker 非空先按 TRADE_FEE_BROKERS keywords 匹配，未命中或为空回落账户名（= 既有 resolve_broker_profile 语义），双空默认档。预估端点与 POST 落库估算（`trades.api_add_trade`）共用该解析，防「预估免5、落库5元地板」分叉；存量账户 broker 为空串 → 兜底名匹配，行为零变化（021BK 回归锁定）。
+- **新端点 `GET /api/portfolio/fee-estimate`**（`blueprints/portfolio/trades.py`）：参数 trade_type（四枚举，非法 400）/ price / quantity（int 截断同 POST）/ amount（直填优先，与 POST L277 落库基数同式）/ account_id（缺省默认账户，不存在 404）/ stock_id（取 stocks.market 判 A股/港股——港股印花税 0.1% 双边 vs A股 0.05% 卖出单边，缺省按 a_stock）。amount≤0 返回 200 全零 + 空态文案「填入成交价和数量后显示预估」（前端防抖高频触发下无错误分支）；响应含分列/total/by_rate/broker_label/applied_rules/estimation_note（估算仅供参考，以次日交割单为准）。
+- **前端实时预估条**（`templates/index.html` 占位 div + `static/js/portfolio.js`）：表单 input/change + 300ms 防抖 + seq 自增防慢响应回写旧值；分列渲染「费用预估（券商档）：佣金/印花税/过户费[杂费]/合计」+ 规则小字；三条防误导状态——编辑模式（PUT 无自动估算）隐藏预估条、cancelEditTrade 恢复、手填佣金时顶部提示「落库以手填值为准」；dividend/红利补税直接渲染服务端全零与规则文案；fetch 失败静默隐藏（预估是增强不是闸门，绝不 alert 不阻断录入）；applied_rules/broker_label 均为服务端 config 派生文案（不含用户输入）可安全进 innerHTML，数字一律 toFixed。
+- **测试**：新增 `tests/test_fee_estimate_021bw.py` 28 例——分项纯函数（银河免5 分列/买卖差异/东财地板 by_rate=False/港股简化模型/dividend 全零/零金额空态/总额与 estimate_trade_fee 全参数矩阵等价锁/文案禁裸 '<' 扫描）；方案 A 四分支（broker 优先/未命中回落名/空回落名/双空默认档）；端点契约（两档券商/最低佣金触发/缺省默认档/港股/空态 200/0 与负值/price=abc 400/trade_type 非法 400/账户不存在 404/amount 直填优先/quantity 截断）；一致性锁（端点 total==estimate_trade_fee 矩阵、分项和==total、**「名含银河+broker=东财」账户 POST 落库佣金==端点预估 16.00**——任一端仍按名匹配即 19.53，锁死分叉）；零写库守卫（GET 前后 trade_records/holdings 行数不变）。终验 fast **1229 passed**（含 021BK 全绿）+ ruff 绿 + mypy 57 文件 0 错 + 红线 **28/28** + `node --check portfolio.js` 通过。
+- **备忘待办（需用户数据，本轮不动代码）**：①银河免5 交割单闭环——预估条（免5 文案）与交割单并排即天然核对面，闭环时顺带截图；②中免东财流水处置意向待用户明确。
+
 ## [2026-09-24] 021BV 银河费用修复：免5 裁定落地 + 分项舍入对齐 + 存量重估与持仓重算
 
 用户实测反馈"银河估算偏高"的修复落地（t1 诊断 docs/reports/021bv_fee_diag_20260923.md + 队长按用户预授权裁定情景 A；t4 盘中速览卡 v2 另见上方独立条目区/当日条目）。

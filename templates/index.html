@@ -486,6 +486,8 @@
             <input type="number" id="tradeCommission" step="0.01" min="0" placeholder="留空自动估算" style="min-width:110px;" title="留空=按你的券商费率自动估算（隔天可改实际值）；买入计入持仓成本，卖出扣减已实现盈亏">
             <input type="date" id="tradeDate">
         </div>
+        <!-- 021BW：录流水费用实时预估条（分列+适用规则；渲染/隐藏逻辑见 portfolio.js） -->
+        <div id="feeEstimateBox" style="display:none;margin:8px 0 4px;padding:8px 12px;background:var(--surface-2,#f8f9fa);border:1px solid var(--border,#e0e0e0);border-radius:6px;font-size:13px;"></div>
         <div class="form-row">
             <input type="text" id="tradeNotes" placeholder="备注（可选）" style="min-width:200px;">
             <button class="btn btn-primary btn-sm" id="addTradeBtn" onclick="addTrade()">添加记录</button>
