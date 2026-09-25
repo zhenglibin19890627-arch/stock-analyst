@@ -561,6 +561,71 @@
     var _MS_PRESET_LAST = 'ms_filter_presets_last';
     var _MS_PRESET_MAX = 10;
 
+    // ========== 021BW 备忘姊妹批（021BY 扩展）：内置选股方案（说明随选择显示） ==========
+    // 证据口径：021BU 位置分位（推荐买入低位 90%(9/10) vs 高位 42%(5/12)）＝系统最强条件化因子；
+    // 021BW：换手率区间无单调性、杠杆 6.3pp 观察项——凡无回测证据的方案均如实标注「偏好型」，不冒充证据。
+    var _MS_ALL_BUY_SIGNALS = ['macd_golden_above', 'macd_golden_below', 'kdj_golden_low', 'kdj_golden'];
+    function _msBuiltinFilters(extra) {
+        var f = {
+            exclude_st: true, mkt_cap_min: 0,
+            nmc_cap_min: '', nmc_cap_max: '',
+            turnover_min: '', turnover_max: '',
+            volume_ratio_min: '', volume_ratio_max: '',
+            change_pct_min: '', change_pct_max: '',
+            board: '', industry: ''
+        };
+        if (extra) Object.keys(extra).forEach(function(k) { f[k] = extra[k]; });
+        return f;
+    }
+    var _MS_BUILTIN_PRESETS = [
+        {
+            name: '低位金叉（证据优先）',
+            desc: '系统内最强证据方案——021BU 回测实证：「推荐买入」评级在低位置（60日分位≤40%）时历史命中 90%（9/10），高位仅 42%，位置分位是当前最强条件化因子。本方案只保留 低位+四类金叉 买点候选，并默认开启低位优先排序。适合：稳健左侧分批建仓参考。',
+            filters: _msBuiltinFilters(),
+            signals: _MS_ALL_BUY_SIGNALS.slice(),
+            window: 3,
+            pos_filter: 'low', pos_sort: true
+        },
+        {
+            name: '中低位金叉（放宽观察）',
+            desc: '低位方案的放宽版：位置放宽到 70% 以下（中低位+低位），候选更多、单票胜率相应摊薄。适合：想扩大观察池后再人工二次筛选的用法。',
+            filters: _msBuiltinFilters(),
+            signals: _MS_ALL_BUY_SIGNALS.slice(),
+            window: 3,
+            pos_filter: 'below70', pos_sort: true
+        },
+        {
+            name: '大盘蓝筹金叉（流动优先）',
+            desc: '总市值 ≥500 亿 + 排除 ST + 四类金叉。大盘股流动性好、波动相对小；注意：系统暂无市值因子回测证据，本方案属流动性偏好型，非证据方案。',
+            filters: _msBuiltinFilters({ mkt_cap_min: 500 }),
+            signals: _MS_ALL_BUY_SIGNALS.slice(),
+            window: 3,
+            pos_filter: '', pos_sort: false
+        },
+        {
+            name: '中小盘活跃金叉（弹性偏好）',
+            desc: '流通市值 ≤100 亿 + 换手率 ≥3% + 排除 ST——小流通盘+活跃换手，弹性大、波动也大。注意：换手率区间在本库回测无单调性证据（021BW），属偏好型方案，建议配合止损纪律使用。',
+            filters: _msBuiltinFilters({ nmc_cap_max: 100, turnover_min: 3 }),
+            signals: _MS_ALL_BUY_SIGNALS.slice(),
+            window: 3,
+            pos_filter: '', pos_sort: false
+        },
+        {
+            name: '全市场金叉基线',
+            desc: '最少过滤的基线方案：仅排除 ST + 四类金叉，看全貌用。适合：想不受任何偏好干扰、自己逐票判断的用法。',
+            filters: _msBuiltinFilters({ exclude_st: true }),
+            signals: _MS_ALL_BUY_SIGNALS.slice(),
+            window: 3,
+            pos_filter: '', pos_sort: false
+        }
+    ];
+    function _msBuiltinByName(nameWithStar) {
+        var nm = String(nameWithStar || '').replace(/^★/, '');
+        var hit = null;
+        _MS_BUILTIN_PRESETS.forEach(function(b) { if (b.name === nm) hit = b; });
+        return hit;
+    }
+
     function _msLoadPresets() {
         try {
             var p = JSON.parse(localStorage.getItem(_MS_PRESET_KEY) || '{}');
@@ -580,11 +645,22 @@
         var last = '';
         try { last = localStorage.getItem(_MS_PRESET_LAST) || ''; } catch (e) {}
         var names = Object.keys(presets).sort();
-        var html = '<option value="">选择方案…</option>' + names.map(function(n) {
-            return '<option value="' + n + '">' + n + '</option>';
+        // 021BW：内置方案置顶（★前缀，title=说明；内置不可删除），用户方案在下
+        var html = '<option value="">选择方案…</option>';
+        html += '<optgroup label="── 内置方案（含说明） ──">';
+        html += _MS_BUILTIN_PRESETS.map(function(b) {
+            return '<option value="★' + b.name + '" title="' + b.name + '">' + '★ ' + b.name + '</option>';
         }).join('');
+        html += '</optgroup>';
+        if (names.length) {
+            html += '<optgroup label="── 我的方案 ──">';
+            html += names.map(function(n) {
+                return '<option value="' + n + '">' + n + '</option>';
+            }).join('');
+            html += '</optgroup>';
+        }
         sel.innerHTML = html;
-        if (last && names.indexOf(last) >= 0) sel.value = last;   // 仅记忆方案名，不自动改值
+        if (last && (names.indexOf(last) >= 0 || last.indexOf('★') === 0)) sel.value = last;   // 仅记忆方案名，不自动改值
     }
 
     function msSavePreset() {
@@ -592,6 +668,7 @@
         if (name == null) return;               // 取消
         name = name.trim().slice(0, 20);
         if (!name) { alert('方案名不能为空'); return; }
+        if (name.indexOf('★') === 0) { alert('方案名不能用 ★ 开头（内置方案保留字）'); return; }
         var presets = _msLoadPresets();
         if (!presets[name] && Object.keys(presets).length >= _MS_PRESET_MAX) {
             alert('最多保存 ' + _MS_PRESET_MAX + ' 个方案，请先删除不用的方案再保存。');
@@ -600,10 +677,15 @@
         if (presets[name] && !confirm('方案「' + name + '」已存在，覆盖？')) return;
         var signals = [];
         document.querySelectorAll('#msSignalChecks input:checked').forEach(function(cb) { signals.push(cb.value); });
+        var posSel = document.getElementById('msPosFilter');
+        var posSort = document.getElementById('msPosSort');
         presets[name] = {
             filters: _msFilters(),
             signals: signals,
             window: parseInt(document.getElementById('msWindow').value, 10) || 3,
+            // 021BW：位置筛选/低位优先一并入方案（内置方案同款结构）
+            pos_filter: posSel ? posSel.value : '',
+            pos_sort: !!(posSort && posSort.checked),
             saved_at: new Date().toISOString().slice(0, 19).replace('T', ' ')
         };
         _msSavePresets(presets);
@@ -612,13 +694,7 @@
         if (sel) sel.value = name;
     }
 
-    function msApplyPreset() {
-        var sel = document.getElementById('msPresetSel');
-        if (!sel || !sel.value) return;
-        var p = _msLoadPresets()[sel.value];
-        if (!p) return;
-        try { localStorage.setItem(_MS_PRESET_LAST, sel.value); } catch (e) {}
-        var f = p.filters || {};
+    function _msApplyPresetData(f, signals, window_, posFilter, posSort) {
         function setVal(id, v) { var el = document.getElementById(id); if (el && v != null) el.value = v; }
         var cb = document.getElementById('msExSt'); if (cb) cb.checked = f.exclude_st !== false;
         setVal('msMktMin', f.mkt_cap_min); setVal('msNmcMin', f.nmc_cap_min); setVal('msNmcMax', f.nmc_cap_max);
@@ -637,11 +713,14 @@
         }
         // 信号勾选集 + 触发窗口
         var want = {};
-        (p.signals || []).forEach(function(k) { want[k] = 1; });
+        (signals || []).forEach(function(k) { want[k] = 1; });
         document.querySelectorAll('#msSignalChecks input[type="checkbox"]').forEach(function(cbx) {
             cbx.checked = !!want[cbx.value];
         });
-        if (p.window != null) setVal('msWindow', p.window);
+        if (window_ != null) setVal('msWindow', window_);
+        // 021BW：位置筛选/低位优先（内置方案带位置态；用户旧预设无此键则保持不动）
+        if (posFilter != null) setVal('msPosFilter', posFilter);
+        if (posSort != null) { var ps = document.getElementById('msPosSort'); if (ps) ps.checked = !!posSort; }
         // 行业下拉选项来自当前快照：已拉取时重建下拉并按预设行业过滤重渲（option 若重建后存在）
         if (_msRows.length) {
             msPopulateIndustries();
@@ -653,9 +732,30 @@
         }
     }
 
+    function msApplyPreset() {
+        var sel = document.getElementById('msPresetSel');
+        if (!sel || !sel.value) return;
+        try { localStorage.setItem(_MS_PRESET_LAST, sel.value); } catch (e) {}
+        var descEl = document.getElementById('msPresetDesc');
+        if (sel.value.indexOf('★') === 0) {
+            // 021BW：内置方案——应用 + 显示说明
+            var b = _msBuiltinByName(sel.value);
+            if (!b) return;
+            _msApplyPresetData(b.filters, b.signals, b.window, b.pos_filter, b.pos_sort);
+            if (descEl) { descEl.style.display = 'block'; descEl.textContent = '【' + b.name + '】' + b.desc; }
+            return;
+        }
+        var p = _msLoadPresets()[sel.value];
+        if (!p) return;
+        _msApplyPresetData(p.filters || {}, p.signals || [], p.window,
+            (p.pos_filter != null ? p.pos_filter : null), (p.pos_sort != null ? p.pos_sort : null));
+        if (descEl) descEl.textContent = '';
+    }
+
     function msDeletePreset() {
         var sel = document.getElementById('msPresetSel');
         if (!sel || !sel.value) { alert('请先在「方案」下拉中选中要删除的方案'); return; }
+        if (sel.value.indexOf('★') === 0) { alert('★ 内置方案不可删除（随系统版本更新）'); return; }
         var name = sel.value;
         if (!confirm('删除方案「' + name + '」？')) return;
         var presets = _msLoadPresets();

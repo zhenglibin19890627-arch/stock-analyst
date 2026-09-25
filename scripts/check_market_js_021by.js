@@ -183,5 +183,33 @@ sandbox._nextPrompt = null;
 vm.runInContext('msDeletePreset()', sandbox);
 check('回归：删除后预设清空', Object.keys(JSON.parse(store.ms_filter_presets_v1 || '{}')).length === 1);
 
+// ---- 021BW 姊妹批：内置选股方案（结构/说明/应用/删除守卫） ----
+const builtins = sandbox._MS_BUILTIN_PRESETS;
+check('内置方案 5 套', !!builtins && builtins.length === 5);
+check('内置方案名唯一且带说明', (() => {
+    const names = builtins.map(b => b.name);
+    return new Set(names).size === 5 && builtins.every(b => b.desc && b.desc.length > 20 && b.filters && Array.isArray(b.signals) && b.signals.length === 4);
+})());
+const _legalKeys = ['exclude_st', 'mkt_cap_min', 'nmc_cap_min', 'nmc_cap_max', 'turnover_min', 'turnover_max', 'volume_ratio_min', 'volume_ratio_max', 'change_pct_min', 'change_pct_max', 'board', 'industry'];
+check('内置 filters 键全部合法（12 键集）', builtins.every(b => Object.keys(b.filters).every(k => _legalKeys.indexOf(k) >= 0)));
+check('内置 signals 全为四类金叉键', builtins.every(b => b.signals.every(s => sandbox._MS_ALL_BUY_SIGNALS.indexOf(s) >= 0)));
+sandbox._sigChecks = ['macd_golden_above', 'macd_golden_below', 'kdj_golden_low', 'kdj_golden'].map(k => Object.assign(mkEl({ value: k }), { checked: false }));
+el('msPresetSel', { value: '' });
+el('msPosFilter', { value: '' });
+el('msPosSort', { checked: false });
+el('msPresetDesc', { textContent: '' });
+vm.runInContext('msRenderPresets()', sandbox);
+check('方案下拉含内置分组（★ 前缀）', elements['msPresetSel'].innerHTML.indexOf('★') >= 0);
+elements['msPresetSel'].value = '★低位金叉（证据优先）';
+vm.runInContext('msApplyPreset()', sandbox);
+check('内置应用：位置筛选=low', elements['msPosFilter'].value === 'low');
+check('内置应用：低位优先开', elements['msPosSort'].checked === true);
+check('内置应用：四类金叉全勾', sandbox._sigChecks.every(c => c.checked));
+check('内置应用：说明随选择显示（含 90% 证据）', elements['msPresetDesc'].textContent.indexOf('90%（9/10）') >= 0);
+let _alertMsg = '';
+sandbox.alert = function (m) { _alertMsg = m; };
+vm.runInContext('msDeletePreset()', sandbox);
+check('内置方案不可删除', _alertMsg.indexOf('不可删除') >= 0);
+
 console.log(fails === 0 ? 'ALL FRONTEND CHECKS PASSED (' + path + ')' : fails + ' CHECKS FAILED');
 process.exit(fails === 0 ? 0 : 1);

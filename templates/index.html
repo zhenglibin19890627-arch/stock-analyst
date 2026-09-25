@@ -251,12 +251,13 @@
             <label>行业 <select id="msIndustry" style="width:120px;"><option value="">全部</option></select></label>
             <span style="display:inline-flex;gap:6px;align-items:center;">
                 <label>方案
-                    <select id="msPresetSel" style="width:110px;" onchange="msApplyPreset()"><option value="">选择方案…</option></select>
+                    <select id="msPresetSel" style="width:150px;" onchange="msApplyPreset()"><option value="">选择方案…</option></select>
                 </label>
                 <button class="btn btn-sm" style="padding:3px 10px;font-size:12px;" onclick="msSavePreset()" title="保存当前全部筛选条件与信号勾选为本地方案">💾 存为方案</button>
                 <button class="btn btn-sm" style="padding:3px 10px;font-size:12px;" onclick="msDeletePreset()" title="删除当前选中的方案">🗑</button>
             </span>
         </div>
+        <div id="msPresetDesc" style="display:none;margin:6px 0 0;padding:8px 10px;border:1px solid var(--border-light,#e8e8e8);border-radius:6px;background:var(--surface-alt,#f6f8fa);font-size:12.5px;color:var(--text-2,#555);line-height:1.7;"></div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
             <button class="btn btn-primary btn-sm" id="msScanBtn" onclick="msRunCoarse()">🔍 扫描全市场（约1分钟）</button>
             <button class="btn btn-sm" id="msCoarseCsvBtn" style="display:none;" onclick="msExportCoarse()">⬇ 导出CSV</button>
