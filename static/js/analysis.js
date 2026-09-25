@@ -862,6 +862,57 @@
     /**
      * 渲染完整报告
      */
+    // ⚡ 共振信号条带（021BZ）：advise/report-latest 响应内联 resonance_snapshot
+    // （实时/快照两路径同源附着，零额外请求）。逐行徽标组：[方向 多/空]（多=红系/空=绿系
+    // A股惯例）+ [类型 label] + ★级 + [强弱 强/中/弱] + 触发日（时效）；空态诚实不硬造；
+    // 快照缺失（服务端降级置 None）时不渲染整块。徽标映射单一事实源在后端，此处纯渲染。
+
+    /** 文本转义防守（innerHTML 直插处沿 021BN/021BS 先例） */
+    function _resEsc(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function _renderResonanceStrip(snap) {
+        if (!snap) return '';
+        var rows = (snap.buy || []).concat(snap.sell || []);
+        var html = '<div class="card" id="resonanceStripCard">';
+        html += '<div class="card-title" style="font-size:15px;margin-bottom:6px;">⚡ 共振信号' +
+            '<span style="font-size:12px;color:var(--text-3,#888);font-weight:normal;margin-left:8px;">' +
+            '技术共振快照（scope=' + _resEsc(snap.scope || 'watchlist_offline') +
+            ' · 截止已采集K线 ' + _resEsc(snap.kline_upto || '—') +
+            ' · 触发窗口 ' + _resEsc(snap.window) + ' 个交易日）</span></div>';
+        if (!rows.length) {
+            html += '<div style="color:var(--text-3,#999);font-size:13px;padding:4px 0;">近 ' +
+                _resEsc(snap.window) + ' 个交易日内无共振触发。</div>';
+        } else {
+            rows.forEach(function(r) {
+                var dirStyle = r.direction === '空' ? 'background:#2e7d32;' : 'background:#c62828;';
+                var gradeStyle = { '强': 'background:#8e44ad;', '中': 'background:#e67e22;',
+                    '弱': 'background:#95a5a6;' }[r.grade] || 'background:#95a5a6;';
+                var stars = '';
+                var n = parseInt(r.stars, 10);
+                if (n > 0 && n <= 5) { for (var i = 0; i < n; i++) stars += '★'; }
+                var tim = r.timeliness ? '（' + _resEsc(r.timeliness) + '）' : '';
+                html += '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:4px 0;font-size:13px;">' +
+                    '<span style="' + dirStyle + 'color:#fff;border-radius:4px;padding:1px 8px;font-size:12px;" ' +
+                    'title="方向：多=买点共振，空=卖点/风险共振（A股红涨绿跌惯例）">' + _resEsc(r.direction || '—') + '</span>' +
+                    '<span style="font-weight:600;">' + _resEsc(r.label || '') + '</span>' +
+                    (stars ? '<span style="color:#e67e22;font-size:12px;" title="后端判定星级（双金叉/双死叉为动态星：同日触发4★、跨日同窗3★）">' + stars + '</span>' : '') +
+                    '<span style="' + gradeStyle + 'color:#fff;border-radius:4px;padding:1px 8px;font-size:12px;" ' +
+                    'title="强弱=共振星级（5★强/4★中/3★弱）的直接重标，仅统一表述口径，不构成回测验证">' + _resEsc(r.grade || '—') + '</span>' +
+                    '<span style="color:var(--text-2,#666);">触发 ' + _resEsc(r.trigger_date || '不详') + tim + '</span>' +
+                    (r.note ? '<span style="color:var(--text-3,#999);font-size:12px;width:100%;">' + _resEsc(r.note) + '</span>' : '') +
+                    '</div>';
+            });
+        }
+        html += '<div style="margin-top:8px;padding:6px 10px;background:var(--bg-light,#f5f7fa);' +
+            'border-left:3px solid #8e44ad;font-size:12px;color:var(--text-3,#888);line-height:1.6;">' +
+            _resEsc(snap.note || '') + '</div>';
+        html += '</div>';
+        return html;
+    }
+
     function renderFullReport(adviseData, klineData, stockId) {
         var container = document.getElementById('reportContent');
         var dims = adviseData.dimensions || {};
@@ -1188,6 +1239,10 @@
                 '方向可以并存，属正常分层而非矛盾；仓位与操作结论请以下方「🎯 操盘手建议」' +
                 '中「④ 操作矩阵」的分域结论为准。</div>';
         html += '</div>';
+
+        // 3.55 ⚡ 共振信号（021BZ）：当前有效共振（类型/强弱/方向/触发日；响应内联快照，
+        // 与操盘手联动解读 prose 相邻互证；独立条带不新开整卡，避免首屏膨胀）
+        html += _renderResonanceStrip(adviseData.resonance_snapshot);
 
         // 3.6 操盘手建议（2026-09-18）：阶段/主力/对策（异步填充，只读端点）
         // 021BS R2 N03：卡头副词随 021BR 分域契约统一——021BQ 时代「仓位动作跟评级走」

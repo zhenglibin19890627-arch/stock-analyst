@@ -57,7 +57,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 
 from database.db_manager import get_connection
@@ -693,12 +692,14 @@ def _res_date_desc(res: dict[str, Any] | None, upto: str | None) -> str:
     从 resonance['signals']（'label@date + ...'，market_screener 同源）提取最新
     触发日：今日触发→「触发于 X（今日）」；窗口内历史触发→「触发于 X
     （窗口内历史，非今日）」；解析失败→「触发日不详」。历史触发不得读起来像新信号。
+    021BZ：日期提取复用 market_screener.latest_trigger_date_of（同一正则规则
+    收敛为单一实现，行为等价替换，021BR 全部用例即回归网）。
     """
-    sig = str((res or {}).get('signals') or '')
-    dates = re.findall(r'@(\d{4}-\d{2}-\d{2})', sig)
-    if not dates:
+    from modules.market_screener import latest_trigger_date_of
+
+    latest = latest_trigger_date_of((res or {}).get('signals'))
+    if latest is None:
         return '触发日不详'
-    latest = max(dates)
     if upto and latest == upto:
         return f'触发于 {latest}（今日）'
     return f'触发于 {latest}（窗口内历史，非今日）'

@@ -311,12 +311,48 @@
 
     // 2026-09-07 共振重设计：4 组买点共振渲染顺序（死叉/超买/超卖类已删）
     var _MS_RES_ORDER = ['res_week_daily', 'res_bottom_reverse', 'res_zero_relay', 'res_double_golden'];
+    // 021BZ：图标/星级不再硬编码——星级与强弱读后端数据（修复双金叉跨日 3★ 仍画 4★ 的实况不符），
+    // 本表降级为纯 note 说明表（组头 label 优先读后端 res.label，note 仅作说明尾注与后备）。
     var _MS_RES_META = {
-        res_week_daily:     { icon: '⭐⭐⭐⭐⭐', note: '周线共振波段：周线MACD多头+日线金叉，中线波段结构' },
-        res_bottom_reverse: { icon: '⭐⭐⭐⭐⭐', note: '底部反转共振：底背离+KDJ低位金叉+放量阳线，左侧反转最强确认' },
-        res_zero_relay:     { icon: '⭐⭐⭐⭐⭐', note: '零轴上二次金叉：近15日MACD二次金叉+KDJ中位金叉，主升浪中继买点' },
-        res_double_golden:  { icon: '⭐⭐⭐⭐',   note: '双金叉共振：MACD系+KDJ系金叉同窗，同日触发更佳' }
+        res_week_daily:     { note: '周线共振波段：周线MACD多头+日线金叉，中线波段结构' },
+        res_bottom_reverse: { note: '底部反转共振：底背离+KDJ低位金叉+放量阳线，左侧反转最强确认' },
+        res_zero_relay:     { note: '零轴上二次金叉：近15日MACD二次金叉+KDJ中位金叉，主升浪中继买点' },
+        res_double_golden:  { note: '双金叉共振：MACD系+KDJ系金叉同窗，同日触发更佳' }
     };
+
+    // ---- 021BZ：共振徽标（类型/方向/强弱/触发日）——映射单一事实源在后端 ----
+
+    /** 星级数字→★串（纯展示；后端 stars 为唯一依据，>5 或缺失不画） */
+    function _msStarsText(stars) {
+        var n = parseInt(stars, 10);
+        return (n > 0 && n <= 5) ? new Array(n + 1).join('★') : '';
+    }
+
+    /** 强弱徽标（强/中/弱色阶；title 带诚实声明：星级重标非回测验证） */
+    function _msGradeBadge(grade) {
+        if (!grade) return '';
+        var st = { '强': 'background:#8e44ad;', '中': 'background:#e67e22;', '弱': 'background:#95a5a6;' }[grade]
+            || 'background:#95a5a6;';
+        return '<span style="' + st + 'color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;margin-right:4px;" ' +
+            'title="强弱=共振星级（5★强/4★中/3★弱）的直接重标，仅统一表述口径，不构成回测验证">' + grade + '</span>';
+    }
+
+    /** 方向徽标（多=红系/空=绿系，A股红涨绿跌惯例；在线扫描只产买点故通常为「多」） */
+    function _msDirBadge(dir) {
+        if (!dir) return '';
+        var st = { '多': 'background:#c62828;', '空': 'background:#2e7d32;' }[dir] || 'background:#888;';
+        return '<span style="' + st + 'color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;margin-right:4px;" ' +
+            'title="方向：多=买点共振，空=卖点/风险共振（卖侧在自选股巡检与报告页快照）">' + dir + '</span>';
+    }
+
+    /** 触发日单元格（独立列；时效小字——历史触发不读起来像新信号） */
+    function _msTriggerCell(res) {
+        var t = res.trigger_date || '—';
+        var tim = res.timeliness
+            ? ' <span style="font-size:11px;color:var(--text-3,#999);">(' + res.timeliness + ')</span>'
+            : '';
+        return '<td style="white-space:nowrap;">' + t + tim + '</td>';
+    }
 
     // ---- 021BY C1：位置分位（60日，与回测证据同口径）展示/筛选/排序 ----
 
@@ -429,20 +465,39 @@
                 return (h.resonances || []).some(function(x) { return x.key === resKey; });
             }));
             if (!group.length) return;
+            // 021BZ：组头星级/强弱数据驱动（读后端 stars/grade；双金叉同窗内 4★/3★ 混合时如实并列）
+            var gradeByStars = {};
+            var firstLabel = '';
+            group.forEach(function(h) {
+                (h.resonances || []).forEach(function(x) {
+                    if (x.key !== resKey) return;
+                    if (!firstLabel && x.label) firstLabel = x.label;
+                    if (x.stars != null && gradeByStars[x.stars] == null) gradeByStars[x.stars] = x.grade || '';
+                });
+            });
+            var starsDesc = Object.keys(gradeByStars).sort(function(a, b) { return b - a; });
+            var headStars = starsDesc.map(function(n) {
+                return _msStarsText(n) + (gradeByStars[n] ? '（' + gradeByStars[n] + '）' : '');
+            }).join(' / ');
+            var headLabel = firstLabel || (meta.note ? meta.note.replace(/：.*/, '') : resKey);
             html += '<div style="margin-bottom:10px;"><div style="font-weight:600;font-size:13px;margin-bottom:4px;">' +
-                '▸ ' + meta.icon + ' ' + meta.note.replace(/：.*/, '') + '（' + group.length + ' 只）' +
-                '<span style="font-weight:normal;color:var(--text-3,#999);font-size:12px;"> ' + meta.note + '</span></div>' +
-                '<table class="dash-table"><thead><tr><th>加入</th><th>代码</th><th>名称</th><th>共振构成</th><th>位置</th>' +
+                '▸ ' + (headStars ? headStars + ' ' : '') + headLabel + '（' + group.length + ' 只）' +
+                '<span style="font-weight:normal;color:var(--text-3,#999);font-size:12px;"> ' + (meta.note || '') + '</span></div>' +
+                '<table class="dash-table"><thead><tr><th>加入</th><th>代码</th><th>名称</th><th>共振构成</th><th>触发日</th><th>位置</th>' +
                 '<th>现价</th><th>涨跌%</th><th>量比</th><th>换手%</th><th>市值(亿)</th><th>行业</th></tr></thead><tbody>';
             group.forEach(function(h) {
                 var r = rowMap[h.symbol] || {};
                 var res = (h.resonances || []).filter(function(x) { return x.key === resKey; })[0] || {};
+                var starTxt = _msStarsText(res.stars);
                 html += '<tr><td>' + _msSelCell(h, r) + '</td><td>' + (r.code || '—') + '</td>' +
                     '<td>' + (h.name || r.name || '—') + _msNewFlag(h) + '</td>' +
-                    '<td style="font-size:12px;">' + (res.signals || '—') +
+                    '<td style="font-size:12px;">' + _msDirBadge(res.direction) + _msGradeBadge(res.grade) +
+                    (starTxt ? '<span style="color:#e67e22;font-size:11px;margin-right:4px;" ' +
+                     'title="后端判定星级（双金叉/双死叉为动态星：同日触发4★、跨日同窗3★）">' + starTxt + '</span>' : '') +
+                    (res.signals || '—') +
                     ((res.note || '').indexOf('（') >= 0 ? ' <span style="color:var(--text-3,#999);">' +
                      res.note.substring(res.note.indexOf('（')) + '</span>' : '') + '</td>' +
-                    _msPosCell(h) + _msRowCells(r, h) + '</tr>';
+                    _msTriggerCell(res) + _msPosCell(h) + _msRowCells(r, h) + '</tr>';
             });
             html += '</tbody></table></div>';
         });
@@ -800,20 +855,26 @@
         _msDownloadCsv('粗筛结果', out);
     }
 
-    /** 信号结果导出：位置筛选后全集（含信号/共振/位置列；不受「只看共振」影响） */
+    /** 信号结果导出：位置筛选后全集（含信号/共振/徽标/位置列；不受「只看共振」影响） */
     function msExportSignals() {
         var hits = _msPosFilteredHits();
         if (!hits.length) { alert('暂无可导出的信号结果，请先完成第②步扫描'); return; }
         var rowMap = {};
         _msRows.forEach(function(r) { rowMap[r.symbol] = r; });
-        var out = [['代码', '名称', '命中信号', '买点共振', '位置', '位置分位%', '现价', '涨跌%',
+        var out = [['代码', '名称', '命中信号', '买点共振', '共振强弱', '方向', '触发日', '位置', '位置分位%', '现价', '涨跌%',
                     '量比', '换手%', '市值(亿)', '行业', '行业资金背景', '新命中']];
         hits.forEach(function(h) {
             var r = rowMap[h.symbol] || {};
             var sig = (h.matches || []).map(function(m) { return m.label || m.signal; }).join('；');
-            var res = (h.resonances || []).map(function(x) {
-                return x.signals + (x.stars ? '(' + x.stars + '星)' : '');
+            var resList = h.resonances || [];
+            // 021BZ：共振串带类型/星级/强弱/方向/触发日（后端字段驱动，缺失自动省略不硬造）
+            var res = resList.map(function(x) {
+                var star = x.stars ? '(' + x.stars + '星' + (x.grade ? '·' + x.grade : '') +
+                    (x.direction ? '·' + x.direction : '') + ')' : '';
+                var tri = x.trigger_date ? ' 触发' + x.trigger_date : '';
+                return (x.label || '') + star + (x.signals ? '：' + x.signals : '') + tri;
             }).join('；');
+            var res0 = resList[0] || {};
             var bg = h.industry_flow_bg;
             var bgTxt = '';
             if (bg && bg.main_net != null) {
@@ -822,6 +883,7 @@
                         : (bg.streak_days < 0 ? ' 连出' + Math.abs(bg.streak_days) + '日' : ''));
             }
             out.push([r.code, h.name || r.name, sig, res,
+                res0.grade || '', res0.direction || '', res0.trigger_date || '',
                 h.pos_band === 'low' ? '低位' : (h.pos_band === 'high' ? '高位' : (h.pos_band === 'mid' ? '中位' : '')),
                 h.pos_pctile != null ? Math.round(h.pos_pctile * 100) : '',
                 r.price, r.change_pct, r.volume_ratio, r.turnover, r.mkt_cap,

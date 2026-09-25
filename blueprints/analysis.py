@@ -401,6 +401,49 @@ def _attach_backtest_evidence(result, stock_id):
         result.setdefault('price_advice_evidence', None)
 
 
+def _attach_resonance_snapshot(result, stock_id):
+    """021BZ：报告响应附加「当前有效共振」快照（读取面离线复算、零网络零写库；B24 合规外层落点）。
+
+    复用 market_screener 自选股离线复算链（_read_watchlist_klines +
+    compute_watchlist_signal_result / compute_watchlist_sell_result，毫秒级）：
+    买/卖两侧各至多一条（检测器取最高档），逐条经 resonance_view 附统一徽标
+    数据（类型/方向/强弱/触发日/时效）。口径随行：scope=watchlist_offline +
+    window=3 + kline_upto/kline_count + 强弱分级诚实声明（星级重标非回测验证）。
+    与在线扫描端点同一映射（单一事实源在 market_screener 展示层）。
+    快照属增强展示：失败静默降级（键置 None），不阻塞报告主流程。
+    """
+    try:
+        from modules.market_screener import (
+            _read_watchlist_klines,
+            compute_watchlist_sell_result,
+            compute_watchlist_signal_result,
+            resonance_grade_note,
+            resonance_view,
+        )
+
+        window = 3
+        conn = get_connection()
+        try:
+            daily, weekly = _read_watchlist_klines(conn.cursor(), stock_id)
+        finally:
+            conn.close()
+        upto = str(daily[-1]['date']) if daily else None
+        buy_item = compute_watchlist_signal_result(daily, weekly, window=window)
+        sell_item = compute_watchlist_sell_result(daily, weekly, window=window)
+        result['resonance_snapshot'] = {
+            'scope': 'watchlist_offline',
+            'window': window,
+            'kline_upto': upto,
+            'kline_count': buy_item.get('kline_count'),
+            'buy': [resonance_view(r, upto) for r in (buy_item.get('resonances') or [])],
+            'sell': [resonance_view(r, upto) for r in (sell_item.get('sell_resonances') or [])],
+            'note': resonance_grade_note(kline_upto=upto, window=window),
+        }
+    except Exception as e:  # noqa: BLE001 —— 快照缺失不影响报告主数据
+        logging.getLogger(__name__).warning(f'[021BZ] 共振快照计算失败 stock_id={stock_id}: {e}')
+        result.setdefault('resonance_snapshot', None)
+
+
 @bp.route('/api/stocks/<int:stock_id>/analyze', methods=['POST'])
 def api_analyze_stock(stock_id):
     """执行四维分析引擎评分（统一走 advisor.generate_advice 入口，与每日报告一致）"""
@@ -503,6 +546,8 @@ def _enrich_advice_result(stock_id, result):
     _attach_score_tier_note(result)
     # 021BU：回测证据三件套（评级徽章/位置注记/价格基准，与看板同源同值）
     _attach_backtest_evidence(result, stock_id)
+    # 021BZ：当前有效共振快照（类型/强弱/方向/触发日；离线复算零网络零写库）
+    _attach_resonance_snapshot(result, stock_id)
     # 2026-09-09：上一轮评分快照（总分+四维分对比展示）——实时路径当前报告日期=今天
     result['prev_report'] = _prev_report_snapshot(
         stock_id, datetime.now(_CN_TZ).strftime('%Y-%m-%d')
@@ -829,6 +874,8 @@ def api_get_report_latest(stock_id):
     result['risk_warnings'] = _parse_markdown_risks(row['markdown_content'])
     # 021BU：回测证据三件套（快照路径与实时路径同源；读取面现算零落库）
     _attach_backtest_evidence(result, stock_id)
+    # 021BZ：当前有效共振快照（与实时路径同源同构；存量报告读取路径现算即刻带块）
+    _attach_resonance_snapshot(result, stock_id)
 
     return jsonify(result)
 

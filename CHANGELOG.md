@@ -1,5 +1,15 @@
 # 变更日志 (CHANGELOG)
 
+## [2026-09-25] 021BZ 共振类型与强弱显性化：强弱分级纯标注映射 + 选股/报告双处统一展示
+
+共振库（买侧 4 组/卖侧平行库 3 组）星级与类型显性化落地（方案 docs/reports/021bz_resonance_plan_20260925.md，实施 docs/reports/021bz_impl_20260925.md）：**分级=星级重标的纯标注映射非新增证据，检测器输出契约零变化，零新增请求零写库**；B24 generate_advice 逐行未动、R7/classify_stage 零触碰、在线扫描只产买点边界不动。终验 pytest fast **1316 passed**（基线 1286+新增 30 零回归）+ ruff/mypy 57 文件 0 错 + 红线 **28/28** + 审计 R1/R2 重跑 P0/P1 零新增 + node --check 两 JS 通过。
+
+- **展示层纯函数**（`modules/market_screener.py` 新段）：`RESONANCE_GRADE`（5★强/4★中/3★弱）+ `strength_grade_for`（未知/非整星级 None 不硬造）+ `direction_label_for`（bull→多/bear→空）+ `latest_trigger_date_of`（signals 字串 @date 取 max，单一实现）+ `resonance_view`（浅拷贝 additive grade/direction/trigger_date/timeliness，时效对比 kline_upto：今日/窗口内历史）+ `GRADE_NOTE_KEY`/`resonance_grade_note`（星级重标诚实声明，文案禁裸 '<' 入测试）。契约锁测试锁定 detect_*/compute_watchlist_* 输出键集零变化。
+- **选股侧**：`run_signal_chunk` 附 `kline_upto`（K线在手零新增请求）；scan-signals / watchlist-signals / watchlist-sell-signals 三端点共振条目附统一徽标数据（响应组装层 additive）。`static/js/market.js`：**修复 G1 实况不符**——`_MS_RES_META` 硬编码 ⭐ 图标删除，组头星级/强弱改读后端 stars/grade（双金叉跨日 3★ 不再误画 4★，同窗混合星级如实并列）；行内新增方向徽标（多=红/空=绿 A股惯例）+ 强弱徽标（紫/橙/灰色阶，与方向红绿及回测证据徽章分栏）+ 独立触发日列（含时效小字）；CSV 增「共振强弱/方向/触发日」三列；「只看共振」与排序契约零改动。
+- **报告侧方案 A**（`blueprints/analysis.py`）：`_attach_resonance_snapshot` 与 021BU `_attach_backtest_evidence` 同位同型——复用 `_read_watchlist_klines`+`compute_watchlist_signal/sell_result` 离线复算（零网络零写库毫秒级），产出 `resonance_snapshot`（scope/window/kline_upto/kline_count/buy/sell/note），实时挂 `_enrich_advice_result`、快照挂 report-latest 组装尾部——**两路径键同构同源（测试硬断言），存量报告读取路径现算即刻带块**；失败静默降级键置 None。`static/js/analysis.js` 新增「⚡ 共振信号」条带（趋势罗盘与操盘手建议卡之间，内联数据零额外请求）：[方向][类型][★级][强弱]+触发日（时效）徽标行、空态诚实「近 N 个交易日内无共振触发」、脚注分级声明+口径行、动态文本转义防守；快照降级不渲染整块。
+- **行为等价收敛**（`modules/trader_advisor.py`）：`_res_date_desc` 日期提取改复用 `latest_trigger_date_of`（同一正则收敛单一实现，021BR 三态文案逐字不变，既有用例即回归网）。
+- **测试**：新增 `tests/test_resonance_display_021bz.py` 30 例——纯函数映射边界/方向/触发日/视图 additive/声明禁裸 '<'；契约锁（检测器键集恰等+chunk 既有键+kline_upto additive）；三扫描端点徽标数据；/advise 与 /report-latest 快照在场+两路径同构+同源同值硬断言+无K线诚实降级；_res_date_desc 行为等价。
+
 ## [2026-09-24] 021BW 第二轮修复（t4）：迟滞标注表缝修复（F1 P1）+ A股回测样本补跑（F2）
 
 按 t3 复审发现全清（docs/reports/021bw_fix_impl_20260924.md）：F1（P1）修复＋F2（P2）零代码补跑清零，终验 **审计 R1/R2 双零 P0/P1** + pytest fast **1269 passed** + ruff/mypy/红线 28/28 全绿。

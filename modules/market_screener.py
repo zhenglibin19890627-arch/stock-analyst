@@ -1013,6 +1013,89 @@ def scan_watchlist_sell_signals(stock_ids=None, signals=None, window=3,
 
 
 # ================================================================
+# 021BZ 共振展示层（强弱分级 = 星级重标的纯标注映射，非新增证据）
+#   职责：把 detect_* 输出（stars/kind/signals 字串）翻译成统一徽标数据
+#   （类型 label / 方向 多空 / 强弱 强中弱 / 触发日 / 时效），供选股结果、
+#   报告页共振快照与前端渲染消费同一份映射（单一事实源在后端）。
+#   边界：本层只读不改——检测器输出键集零变化、不回写库定义、不新增证据；
+#   分级是 5★/4★/3★ 的表述重标，不构成对信号胜率的回测验证（诚实原则）。
+# ================================================================
+
+# 星级→强弱分级（纯标注映射）：5★强 / 4★中 / 3★弱；库内无其他星级
+RESONANCE_GRADE = {5: '强', 4: '中', 3: '弱'}
+
+# 强弱分级诚实声明（模板；{kline_upto}/{window} 由 resonance_grade_note 填充）。
+# 文案禁裸 '<'（一律 ≥/≤/文字表述），入测试扫描（021BW N10 同款手法）。
+GRADE_NOTE_KEY = (
+    '强弱分级说明：强/中/弱为共振星级（5★/4★/3★）的直接重标，仅统一表述口径，'
+    '不构成对信号胜率的回测验证。信号为快照参考口径：基于已采集K线离线复算，'
+    '截止 {kline_upto}（触发窗口 {window} 个交易日）；在线扫描为腾讯K线现拉口径。'
+    '双金叉/双死叉为动态星级：同日触发 4★、跨日同窗 3★。不构成投资建议。'
+)
+
+# 触发日期提取规则（与 trader_advisor._res_date_desc 同一正则；共享后单一实现）
+_TRIGGER_DATE_RE = re.compile(r'@(\d{4}-\d{2}-\d{2})')
+
+
+def strength_grade_for(stars):
+    """星级→强弱分级标注（5★强/4★中/3★弱）；未知/缺失/非整星级→None（不硬造）。"""
+    if stars is None or isinstance(stars, bool):
+        return None
+    try:
+        s = int(stars)
+    except (TypeError, ValueError):
+        return None
+    if s != stars:          # 非整星级（如 4.5）与数字字符串不硬造
+        return None
+    return RESONANCE_GRADE.get(s)
+
+
+def direction_label_for(kind):
+    """kind→方向标注（bull→多 / bear→空）；未知→None（不硬造）。"""
+    if kind == 'bull':
+        return '多'
+    if kind == 'bear':
+        return '空'
+    return None
+
+
+def latest_trigger_date_of(signals_str):
+    """signals 字串（'label@date + ...'）内最新触发日；空/无日期→None。
+
+    提取规则与 trader_advisor._res_date_desc 同源（本函数为其单一实现，
+    021BZ 起两处共用）；多日期取 max（最新命中）。"""
+    dates = _TRIGGER_DATE_RE.findall(str(signals_str or ''))
+    return max(dates) if dates else None
+
+
+def resonance_grade_note(kline_upto=None, window=3):
+    """强弱分级诚实声明（填充口径占位；kline_upto 缺失时以「—」占位不硬造）。"""
+    return GRADE_NOTE_KEY.format(kline_upto=kline_upto or '—', window=window)
+
+
+def resonance_view(res, kline_upto=None):
+    """共振条目→展示视图：原条目浅拷贝 + 追加 {grade,direction,trigger_date,
+    timeliness} 键（additive，不改原键集、不动入参对象）。
+
+    timeliness：trigger_date == kline_upto →「今日」；早于 →「窗口内历史，非今日」
+    （历史触发不得读起来像新信号，021BR 语义）；任一缺失 → None。
+    非法入参（非 dict）→ None。
+    """
+    if not isinstance(res, dict):
+        return None
+    view = dict(res)
+    view['grade'] = strength_grade_for(view.get('stars'))
+    view['direction'] = direction_label_for(view.get('kind'))
+    trigger = latest_trigger_date_of(view.get('signals'))
+    view['trigger_date'] = trigger
+    if trigger and kline_upto:
+        view['timeliness'] = '今日' if trigger == str(kline_upto) else '窗口内历史，非今日'
+    else:
+        view['timeliness'] = None
+    return view
+
+
+# ================================================================
 # 快照存取 + 筛选引擎
 # ================================================================
 
@@ -1265,6 +1348,8 @@ def run_signal_chunk(entries, signals=None, window=3):
                                 'matches': matches,
                                 'pos_pctile': pos_info['pos_pctile'],
                                 'pos_band': pos_info['pos_band'],
+                                # 021BZ：K线在手零新增请求，附口径字段供时效徽标与快照声明
+                                'kline_upto': str(klines[-1]['date']) if klines else None,
                                 'resonances': detect_resonances(matches, klines, weekly)})
         except Exception as e:  # noqa: BLE001
             errors.append({'symbol': sym, 'error': str(e)[:120]})

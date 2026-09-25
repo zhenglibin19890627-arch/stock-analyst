@@ -148,9 +148,11 @@ def api_market_scan_signals():
     021BY C2：响应附行业资金流软联动（读库零网络，匹配不上不硬造）——
     每只命中股附 industry_flow_bg（东财板块背景，与看板同型同源），
     批统计 industry_match_hit/total 供观察新浪↔东财行业名匹配率。
+    021BZ：每条共振附统一徽标数据（类型/方向/强弱/触发日/时效；
+    resonance_view additive 映射，检测器输出键集零变化）。
     """
     try:
-        from modules.market_screener import run_signal_chunk
+        from modules.market_screener import resonance_view, run_signal_chunk
 
         body = request.get_json(silent=True) or {}
         entries = body.get('entries') or []
@@ -158,6 +160,12 @@ def api_market_scan_signals():
         window = int(body.get('window') or 3)
         window = min(max(window, 1), 10)
         result = run_signal_chunk(entries, signals=signals, window=window)
+        # 021BZ：共振条目→展示视图（response 组装层 additive；kline_upto 已由 chunk 附上）
+        for item in result.get('results') or []:
+            upto = item.get('kline_upto')
+            item['resonances'] = [
+                resonance_view(r, upto) for r in (item.get('resonances') or [])
+            ]
         # 021BY C2：行业资金流 × 候选软联动（读库已落表，零外部请求）
         bg_map = _scan_industry_bg_map()
         if bg_map and result.get('results'):
@@ -267,9 +275,10 @@ def api_market_watchlist_signals():
     Query: ?window=3（触发窗口1~10）&stock_ids=1,2,3（缺省=全部 active 自选股）
     响应 scope=watchlist_offline：结果属"快照参考"口径，截止最新已采集K线
     （kline_upto），与第②段在线扫描（腾讯K线）存在 EMA 预热长度差异。
+    021BZ：每条共振附统一徽标数据（resonance_view additive，与在线扫描同源）。
     """
     try:
-        from modules.market_screener import scan_watchlist_signals
+        from modules.market_screener import resonance_view, scan_watchlist_signals
 
         try:
             window = int(request.args.get('window') or 3)
@@ -290,6 +299,12 @@ def api_market_watchlist_signals():
                 stock_ids = None
 
         result = scan_watchlist_signals(stock_ids=stock_ids, window=window)
+        # 021BZ：共振条目→展示视图（响应组装层 additive，检测器输出零变化）
+        for item in result.get('results') or []:
+            upto = item.get('kline_upto')
+            item['resonances'] = [
+                resonance_view(r, upto) for r in (item.get('resonances') or [])
+            ]
         return jsonify({'success': True, **result})
     except Exception as e:  # noqa: BLE001
         return jsonify({'success': False, 'error': f'{e!s}',
@@ -310,9 +325,10 @@ def api_market_watchlist_sell_signals():
     零网络——100 只毫秒级完成。Query: ?window=3（触发窗口1~10）&stock_ids=1,2,3
     （缺省=全部 active 自选股）。响应 scope=watchlist_offline + side=sell：
     快照参考口径，截止最新已采集K线（kline_upto）。
+    021BZ：每条卖侧共振附统一徽标数据（resonance_view additive，kind=bear→空）。
     """
     try:
-        from modules.market_screener import scan_watchlist_sell_signals
+        from modules.market_screener import resonance_view, scan_watchlist_sell_signals
 
         try:
             window = int(request.args.get('window') or 3)
@@ -333,6 +349,12 @@ def api_market_watchlist_sell_signals():
                 stock_ids = None
 
         result = scan_watchlist_sell_signals(stock_ids=stock_ids, window=window)
+        # 021BZ：卖侧共振条目→展示视图（响应组装层 additive，方向=空）
+        for item in result.get('results') or []:
+            upto = item.get('kline_upto')
+            item['sell_resonances'] = [
+                resonance_view(r, upto) for r in (item.get('sell_resonances') or [])
+            ]
         return jsonify({'success': True, **result})
     except Exception as e:  # noqa: BLE001
         return jsonify({'success': False, 'error': f'{e!s}', 'side': 'sell',
