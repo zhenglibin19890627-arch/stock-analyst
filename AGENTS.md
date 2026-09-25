@@ -37,7 +37,7 @@
 | 入口 | 路径 | 说明 |
 |------|------|------|
 | **Flask 主应用** | `app.py` | 应用入口（约 130 行）：环境初始化、蓝图注册、首页路由、启动逻辑。启动后监听 `127.0.0.1:5000`。 |
-| **路由蓝图** | `blueprints/` | API 路由按业务域拆分（自 2026-08-13）：`watchlist`（自选股/分组/采集）、`analysis`（分析/评级/v5）、`portfolio`（持仓/流水/成本）、`report`（日报）、`system`（健康/统计）、`backtest`（回测/优化）、`export`（导出）、`index_ratings`（指数）、`alerts`（预警）；共享展示层工具在 `_utils.py`。`portfolio` 自 021BO（2026-09-21）拆为**包**：`portfolio/__init__.py` 为 facade（bp + config 风控常量 + 再导出），路由子模块按域分文件（_scope 账户助手 / accounts / holdings / watchlist_scores / trades / controls / market）；config 风控常量在调用点经 facade 取值，测试 `monkeypatch.setattr(blueprints.portfolio, 'TRADE_T1_LOCK_ENABLED', ...)` 语义保持。 |
+| **路由蓝图** | `blueprints/` | API 路由按业务域拆分（自 2026-08-13）：`watchlist`（自选股/分组/采集）、`analysis`（分析/评级/v5）、`portfolio`（持仓/流水/成本）、`report`（日报）、`system`（健康/统计）、`backtest`（回测/优化）、`export`（导出）、`index_ratings`（指数）、`alerts`（预警）；共享展示层工具在 `_utils.py`。`portfolio` 自 021BO（2026-09-21）拆为**包**：`portfolio/__init__.py` 为 facade（bp + config 风控常量 + 再导出），路由子模块按域分文件（_scope 账户助手 / accounts / holdings / watchlist_scores / trades / controls / market）；config 风控常量在调用点经 facade 取值，测试 `monkeypatch.setattr(blueprints.portfolio, 'TRADE_T1_LOCK_ENABLED', ...)` 语义保持。`analysis` 自 021CA（2026-09-25）仿 portfolio 模式拆为**包**：`analysis/__init__.py` 为 facade（bp + 全量再导出 + `__all__`），子模块按域分文件（_details 四维明细 / _enrich 响应增强 / advice 评级·建议·报告读取路由 / v5_demo 评分演示调试 / cards 只读卡片）；9 条 URL 规则与端点名 `analysis.api_*` 拆包前后一致，`blueprints/__init__.py` 聚合注册与 `app.py` 零改动。 |
 | **全局配置** | `config.py` | 路径、采集参数、评分权重、评级档位、风控阈值、Flask 配置。 |
 | **权重热加载** | `config_weights.json` | 评分权重，运行时可修改无需重启。 |
 | **数据库管理** | `database/db_manager.py` | **facade**（021BO，2026-09-21）：常量（DB_PATH/BACKUP_DIR/MAX_BACKUPS）+ 全量再导出；实现拆在 `database/_db/` 包（连接/WAL、备份、分域建表、迁移、init 编排）。约定：调用方只 `from database.db_manager import X`；可变配置在调用点经 facade 动态取值，测试 `monkeypatch.setattr(db_manager, 'DB_PATH', ...)` 语义保持。 |
@@ -56,7 +56,7 @@
 - `GET /api/daily-report/latest` — 取最新报告
 - `GET|POST /api/backtest/*` — 评级回测
 
-> 021D 起已删除的旧端点：`/api/stocks/<id>/refresh-full`、`/api/stocks/<id>/analysis`、`/api/stocks/<id>/ratings`、`/api/ratings`、`/api/backtest/simulate`、`/api/backtest/status`、`/api/daily-report/<date>`、`/api/daily-report/history`、`/api/watchlist/groups`、`/api/portfolio/groups/<id>`（PUT/DELETE）、`/api/positions/<id>/cost-adjustments`、`/api/portfolio/realized-pnl`、`/api/alerts/rules/<id>`（PUT）、`/api/alerts/scan`——详见 CHANGELOG 021D。
+> 021D 起已删除的旧端点：`/api/stocks/<id>/refresh-full`、`/api/stocks/<id>/analysis`、`/api/stocks/<id>/ratings`、`/api/ratings`、`/api/backtest/simulate`、`/api/backtest/status`、`/api/daily-report/<date>`、`/api/daily-report/history`、`/api/watchlist/groups`、`/api/portfolio/groups/<id>`（PUT/DELETE）、`/api/positions/<id>/cost-adjustments`、`/api/portfolio/realized-pnl`、`/api/alerts/rules/<id>`（PUT）、`/api/alerts/scan`——详见 CHANGELOG 021D（021BI 及更早批次已归档至 docs/CHANGELOG_archive_2026H2.md）。
 
 ### 多交易账户（021W，2026-08-21）
 
@@ -114,10 +114,14 @@ mypy app.py config.py modules
 > - `tests/test_routes.py` — 路由层冒烟测试（隔离临时库，不触网），覆盖全部 9 个蓝图的核心端点
 > - `tests/conftest.py` — pytest 公共配置，通过 MockDataProvider 生成纯内存数据隔离数据库与网络，并自动把项目根目录注入 sys.path
 >
-> 补充验证脚本（位于项目根目录，自带 sys.path 注入，需在项目根执行）：
-> - `test_us11_consistency.py` — US11 一致性验证脚本
+> 补充验证脚本（运维验证，位于 scripts/，自带 sys.path 注入，需在项目根执行；依赖生产数据与服务环境，勿纳入 pytest）：
+> - `scripts/verify_us11_consistency.py` — US11 一致性验证脚本（原根目录 `test_us11_consistency.py` 收编迁移，校验逻辑不变）
 > ```bash
-> python test_us11_consistency.py
+> python scripts/verify_us11_consistency.py
+> ```
+> - `scripts/data_source_health.py` — 数据源健康巡检（只读限速探测腾讯/东财/新浪/mootdx 四源：全局限速 ≥2s/请求、单请求超时 ≤15s、重试 ≤1；产出 `logs/data_source_health_*.md` 报告；退出码 0=全通 1=降级 2=不可用，mootdx 断供/北向停更等已知项按「预期降级」计入降级）
+> ```bash
+> python scripts/data_source_health.py    # 加 --json 追加机器可读输出
 > ```
 >
 > 021AE 起已删除：`test_engine_compare.py` / `tests/test_engine_compare.py`（新旧引擎对比脚本，随经典引擎一并退役）。
@@ -144,10 +148,10 @@ curl http://127.0.0.1:5000/api/health
 | `price_advisor.py` | 价格建议增强（后处理集成，不改 generate_advice）。 |
 | `price_backtest.py` | 价格建议回测验证（T+5/T+20 双周期命中率）。 |
 | `alert_engine.py` | P3-B 智能预警（G1-G3 规则）。 |
-| `backtest_engine.py` | M8 评级有效性监测（回测）引擎。 |
+| `modules/backtest_engine/` | **M8 评级有效性监测（回测）引擎包（021CA，2026-09-25 拆分）**：原 `backtest_engine.py`（1,887 行）按职责域拆为 9 子模块（`_env` 环境基座 → `judgement` 有效性判定 → `schema` 表结构迁移 → `position` 位置注记 → `evidence` 回测证据展示 → `sentiment_note` 情绪检验常量 → `engine` 核心引擎（BacktestEngine 整类单模块内聚不拆） → `simulate` 模拟回测回填 → `weight_experiment` 权重实验），`__init__` 为 **facade 全量再导出**（37 符号表面兼容，调用方零改动）。⚠️ 约定：①测试 monkeypatch 必须指向**实现子模块**（补丁打在 facade 对包内调用不可见）；②入口 `python -m modules.backtest_engine`（原 `python modules/backtest_engine.py` 直接执行路径随拆包消失，原文件本无 `__main__` 入口）。 |
 | `optimizer_engine.py` | M9 自动优化引擎（规则化方案；以 T+1 日准确率为代理，安全阀已知空转，021AI 起动态目标走 dynamic_optimizer）。 |
 | `dynamic_optimizer.py` | 021AI 动态窗口权重优化器：维度分重放+网格+前向验证+数据门槛（v5 纯净样本不足不改权）；入口 `scripts/run_dynamic_optimizer.py`。 |
-| `daily_report.py` | 每日报告生成（ThreadPoolExecutor 超时控制）。 |
+| `modules/daily_report/` | **每日报告生成包（021CA，2026-09-25 拆分）**：原 `daily_report.py`（1,786 行）按职责域拆为 8 子模块（`_env` 环境基座 → `_scheduler` 调度器（三窗资金流/A股收盘/港股16:10 批次+启动补跑+生命周期） → `_generator` 报告生成（R18 daemon 线程+join 超时模式原样） → `_progress` 进度追踪 → `_freshness` 数据完整度 → `_store` 保存与不变量（R9 锚点宿主） → `_summary` 汇总与查询 → `__main__` CLI），`__init__` 为 **facade 全量再导出 + PEP 562 `__getattr__` 动态转发运行期重赋值标量**（67 符号表面兼容，调用方零改动）。⚠️ 约定：①测试 monkeypatch 必须指向**实现/消费方子模块**；②CLI 用 `python -m modules.daily_report`。 |
 | `market_screener.py` | 021BI 全市场选股扫描器：两段漏斗（新浪快照粗筛 ~5553 只 → 腾讯K线 4 类金叉信号精筛 + 4 组买点共振组合：双金叉/周线共振/底部反转背离/零轴上二次金叉；2026-09-07 共振重设计，死叉/超买/超卖类已删——选股器只产买点候选）。数据源新浪/腾讯，与东财断连解耦；只产候选不自动入库，加自选 ≤20。端点 `POST /api/market/scan`、`/api/market/scan-signals`。 |
 | `index_collector.py` | 指数数据采集与评级。 |
 | `export_engine.py` | 报告导出（Excel .xlsx）。 |
@@ -208,16 +212,15 @@ stock_analyst/
 │   ├── db_manager.py       # facade：DB_PATH/BACKUP_DIR 常量 + 全量再导出（唯一导入面）
 │   └── _db/                # 实现：_connection(WAL) · _backup(备份) · _schema_*(分域建表) · _migrations · _init
 ├── modules/                # 业务模块（见模块地图）
-├── blueprints/             # API 路由蓝图（按业务域拆分；portfolio/ 021BO 起为包：facade + 7 个域子模块）
+├── blueprints/             # API 路由蓝图（按业务域拆分；portfolio/ 021BO 起为包：facade + 7 个域子模块；analysis/ 021CA 起为包：facade bp + 5 个域子模块）
 ├── templates/              # Flask 页面模板（仅 index.html 骨架）
 ├── static/                 # 前端静态资源（css/ + js/ 八文件按业务域加载：core→watchlist→analysis→portfolio→backtest→alerts→market→boot，OPT-4；vendor/ 本地化三方库，OPT-7）
-├── scripts/                # 运维脚本（托盘 tray.py / 服务安装 / 看门狗 watchdog.py / check_redlines.py / cleanup_backups.py）
+├── scripts/                # 运维脚本（托盘 tray.py / 服务安装 / 看门狗 watchdog.py / check_redlines.py / cleanup_backups.py / US11 一致性验证 verify_us11_consistency.py / 数据源健康巡检 data_source_health.py）
 ├── tests/                  # pytest 单元/冒烟测试（隔离临时库，不触网；含级联完整性清单 test_cascade_integrity.py、健康度 test_health_sources.py）
 ├── docs/                   # 项目文档（需求/任务书/验收/评审/PM上下文/知识库，见 docs/PROJECT_INDEX.md）
 ├── reports/                # 每日分析报告（运行产物，不入库；验收报告见 docs/reports/）
 ├── backups/                # 数据库备份（db_backup_*.db）
-├── logs/                   # 运行日志（app.log 等）
-└── test_*.py               # 补充验证脚本
+└── logs/                   # 运行日志（app.log 等）
 ```
 
 ---

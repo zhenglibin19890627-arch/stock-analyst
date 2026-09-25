@@ -43,6 +43,19 @@ def _read_db_sources():
     return '\n'.join(parts)
 
 
+def _read_daily_report_sources():
+    """t6（2026-09-22）：daily_report 拆分为 facade + modules/daily_report/ 实现包后，
+    「日报模块源码」的读取面 = facade __init__ + 全部实现子模块拼接（含 __main__）。
+    各红线断言字面量与判定方向零变化，仅扩展读取范围（R9 顶替 SQL 锚点现居 _store
+    子模块；R18 禁令覆盖 facade+全包）。比照 _read_db_sources / _read_collector_all 先例。"""
+    parts = [_read('modules/daily_report/__init__.py')]
+    impl_dir = os.path.join(BASE_DIR, 'modules', 'daily_report')
+    for name in sorted(os.listdir(impl_dir)):
+        if name.endswith('.py') and name != '__init__.py':
+            parts.append(_read(f'modules/daily_report/{name}'))
+    return '\n'.join(parts)
+
+
 _CHECK_FUNCS = []
 
 
@@ -243,7 +256,7 @@ def daily_reports_unique_constraint():
 @_check('R9')
 def daily_tops_intraday():
     """013：daily 生成时顶替当天 intraday（不变量语义）"""
-    src = _read('modules/daily_report.py')
+    src = _read_daily_report_sources()
     ok = "DELETE FROM daily_reports WHERE report_date=? AND stock_id=? AND report_type='intraday'" in src
     return ok, ('daily 顶替 intraday 语义存在' if ok else '顶替语义缺失')
 
@@ -368,7 +381,7 @@ def westock_node_guard():
 @_check('R18')
 def no_with_threadpoolexecutor():
     """M-1：严禁 with ThreadPoolExecutor 实现超时保护（shutdown(wait=True) 挂死）"""
-    src = _read('modules/daily_report.py')
+    src = _read_daily_report_sources()
     bad = re.search(r'with\s+ThreadPoolExecutor', src)
     return bad is None, ('未发现违规模式' if bad is None else '发现 with ThreadPoolExecutor')
 

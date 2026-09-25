@@ -1,4 +1,8 @@
 """
+运维验证脚本：需可访问生产库 stock_analyst.db（会真实生成每日报告并写库），
+在项目根目录执行：python scripts/verify_us11_consistency.py；
+依赖真实数据与环境，勿纳入 pytest（tests/ 为隔离不触网层）。
+
 US-11 强制修正项2：Markdown报告与API JSON一致性断言测试
 
 验证目标：
@@ -14,7 +18,7 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # 项目根（脚本已迁入 scripts/）
 
 from database.db_manager import get_connection
 from modules.advisor import generate_advice

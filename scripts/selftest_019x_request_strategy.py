@@ -25,8 +25,10 @@ from datetime import datetime, timedelta, timezone
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import modules.daily_report as dr
 import modules.data_collector as dc
+from modules.daily_report import (
+    _scheduler as dr,  # 021BO 拆包后补丁须打在实现子模块（facade 属性对包内调用不可见），与 tests 迁移同款
+)
 
 # 压掉 INFO 噪音（T1 200次模拟会打大量 INFO），保留 WARNING 供 T2 跳过日志断言
 _logging.getLogger('modules.data_collector').setLevel(_logging.WARNING)

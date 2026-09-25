@@ -108,7 +108,8 @@ class TestMaybeRefreshStaleIndexes:
 @pytest.mark.timeout(600)
 def test_hk_batch_refreshes_indexes(monkeypatch):
     """港股批次(16:10)完成后必须追加指数刷新（021AW 主修复）。"""
-    import modules.daily_report as dr
+    # t6 拆包迁移：调度面实现单宿 modules/daily_report/_scheduler
+    from modules.daily_report import _scheduler as dr
 
     order = []
     monkeypatch.setattr(

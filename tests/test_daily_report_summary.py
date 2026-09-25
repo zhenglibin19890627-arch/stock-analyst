@@ -16,6 +16,7 @@ import pytest
 
 import modules.daily_report as daily_report
 from database import db_manager
+from modules.daily_report import _summary
 
 
 @pytest.fixture()
@@ -23,7 +24,8 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setattr(db_manager, 'DB_PATH', str(tmp_path / 'test_report_summary.db'))
     db_manager.init_database()
     # markdown 落盘目录隔离（避免测试写工作区 reports/ 产物目录）
-    monkeypatch.setattr(daily_report, '_REPORTS_DIR', str(tmp_path / 'reports'))
+    # t6 拆包迁移：_REPORTS_DIR 随唯一消费方单宿 _summary（补丁打在 facade 对包内调用不可见）
+    monkeypatch.setattr(_summary, '_REPORTS_DIR', str(tmp_path / 'reports'))
     return tmp_path
 
 

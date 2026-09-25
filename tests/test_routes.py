@@ -273,9 +273,10 @@ def test_report_generate_debounce_returns_message(client, monkeypatch):
     回归：盘中快报/每日报告在任务进行中触发时，路由曾直接索引
     result['report_date'] 导致 KeyError，掩盖真实原因（'report_date'）。
     """
-    import modules.daily_report as daily_report
+    # t6 拆包迁移：_generate_lock 单宿实现子模块 _generator（补丁打在 facade 对包内调用不可见）
+    from modules.daily_report import _generator
 
-    monkeypatch.setattr(daily_report, '_generate_lock', _Locked())
+    monkeypatch.setattr(_generator, '_generate_lock', _Locked())
 
     for path in ['/api/daily-report/generate', '/api/daily-report/generate-intraday']:
         resp = client.post(path, json={})

@@ -135,7 +135,8 @@ class TestMaybeBackfillIndustryFlow:
 
 def test_hk_batch_refreshes_industry_flow(monkeypatch):
     """港股批次(16:10)完成后必须追加行业资金流二次刷新（021AX 主修复）。"""
-    import modules.daily_report as dr
+    # t6 拆包迁移：调度面实现单宿 modules/daily_report/_scheduler
+    from modules.daily_report import _scheduler as dr
 
     order = []
     monkeypatch.setattr(
@@ -156,7 +157,8 @@ def test_hk_batch_refreshes_industry_flow(monkeypatch):
 
 def test_hk_batch_cooldown_skips_flow(monkeypatch):
     """冷却中（刚失败过）不硬闯东财。"""
-    import modules.daily_report as dr
+    # t6 拆包迁移：调度面实现单宿 modules/daily_report/_scheduler
+    from modules.daily_report import _scheduler as dr
 
     order = []
     monkeypatch.setattr(dr, 'generate_daily_report', lambda **kw: {})

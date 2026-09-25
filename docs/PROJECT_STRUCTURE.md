@@ -34,12 +34,12 @@
 | `requirements.txt` | 依赖 | pip 依赖清单 |
 | `start.bat` / `start.sh` | 启动脚本 | Windows / Linux+Mac 一键启动 |
 | `stock_analyst.db` | **主库** | SQLite 数据库（**主库，与 `database/` 副本同步**） |
-| `CHANGELOG.md` | 变更日志 | 按日期记录所有批次变更（**根目录为唯一副本**） |
+| `CHANGELOG.md` | 变更日志 | 按日期记录批次变更（2026-09 起活跃条目；**根目录主文件为唯一写入点**，021BI 及更早 124 条已整体归档至 `docs/CHANGELOG_archive_2026H2.md`——只读历史快照，与主文件条目零重叠） |
 | `用户使用说明.md` | 用户手册 | 面向零代码用户的操作手册（B25 更新，587 行） |
-| `test_us11_consistency.py` | 测试 | US11 一致性验证脚本 |
+| `test_us11_consistency.py` | 测试 | US11 一致性验证脚本（021CA 已迁至 `scripts/verify_us11_consistency.py`，校验逻辑不变） |
 
 > 021AE（2026-08-22）：`config_engine_switch.json` 与 `test_engine_compare.py` 已随经典引擎退役删除。
-| `test_us11_consistency.py` | 测试 | US-11 列表与报告一致性测试 |
+| `test_us11_consistency.py` | 测试 | US-11 列表与报告一致性测试（021CA 已迁 `scripts/verify_us11_consistency.py`） |
 | `_p0_ths_stress_result.json` | 历史数据 | 同花顺接口压力测试结果（P0 阶段，存档） |
 | `$null` | ⚠️ 垃圾文件 | PowerShell 重定向误操作产物，**待清理** |
 | `=` | ⚠️ 垃圾文件 | 同上，**待清理** |
@@ -139,4 +139,4 @@ graph LR
 3. **`__pycache__/`**：Python 自动生成的字节码缓存，**可随时安全删除**，下次运行时自动重建。
 4. **任务书命名演进**：早期 `dev_tasks_20260722.md`（无批次号）→ 中期 `dev_tasks_20260722_B2.md`（下划线日期）→ 现行 `dev_tasks_2026-07-25_B12.md`（横线日期 + 批次号），**新任务书必须采用现行格式**。
 5. **下划线前缀约定**：根目录的 `_p0_ths_stress_result.json` 以及 `reports/_b22_flask.log` 均以下划线 `_` 开头，表示"非长期产物 / 历史存档"。
-6. **文档唯一副本**：`CHANGELOG.md` 和 `用户使用说明.md` **仅根目录有唯一副本**，`docs/` 下不再保留副本，避免双源漂移。
+6. **文档唯一副本**：`CHANGELOG.md` 和 `用户使用说明.md` **仅根目录有唯一副本**，`docs/` 下不再保留副本，避免双源漂移。例外（021CA，2026-09-25）：`docs/CHANGELOG_archive_2026H2.md` 为 CHANGELOG 021BI 及更早批次（124 条）的**只读历史归档快照**——整段搬移、与主文件条目零重叠、归档后不再修改，非第二写入点，不构成双源漂移。

@@ -11,7 +11,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from modules import daily_report
+# t6 拆包迁移：调度面实现单宿 modules/daily_report/_scheduler（补丁打在 facade 对包内调用不可见），
+# 变量名保持 daily_report 以最小化本文件 diff。
+from modules.daily_report import _scheduler as daily_report
 
 _CN_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
 

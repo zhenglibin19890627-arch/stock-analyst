@@ -35,7 +35,8 @@ WED_2030 = dt.datetime(2026, 8, 26, 20, 30)  # 周三 20:30（过点）
 
 
 def _mk(monkeypatch, env, gen=None):
-    import modules.daily_report as dr
+    # t6 拆包迁移：调度面实现单宿 modules/daily_report/_scheduler（补丁打在 facade 对包内调用不可见）
+    from modules.daily_report import _scheduler as dr
 
     calls = []
 
@@ -102,7 +103,8 @@ class TestCatchupTick:
 
 def test_register_and_stop_catchup(monkeypatch):
     """start_scheduler 注册补跑 Timer；stop_scheduler 防御性取消。"""
-    import modules.daily_report as dr
+    # t6 拆包迁移：调度器可变状态（Timer 柄）单宿 modules/daily_report/_scheduler
+    from modules.daily_report import _scheduler as dr
 
     fired = []
 
