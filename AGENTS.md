@@ -63,7 +63,7 @@
 - **隔离范围**：仅持仓域——`holdings`/`trade_records` 经 `account_id` 归属账户；自选股/分析/预警全局共享。
 - **关键约束**：`holdings` 唯一键为 `UNIQUE(account_id, stock_id)`（同股可多账户分仓）；默认账户（is_default=1）禁止删除；账户删除需 `force_confirm` 且流水保留归入默认账户。
 - **端点**：`GET|POST /api/accounts`、`PUT|DELETE /api/accounts/<id>`；持仓/流水/summary 端点均支持 `?account_id=` 过滤（缺省/'all'=全部聚合）。
-- **重算口径**：`_recalculate_holding(cursor, stock_id, account_id)` 按（股票, 账户）维度隔离，改流水逻辑时必须保持该口径。
+- **重算口径**：`_recalculate_holding(cursor, stock_id, account_id)` 按（股票, 账户）维度隔离，改流水逻辑时必须保持该口径。**021CB（2026-09-29）起分红/红利补税「红到成本」**：持仓中折进/折回成本价（对齐券商 App 摊薄成本展示），清仓后到账仍计已实现盈亏；021CB 前二者计入已实现盈亏——总盈亏不受口径影响，存量持仓已由 `scripts/recalc_holdings_021cb.py` 一次性迁移（备份 `db_backup_20260929_204811_recalc_holdings_021cb.db`）。
 - **多行兼容约定**：任何 `JOIN holdings ON stock_id` 的新代码必须处理同股多仓（用「最大持仓子查询」或按账户过滤），否则会产生重复行。
 
 ---

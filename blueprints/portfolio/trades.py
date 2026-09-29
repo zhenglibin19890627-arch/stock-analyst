@@ -45,10 +45,15 @@ def _recalculate_holding(cursor, stock_id, account_id):
         不记已实现盈亏（仍持仓中，盈亏继续体现在浮动盈亏里）
       · 清仓卖出：剩余总成本与卖出净得的差额一次性转入已实现盈亏
         （数学上与旧逐笔口径的清仓累计值一致：累计卖出净得 - 总买入成本）
-    - 分红(dividend)：数量不变，已实现盈亏 += 分红金额(amount)
-    - 红利补税(dividend_tax)：数量不变，已实现盈亏 -= 补税金额(amount)——
+    - 分红(dividend)：021CB 起「红到成本」（用户口径，对齐券商 App 摊薄成本）——
+      持仓中（total_qty>0）从总成本中扣除（净额=金额−费用），成本价随之降低；
+      清仓后到账的分红无成本可摊，仍计入已实现盈亏
+    - 红利补税(dividend_tax)：021CB 起持仓中折回成本（总成本 += 金额+费用）——
       021AM：股息红利差异扣税（A股按持股期限补扣/港股通代扣20%）与派息日
-      不同天发生，作独立流水记录，金额为补扣税款（正数存储）
+      不同天发生，作独立流水记录，金额为补扣税款（正数存储）；
+      清仓后的补税仍计入已实现盈亏扣减
+      注：021CB 前分红/补税计入已实现盈亏；总盈亏不受口径影响，
+      只是「在成本价里」与「在已实现盈亏里」的展示位置不同
     - 若重算后数量 ≤ 0，标记 status='cleared'（保留记录，不物理删除）
     返回重算后的持仓快照 dict。
     """
@@ -126,11 +131,23 @@ def _recalculate_holding(cursor, stock_id, account_id):
                     total_cost = 0
                     avg_cost = 0   # 021BL：清仓后成本价归零（券商口径），不再残留旧成本
         elif t['trade_type'] == 'dividend':
-            # 分红：金额计入已实现盈亏（手续费/划扣费一并扣除）
-            realized_pnl += max(0, amount) - commission
+            # 021CB：分红「红到成本」——持仓中从总成本扣除（摊薄，对齐券商 App 口径）；
+            # 清仓后到账的分红无成本可摊，仍计入已实现盈亏
+            dividend_net = max(0, amount) - commission
+            if total_qty > 0:
+                total_cost -= dividend_net
+                avg_cost = total_cost / total_qty if total_qty > 0 else 0
+            else:
+                realized_pnl += dividend_net
         elif t['trade_type'] == 'dividend_tax':
-            # 021AM：红利补税——金额从已实现盈亏中扣减（amount 正数=补扣税款）
-            realized_pnl -= max(0, amount) + commission
+            # 021CB：红利补税持仓中折回成本（总成本 += 金额+费用）；清仓后计入已实现盈亏扣减。
+            # 021AM：红利补税（差异扣税独立流水，日期与派息日不同）
+            tax_total = max(0, amount) + commission
+            if total_qty > 0:
+                total_cost += tax_total
+                avg_cost = total_cost / total_qty if total_qty > 0 else 0
+            else:
+                realized_pnl -= tax_total
 
     # 判断状态
     status = 'cleared' if total_qty <= 0 else 'active'

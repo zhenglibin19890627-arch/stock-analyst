@@ -1,14 +1,16 @@
 """
-021AM：红利补税（dividend_tax）流水单元/路由测试
+021AM/021CB：红利补税（dividend_tax）与分红（dividend）流水单元/路由测试
 
 覆盖：
-1. 新增 dividend_tax 流水：独立日期独立金额，realized_pnl 正确扣减
-2. 分红 + 补税组合：net = 分红 − 补税
+1. 新增 dividend_tax 流水：独立日期独立金额，持仓中折回成本（021CB 红到成本口径）
+2. 分红 + 补税组合：成本净变化 = −(分红 − 补税)
 3. 编辑 dividend_tax（改金额/日期）触发重算
-4. 删除 dividend_tax 回滚盈亏
+4. 删除 dividend_tax 回滚成本
 5. 全局流水汇总：total_dividend_tax 单列 + net_amount 计入补税
 6. 筛选参数 type=dividend_tax
 7. 非法类型仍被拒绝
+注：021CB 起分红/补税持仓中折进成本价（对齐券商 App 摊薄口径），
+不再计入已实现盈亏（清仓后的分红/补税仍走已实现盈亏）。
 """
 
 import pytest
@@ -18,7 +20,7 @@ from database import db_manager
 
 @pytest.fixture()
 def setup_env(tmp_path, monkeypatch):
-    """隔离库 + 1 只股票 + 买入 1000 股 @10（realized_pnl 基线 0）。"""
+    """隔离库 + 1 只股票 + 买入 1000 股 @10（commission 显式 0，成本基数恰为 10000）。"""
     db_path = str(tmp_path / 'test_divtax.db')
     monkeypatch.setattr(db_manager, 'DB_PATH', db_path)
     db_manager.init_database()
@@ -33,26 +35,28 @@ def setup_env(tmp_path, monkeypatch):
     conn.close()
 
     client = app_module.app.test_client()
-    # 默认账户买入建仓
+    # 默认账户买入建仓（commission 显式 0 → 隔离费用估算，成本基数 = 10000）
     r = client.post(
         f'/api/portfolio/holdings/{stock_id}/trades',
-        json={'trade_type': 'buy', 'price': 10.0, 'quantity': 1000, 'trade_date': '2026-06-01'},
+        json={'trade_type': 'buy', 'price': 10.0, 'quantity': 1000,
+              'commission': 0.0, 'trade_date': '2026-06-01'},
     )
     assert r.get_json()['success']
     return client, stock_id
 
 
-def _realized_pnl(client, stock_id):
+def _holding_field(client, stock_id, field):
     body = client.get('/api/portfolio/holdings?stock_id=' + str(stock_id)).get_json()
     rows = body.get('holdings') or body.get('data') or []
     for h in rows:
         if h.get('stock_id') == stock_id:
-            return h.get('realized_pnl')
+            return h.get(field)
     return None
 
 
-def test_add_dividend_tax_reduces_pnl(setup_env):
-    """分红 200 → 补税 40：realized_pnl = 200 − 40 = 160（补税日期独立）。"""
+def test_add_dividend_tax_folds_into_cost(setup_env):
+    """021CB：分红 200 折进成本、补税 40 折回成本 → 成本 = (10000−200+40)/1000 = 9.84；
+    已实现盈亏保持 0（分红不再计入已实现盈亏）。"""
     client, stock_id = setup_env
     r = client.post(
         f'/api/portfolio/holdings/{stock_id}/trades',
@@ -67,11 +71,14 @@ def test_add_dividend_tax_reduces_pnl(setup_env):
     )
     body = r.get_json()
     assert body['success']
-    assert body['recalculated_position']['realized_pnl'] == pytest.approx(160.0)
+    pos = body['recalculated_position']
+    assert pos['avg_cost'] == pytest.approx(9.84)
+    assert pos['realized_pnl'] == pytest.approx(0.0)
+    assert _holding_field(client, stock_id, 'cost_price') == pytest.approx(9.84)
 
 
 def test_dividend_tax_standalone(setup_env):
-    """只有补税没有分红（历史补录场景）：realized_pnl = −40。"""
+    """021CB：只有补税没有分红（历史补录场景）→ 成本 = (10000+40)/1000 = 10.04。"""
     client, stock_id = setup_env
     r = client.post(
         f'/api/portfolio/holdings/{stock_id}/trades',
@@ -79,11 +86,12 @@ def test_dividend_tax_standalone(setup_env):
     )
     body = r.get_json()
     assert body['success']
-    assert body['recalculated_position']['realized_pnl'] == pytest.approx(-40.0)
+    assert body['recalculated_position']['avg_cost'] == pytest.approx(10.04)
+    assert body['recalculated_position']['realized_pnl'] == pytest.approx(0.0)
 
 
 def test_edit_dividend_tax_recalculates(setup_env):
-    """编辑补税金额 40 → 25：盈亏随之更新。"""
+    """021CB：编辑补税金额 40 → 25：成本随之更新 = (10000−200+25)/1000 = 9.825。"""
     client, stock_id = setup_env
     r = client.post(
         f'/api/portfolio/holdings/{stock_id}/trades',
@@ -110,11 +118,12 @@ def test_edit_dividend_tax_recalculates(setup_env):
         json={'trade_type': 'dividend_tax', 'amount': 25.0, 'trade_date': '2026-08-05'},
     ).get_json()
     assert r3['success']
-    assert r3['recalculated_position']['realized_pnl'] == pytest.approx(175.0)
+    assert r3['recalculated_position']['avg_cost'] == pytest.approx(9.825)
+    assert r3['recalculated_position']['realized_pnl'] == pytest.approx(0.0)
 
 
-def test_delete_dividend_tax_restores_pnl(setup_env):
-    """删除补税流水：盈亏回滚。"""
+def test_delete_dividend_tax_restores_cost(setup_env):
+    """021CB：删除补税流水 → 成本回滚 = (10000−200)/1000 = 9.80。"""
     client, stock_id = setup_env
     r2 = client.post(
         f'/api/portfolio/holdings/{stock_id}/trades',
@@ -135,7 +144,28 @@ def test_delete_dividend_tax_restores_pnl(setup_env):
 
     r4 = client.delete(f'/api/portfolio/trades/{tax_id}').get_json()
     assert r4['success']
-    assert r4['recalculated_position']['realized_pnl'] == pytest.approx(200.0)
+    assert r4['recalculated_position']['avg_cost'] == pytest.approx(9.80)
+    assert r4['recalculated_position']['realized_pnl'] == pytest.approx(0.0)
+
+
+def test_dividend_after_cleared_goes_realized(setup_env):
+    """021CB 边界：清仓后到账的分红无成本可摊 → 计入已实现盈亏（而非负成本）。"""
+    client, stock_id = setup_env
+    r = client.post(
+        f'/api/portfolio/holdings/{stock_id}/trades',
+        json={'trade_type': 'sell', 'price': 10.0, 'quantity': 1000,
+              'commission': 0.0, 'trade_date': '2026-06-20'},
+    ).get_json()
+    assert r['success']
+    assert r['recalculated_position']['status'] == 'cleared'
+    r2 = client.post(
+        f'/api/portfolio/holdings/{stock_id}/trades',
+        json={'trade_type': 'dividend', 'amount': 88.0, 'trade_date': '2026-07-01'},
+    ).get_json()
+    assert r2['success']
+    pos = r2['recalculated_position']
+    assert pos['realized_pnl'] == pytest.approx(88.0)
+    assert pos['quantity'] == 0
 
 
 def test_all_trades_summary_includes_tax(setup_env):
