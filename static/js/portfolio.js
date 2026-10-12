@@ -462,6 +462,26 @@
             .catch(function(err) { console.error('loadPortfolioSummary:', err); });
     }
 
+    // ========== 021CC 指标阶段徽标（红涨绿跌惯例：多头红/空头绿/纠缠灰） ==========
+    // 数据来自 /api/portfolio/holdings 附带的 phase={phase,note}（离线只读复算）；
+    // K 线不足/已清仓时接口不带 phase 键，渲染占位符不硬标。note 作悬浮说明。
+    function _phaseBadgeHtml(phase) {
+        var empty = '<span style="color:var(--text-3,#999);font-size:12px;">—</span>';
+        if (!phase || !phase.phase) return empty;
+        var meta = {
+            bull:     { mark: '▲', label: '多头', color: '#e74c3c' },
+            bear:     { mark: '▼', label: '空头', color: '#27ae60' },
+            entangle: { mark: '◌', label: '纠缠', color: '#95a5a6' }
+        }[phase.phase];
+        if (!meta) return empty;
+        var note = String(phase.note || '');
+        var tip = '指标阶段：' + meta.label + '（MACD+KDJ 严格判定，为指标动量状态、非买卖信号）' +
+            (note ? '；' + note : '');
+        tip = tip.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return '<span style="color:' + meta.color + ';font-weight:600;font-size:12px;cursor:help;" ' +
+            'title="' + tip + '">' + meta.mark + ' ' + meta.label + '</span>';
+    }
+
     function loadHoldings() {
         var url = '/api/portfolio/holdings';
         var sep = '?';
@@ -477,7 +497,7 @@
                     _sortRenderers['holdings'] = loadHoldings;
                     var st = _sortState['holdings'];
                     var rows = st ? sortTable(_holdingsCache, st.key, st.order) : _holdingsCache;
-                    var html = addBtnHtml + '<table><thead><tr><th>市场</th><th>代码</th><th>名称</th>' +
+                    var html = addBtnHtml + '<table><thead><tr><th>市场</th><th>代码</th><th>名称</th><th>阶段</th>' +
                         (showAccountCol ? '<th>账户</th>' : '') +
                         '<th>分组</th><th>成本价</th>' +
                         sortableTh('holdings', 'latest_price', '最新价') +
@@ -557,6 +577,7 @@
                             '<td>' + mTag + '</td>' +
                             '<td><strong>' + h.symbol + '</strong></td>' +
                             '<td>' + (h.name || '—') + '</td>' +
+                            '<td>' + _phaseBadgeHtml(h.phase) + '</td>' +
                             (showAccountCol ? '<td>' + (h.account_name || '—') + '</td>' : '') +
                             '<td>' + (h.group_name || '—') + '</td>' +
                             '<td>' + costDisplay + '</td>' +

@@ -17,6 +17,40 @@ from blueprints.portfolio._scope import (
 )
 from database.db_manager import get_connection
 
+# 021CC 指标阶段槽：判定输入取最近 80 根日K（严格版指标预热约 35 根已够，
+# 多读为剔除 OHLC 坏行留余量）
+_PHASE_KLINE_LIMIT = 80
+
+
+def _indicator_phase(cursor, stock_id):
+    """单只股票的指标阶段（021CC 展示层，状态非信号；只读零写库）。
+
+    离线读 raw_kline 最近 80 根 → screener 行格式（trade_date→date 改名、
+    OHLC 缺失行剔除）→ modules.market_screener.detect_indicator_phase。
+    K 线不足 35 根或无数据返回 None（调用方不带 phase 键，不硬标）。
+    """
+    from modules.market_screener import detect_indicator_phase
+
+    cursor.execute(
+        'SELECT trade_date, open, close, high, low, volume '
+        'FROM raw_kline WHERE stock_id = ? ORDER BY trade_date DESC LIMIT ?',
+        (stock_id, _PHASE_KLINE_LIMIT),
+    )
+    kline_rows = []
+    for row in reversed(cursor.fetchall()):
+        d = dict(row)
+        if any(d.get(k) is None for k in ('open', 'close', 'high', 'low')):
+            continue
+        kline_rows.append({
+            'date': str(d['trade_date']),
+            'open': float(d['open']),
+            'close': float(d['close']),
+            'high': float(d['high']),
+            'low': float(d['low']),
+            'volume': float(d['volume'] or 0.0),
+        })
+    return detect_indicator_phase(kline_rows)
+
 
 @bp.route('/api/portfolio/holdings', methods=['GET'])
 def api_get_holdings():
@@ -60,6 +94,19 @@ def api_get_holdings():
 
     cursor.execute(sql, params)
     holdings = [dict(row) for row in cursor.fetchall()]
+
+    # ---- 021CC 指标阶段槽：active 持仓离线复算（只读零写库） ----
+    # 已清仓（status='cleared'）不带阶段；K 线不足/数据缺失不带 phase 键，
+    # 不硬标；单行坏数据不阻断整个持仓列表。
+    for h in holdings:
+        if (h.get('status') or '') == 'cleared':
+            continue
+        try:
+            phase = _indicator_phase(cursor, h['stock_id'])
+        except Exception:  # 阶段为展示增强，坏行降级为无阶段
+            phase = None
+        if phase:
+            h['phase'] = phase
     conn.close()
 
     # 格式化 latest_price / price_updated_at / 精确市值计算

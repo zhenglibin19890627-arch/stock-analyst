@@ -346,6 +346,15 @@ class TestWatchlistScanEndpoints:
 # ---- 报告双路径环境：临时库 + 深V K线（真实触发共振）+ 今日快照报告 ----
 
 
+def _mk_confirmed_klines():
+    """021CC：深V K线末根量能确认（3000 ≥ 前5均量1.5倍）——隔离健康修正扣减，
+    使快照 grade 断言保持「同日4★→中 / 跨日3★→弱」原语义（健康修正路径
+    由 021CC 专项测试覆盖）。"""
+    rows = _mk_klines(_deep_v_closes())
+    rows[-1]['volume'] = 3000.0
+    return rows
+
+
 def _seed_stock_with_klines(stock_id=1, symbol='600001', name='甲'):
     conn = db_manager.get_connection()
     try:
@@ -353,7 +362,7 @@ def _seed_stock_with_klines(stock_id=1, symbol='600001', name='甲'):
             "INSERT INTO stocks (id, symbol, market, name) VALUES (?, ?, 'a_stock', ?)",
             (stock_id, symbol, name),
         )
-        klines = _mk_klines(_deep_v_closes())
+        klines = _mk_confirmed_klines()
         for k in klines:
             conn.execute(
                 'INSERT INTO raw_kline (stock_id, trade_date, open, close, high, low, volume) '
@@ -363,7 +372,7 @@ def _seed_stock_with_klines(stock_id=1, symbol='600001', name='甲'):
         conn.commit()
     finally:
         conn.close()
-    return _mk_klines(_deep_v_closes())
+    return _mk_confirmed_klines()
 
 
 @pytest.fixture()

@@ -121,8 +121,8 @@ RESONANCE_LIBRARY = {
         'label': '双金叉共振', 'stars': 4, 'kind': 'bull',
         'note': 'MACD系金叉+KDJ系金叉同窗：两个独立指标系同向触发；同日触发更佳'},
     'res_week_daily': {
-        'label': '周线共振波段', 'stars': 5, 'kind': 'bull',
-        'note': '周线MACD多头(DIF>DEA)+日线窗口金叉：月线定方向周线定买点，中线波段结构'},
+        'label': '周线共振波段', 'stars': 4, 'kind': 'bull',
+        'note': '周线MACD多头(DIF>DEA)+日线窗口金叉：月线定方向周线定买点，中线波段结构（021CC 起 4★：状态+事件合取，触发频率高于其余5★组合，档位随校准复核）'},
     'res_bottom_reverse': {
         'label': '底部反转共振', 'stars': 5, 'kind': 'bull',
         'note': '底背离(价格创60日新低而DIF未新低)+KDJ低位金叉+放量阳线：左侧反转最强确认'},
@@ -134,8 +134,94 @@ RESONANCE_LIBRARY = {
 _MACD_BULL = ('macd_golden_above', 'macd_golden_below')
 _KDJ_BULL = ('kdj_golden_low', 'kdj_golden')
 _ALL_BULL = _MACD_BULL + _KDJ_BULL
-# 买点型共振取最高档（先到先得）：周线共振 > 底部反转 > 二次金叉 > 双金叉
+# 买点型共振按档位序全部返回（021CC 起叠加不折叠：主组合在前，其余为叠加命中）
 _RES_TIER_ORDER = ('res_week_daily', 'res_bottom_reverse', 'res_zero_relay', 'res_double_golden')
+
+
+def _completed_weekly(weekly_kline_rows, kline_rows):
+    """021CC T1：剔除在途未完结周bar（防盘中重绘）。
+
+    腾讯周K在周中含当周进行中的数据——最后一根周bar日期晚于最新已完结
+    交易日（日K最后一根日期）时，该周尚未收盘，周线 MACD 状态会随本周
+    价格漂移。周线状态判定只看已完结周。
+    """
+    if not weekly_kline_rows or not kline_rows:
+        return weekly_kline_rows
+    try:
+        if str(weekly_kline_rows[-1]['date']) > str(kline_rows[-1]['date']):
+            return weekly_kline_rows[:-1]
+    except (KeyError, TypeError):
+        return weekly_kline_rows
+    return weekly_kline_rows
+
+
+def _buy_health_deductions(kline_rows):
+    """021CC 健康修正（作用于买侧时机星，只减不加）：返回 (扣减数, 原因列表)。
+
+    −1 RSI>70 超买追高；−1 近20日金叉/死叉符号翻转合计 ≥3 次（震荡骗线环境）；
+    −1 触发日量能未确认（最新量 < 前5日均量1.5倍；底部反转组合自带放量阳线
+    条件，其成立时本项天然不触发）。数据不足的项跳过，不猜。
+    """
+    mods = []
+    if not kline_rows or len(kline_rows) < 20:
+        return 0, mods
+    closes = [r['close'] for r in kline_rows]
+    rsis = _rsi_series(closes)
+    if rsis and rsis[-1] is not None and rsis[-1] > 70:
+        mods.append('RSI超买追高')
+    dif, dea = _macd_series(closes)
+    ks, ds, _js = _kdj_series(
+        [r['high'] for r in kline_rows], [r['low'] for r in kline_rows], closes)
+    flips = 0
+    for i in range(len(closes) - 20, len(closes)):
+        m_now = dif[i] - dea[i] if (dif[i] is not None and dea[i] is not None) else None
+        m_prev = dif[i - 1] - dea[i - 1] if (dif[i - 1] is not None and dea[i - 1] is not None) else None
+        k_now = ks[i] - ds[i] if (ks[i] is not None and ds[i] is not None) else None
+        k_prev = ks[i - 1] - ds[i - 1] if (ks[i - 1] is not None and ds[i - 1] is not None) else None
+        if m_now is not None and m_prev is not None and m_now * m_prev < 0:
+            flips += 1
+        if k_now is not None and k_prev is not None and k_now * k_prev < 0:
+            flips += 1
+    if flips >= 3:
+        mods.append('震荡骗线频繁')
+    last = kline_rows[-1]
+    prev_vols = [r['volume'] for r in kline_rows[-6:-1]]
+    if (prev_vols and last['volume'] is not None
+            and last['volume'] < 1.5 * (sum(prev_vols) / len(prev_vols))):
+        mods.append('量能未确认')
+    return len(mods), mods
+
+
+def detect_indicator_phase(kline_rows):
+    """指标阶段（021CC，状态展示非信号，不产买卖指令）。
+
+    严格版判定（D2）：
+      多头 ▲ = DIF>DEA 且 MACD 柱体不减 且 K>D
+      空头 ▼ = DIF<DEA 且 MACD 柱体不增 且 K<D
+      其余   = 纠缠 ◌（条件不齐，如实标注）
+    K线不足 35 根返回 None（数据不足不硬标）。
+
+    Returns: {'phase': 'bull'|'bear'|'entangle', 'note': str} or None
+    """
+    if not kline_rows or len(kline_rows) < 35:
+        return None
+    closes = [r['close'] for r in kline_rows]
+    dif, dea = _macd_series(closes)
+    if dif[-1] is None or dea[-1] is None or dif[-2] is None or dea[-2] is None:
+        return None
+    ks, ds, _js = _kdj_series(
+        [r['high'] for r in kline_rows], [r['low'] for r in kline_rows], closes)
+    if ks[-1] is None or ds[-1] is None:
+        return None
+    hist = dif[-1] - dea[-1]
+    hist_prev = dif[-2] - dea[-2]
+    if dif[-1] > dea[-1] and hist >= hist_prev and ks[-1] > ds[-1]:
+        grow = '扩张' if hist > hist_prev else '持平'
+        return {'phase': 'bull', 'note': f'MACD红柱{grow}·K>D({ds[-1]:.0f})'}
+    if dif[-1] < dea[-1] and hist <= hist_prev and ks[-1] < ds[-1]:
+        shrink = '扩张' if hist < hist_prev else '持平'
+        return {'phase': 'bear', 'note': f'MACD绿柱{shrink}·K<D({ds[-1]:.0f})'}
+    return {'phase': 'entangle', 'note': '多头空头条件不齐'}
 
 
 def _ma_series(closes, n):
@@ -152,12 +238,14 @@ def _ma_series(closes, n):
 
 
 def detect_resonances(hits, kline_rows=None, weekly_kline_rows=None):
-    """从单只股票的信号命中推导共振组合（2026-09-07 重设计）。
+    """从单只股票的信号命中推导共振组合（2026-09-07 重设计；021CC 修订）。
 
     hits: detect_signals 输出；kline_rows: 日K（背离/放量/二次金叉证据）；
-    weekly_kline_rows: 周K（可选，周线共振波段用，由调用方按需补拉）。
-    Returns: [{'key', 'label', 'stars', 'kind', 'note', 'signals': [label@date...]}]
-    买点型取最高档（周线共振 > 底部反转 > 二次金叉 > 双金叉）。
+    weekly_kline_rows: 周K（可选，周线共振波段用，由调用方按需补拉；
+    021CC 起在途未完结周自动剔除）。
+    Returns: [{'key', 'label', 'stars', 'kind', 'note', 'signals'}...]——
+    021CC 起按档位序**全部返回**（叠加不折叠，主组合在前，其余为叠加命中）；
+    星级含健康修正（RSI超买/震荡骗线/量能未确认，各 -1，下限 2★，注记带原因）。
     """
     if not hits:
         return []
@@ -181,30 +269,45 @@ def detect_resonances(hits, kline_rows=None, weekly_kline_rows=None):
 
     sig_desc = ' + '.join(f"{h['label']}@{h['trigger_date']}" for h in hits)
 
+    def _health_suffix():
+        """健康修正注记后缀（021CC）：ded>0 时带扣减数与原因；同股同扣全部组合。"""
+        return f'·健康修正-{ded}（{"、".join(mods)}）' if ded else ''
+
     def _res(key):
         lib = RESONANCE_LIBRARY[key]
-        return {'key': key, 'label': lib['label'], 'stars': lib['stars'],
-                'kind': lib['kind'], 'note': lib['note'] + env_str,
+        stars = lib['stars']
+        note = lib['note'] + env_str
+        if ded:
+            stars = max(2, stars - ded)
+            note += _health_suffix()
+        return {'key': key, 'label': lib['label'], 'stars': stars,
+                'kind': lib['kind'], 'note': note,
                 'signals': sig_desc}
+
+    # 021CC 健康修正（只减不加，同股同扣；底部反转自带放量阳线条件，量能项天然不触发）
+    ded, mods = _buy_health_deductions(kline_rows)
 
     found = {}
 
-    # ① 双金叉共振：MACD系 + KDJ系同窗（同日触发 ⭐4，跨日同窗 ⭐3）
+    # ① 双金叉共振：MACD系 + KDJ系同窗（同日触发 ⭐4，跨日同窗 ⭐3；含健康修正，
+    #    动态星在健康修正之后扣减——同股同扣，不得覆盖修正结果）
     if macd_bull and kdj_bull:
         dates = {h['trigger_date'] for h in hits if h['signal'] in _ALL_BULL}
         res = _res('res_double_golden')
-        res['stars'] = 4 if len(dates) == 1 else 3
+        res['stars'] = max(2, (4 if len(dates) == 1 else 3) - ded)
         if len(dates) == 1:
-            res['note'] = '同日双金叉（MACD+KDJ同日触发）：标准买入共振' + env_str
+            res['note'] = ('同日双金叉（MACD+KDJ同日触发）：标准买入共振'
+                           + env_str + _health_suffix())
         found['res_double_golden'] = res
 
     if kline_rows and len(kline_rows) >= 35:
         closes = [r['close'] for r in kline_rows]
         n = len(closes)
 
-        # ② 周线共振波段：周线 MACD 多头（DIF>DEA）+ 日线窗口内金叉
-        if weekly_kline_rows and len(weekly_kline_rows) >= 35:
-            wdif, wdea = _macd_series([r['close'] for r in weekly_kline_rows])
+        # ② 周线共振波段：周线 MACD 多头（DIF>DEA，已完结周）+ 日线窗口内金叉
+        weekly_done = _completed_weekly(weekly_kline_rows, kline_rows)
+        if weekly_done and len(weekly_done) >= 35:
+            wdif, wdea = _macd_series([r['close'] for r in weekly_done])
             if wdif[-1] > wdea[-1]:
                 found['res_week_daily'] = _res('res_week_daily')
 
@@ -239,11 +342,8 @@ def detect_resonances(hits, kline_rows=None, weekly_kline_rows=None):
                 if mid_golden:
                     found['res_zero_relay'] = _res('res_zero_relay')
 
-    # 买点型取最高档
-    for key in _RES_TIER_ORDER:
-        if key in found:
-            return [found[key]]
-    return []
+    # 买点型按档位序全部返回（021CC 叠加不折叠：主组合在前，其余为叠加命中）
+    return [found[key] for key in _RES_TIER_ORDER if key in found]
 
 
 # ================================================================
@@ -741,7 +841,8 @@ def detect_sell_resonances(hits, kline_rows=None, weekly_kline_rows=None):
     hits: detect_sell_signals 输出；kline_rows: 日K（顶背离/放量滞涨证据）；
     weekly_kline_rows: 周K（可选，周线空头波段卖用）。
     Returns: [{'key', 'label', 'stars', 'kind', 'note', 'signals': 'label@date + ...'}]
-    卖点型取最高档（顶背离反转 > 周线空头 > 双死叉）。
+    021CC 起按档位序全部返回（顶背离反转 > 周线空头 > 双死叉；叠加不折叠，
+    主组合在前）。周线判定剔除在途未完结周（同买侧 T1）。
     """
     if not hits:
         return []
@@ -785,9 +886,10 @@ def detect_sell_resonances(hits, kline_rows=None, weekly_kline_rows=None):
     if kline_rows and len(kline_rows) >= 35:
         closes = [r['close'] for r in kline_rows]
 
-        # ② 周线空头波段卖：周线 MACD 空头（DIF<DEA）+ 日线窗口内死叉
-        if weekly_kline_rows and len(weekly_kline_rows) >= 35:
-            wdif, wdea = _macd_series([r['close'] for r in weekly_kline_rows])
+        # ② 周线空头波段卖：周线 MACD 空头（DIF<DEA，已完结周）+ 日线窗口内死叉
+        weekly_done = _completed_weekly(weekly_kline_rows, kline_rows)
+        if weekly_done and len(weekly_done) >= 35:
+            wdif, wdea = _macd_series([r['close'] for r in weekly_done])
             if wdif[-1] < wdea[-1]:
                 found['res_week_bear'] = _res('res_week_bear')
 
@@ -811,11 +913,8 @@ def detect_sell_resonances(hits, kline_rows=None, weekly_kline_rows=None):
                     res['note'] += '·放量滞涨'
                 found['res_top_reverse'] = res
 
-    # 卖点型取最高档
-    for key in _SELL_RES_TIER_ORDER:
-        if key in found:
-            return [found[key]]
-    return []
+    # 卖点型按档位序全部返回（021CC 叠加不折叠：主组合在前，其余为叠加命中）
+    return [found[key] for key in _SELL_RES_TIER_ORDER if key in found]
 
 
 # ================================================================

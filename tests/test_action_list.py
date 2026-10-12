@@ -38,7 +38,11 @@ _YDAY = '2026-09-18'
 
 
 def _sig_result(sids, trigger_today=True):
-    """t2 scan_watchlist_signals 返回的最小模拟：今日命中 + 5星共振。"""
+    """t2 scan_watchlist_signals 返回的最小模拟：今日命中 + 5星共振。
+
+    021CC D1 后周线共振为 4★，5★ 档真实组合为底部反转/零轴上二次——
+    模拟改用 res_bottom_reverse 保持星级语义真实（顶部排序逻辑不变）。
+    """
     trigger = _TODAY if trigger_today else '2026-09-17'
     return {
         'scope': 'watchlist_offline',
@@ -53,7 +57,7 @@ def _sig_result(sids, trigger_today=True):
                      'trigger_date': trigger, 'note': ''},
                 ],
                 'resonances': [
-                    {'key': 'res_week_daily', 'label': '周线共振波段', 'stars': 5,
+                    {'key': 'res_bottom_reverse', 'label': '底部反转共振', 'stars': 5,
                      'kind': 'bull', 'note': '', 'signals': ''},
                 ],
                 'kline_upto': _TODAY, 'kline_count': 47,

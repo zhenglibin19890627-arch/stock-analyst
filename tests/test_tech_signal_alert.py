@@ -48,13 +48,15 @@ def _mk_rows(closes):
     ]
 
 
-def _insert_klines(conn, stock_id, closes, table='raw_kline'):
+def _insert_klines(conn, stock_id, closes, table='raw_kline', last_vol=None):
+    """021CC：last_vol 提供时末根量能确认（≥前5均量1.5倍），隔离健康修正扣减。"""
     conn.executemany(
         f'INSERT OR IGNORE INTO {table} '
         '(stock_id, trade_date, open, close, high, low, volume) '
         'VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [(stock_id, d, c * 0.99, c, c * 1.01, c * 0.98, 1000.0)
-         for d, c in zip(_dates(len(closes)), closes)],
+        [(stock_id, d, c * 0.99, c, c * 1.01, c * 0.98,
+          last_vol if (last_vol is not None and i == len(closes) - 1) else 1000.0)
+         for i, (d, c) in enumerate(zip(_dates(len(closes)), closes))],
     )
     conn.commit()
 
@@ -130,9 +132,13 @@ class TestSeedsAndWhitelists:
 
 class TestOfflineRecompute:
     def test_scan_watchlist_signals_full_chain(self, db):
-        """库内日K+周K → 信号 + 周线共振；交叉落在最新一根；口径标注"""
+        """库内日K+周K → 信号 + 周线共振；交叉落在最新一根；口径标注。
+
+        021CC：末根量能确认隔离健康修正；D1 周线共振 4★（主组合在前）+
+        叠加不折叠——同日双金叉 4★ 同批透出为第二组合。
+        """
         conn = db_manager.get_connection()
-        _insert_klines(conn, db, _deep_v_gap_closes())
+        _insert_klines(conn, db, _deep_v_gap_closes(), last_vol=3000.0)
         _insert_klines(conn, db, _WEEKLY_UP, table='raw_kline_weekly')
         conn.close()
 
@@ -150,8 +156,10 @@ class TestOfflineRecompute:
         }
         # "今日出现"口径的前提：交叉触发日 == 最新已采集K线日
         assert {h['trigger_date'] for h in item['matches']} == {item['kline_upto']}
-        assert [r['key'] for r in item['resonances']] == ['res_week_daily']
-        assert item['resonances'][0]['stars'] == 5
+        assert [r['key'] for r in item['resonances']] == [
+            'res_week_daily', 'res_double_golden']       # 档位序主组合在前 + 叠加不折叠
+        assert item['resonances'][0]['stars'] == 4       # 021CC D1：5★→4★
+        assert '021CC' in item['resonances'][0]['note']  # 降档校准说明随注记透出
         assert item['kline_count'] == 47
 
     def test_stock_ids_filter(self, db):
@@ -197,9 +205,12 @@ class TestOfflineRecompute:
 
 class TestScanOnceAlertChain:
     def test_alert_written_and_idempotent(self, db):
-        """命中写 alert_history（走既有写入路径）；同日二次扫描幂等跳过"""
+        """命中写 alert_history（走既有写入路径）；同日二次扫描幂等跳过。
+
+        021CC：末根量能确认隔离健康修正；主组合周线共振 4★（D1 降档）。
+        """
         conn = db_manager.get_connection()
-        _insert_klines(conn, db, _deep_v_gap_closes())
+        _insert_klines(conn, db, _deep_v_gap_closes(), last_vol=3000.0)
         _insert_klines(conn, db, _WEEKLY_UP, table='raw_kline_weekly')
         conn.close()
 
@@ -221,7 +232,7 @@ class TestScanOnceAlertChain:
         assert {s['signal'] for s in detail['signals']} == {
             'macd_golden_below', 'kdj_golden_low',
         }
-        assert detail['resonances'][0]['stars'] == 5
+        assert detail['resonances'][0]['stars'] == 4  # 021CC D1：周线共振 4★
 
         # 同日二次扫描：命中照旧，UNIQUE(rule_id, stock_id, trigger_date) 幂等
         second = alert_engine.scan_once()
@@ -266,12 +277,12 @@ class TestScanOnceAlertChain:
         assert _tech_alert_rows() == []
 
     def test_min_stars_gate_passes_on_weekly_resonance(self, db):
-        """星级门槛：周线共振5星 ≥ 门槛 → 提醒且个股规则优先于全局规则"""
+        """星级门槛：周线共振4★（021CC D1 降档）≥ 门槛4 → 提醒且个股规则优先于全局规则"""
         conn = db_manager.get_connection()
-        _insert_klines(conn, db, _deep_v_gap_closes())
+        _insert_klines(conn, db, _deep_v_gap_closes(), last_vol=3000.0)
         _insert_klines(conn, db, _WEEKLY_UP, table='raw_kline_weekly')
         conn.close()
-        _add_stock_rule(db, 5)
+        _add_stock_rule(db, 4)
 
         result = alert_engine.scan_once()
         assert result['triggered'] == 1

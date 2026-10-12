@@ -7,7 +7,13 @@
 - 止盈棘轮（滚动窗口10天）：take_profit = max(公式值, 近10天历史报告最高止盈)
 
 隔离临时库 + 直接构造 daily_reports 历史快照，走 generate_price_advice 全流程。
+
+021CC：日期锚点动态化修复——棘轮窗以真实当天为锚（today−10 天截断），原硬编码
+种子日期（2026-09-15）随日历漂移出窗导致用例假红；改为以真实当天为锚的动态
+日期（today−3/−8 天，与原偏移等价），断言逻辑零变化。
 """
+
+from datetime import date, timedelta
 
 import pytest
 
@@ -124,7 +130,11 @@ class TestTakeProfitRatchet:
         _seed_holding(sid, client._account_id, 12.0)
         _seed_kline(sid, 10.0)
         # 3 天前历史止盈 11.2 > 当日公式值（10×1.075 封顶=10.75）→ 棘轮抬到 11.2
-        _seed_history_tp(sid, [('2026-09-15', 11.2), ('2026-09-10', 11.0)])
+        # （021CC 日期锚点动态化：today−3/−8 天，原硬编码 2026-09-15 随日历漂移出窗）
+        _seed_history_tp(sid, [
+            ((date.today() - timedelta(days=3)).isoformat(), 11.2),
+            ((date.today() - timedelta(days=8)).isoformat(), 11.0),
+        ])
         r = generate_price_advice(sid, {'rating': '持有观望', 'latest_close': 10.0,
                                         'market': 'a_stock'})
         assert r['available'] and r['has_position']
@@ -136,7 +146,8 @@ class TestTakeProfitRatchet:
         _seed_holding(sid, client._account_id, 9.0)
         _seed_kline(sid, 10.0)
         # 历史止盈 10.2 < 当日公式值 11.0（min_tp 10.4, fixed 11.2, 阻力回退 11.0）→ 公式值生效
-        _seed_history_tp(sid, [('2026-09-15', 10.2)])
+        # （021CC 日期锚点动态化：today−3 天保持棘轮窗内，比较语义不变）
+        _seed_history_tp(sid, [((date.today() - timedelta(days=3)).isoformat(), 10.2)])
         r = generate_price_advice(sid, {'rating': '持有观望', 'latest_close': 10.0,
                                         'market': 'a_stock'})
         assert r['take_profit'] == pytest.approx(11.0, abs=0.01)

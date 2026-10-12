@@ -285,22 +285,28 @@ class TestSellResonances:
         assert res[0]['kind'] == 'bear'
 
     def test_top_reverse_resonance(self):
-        """顶背离（价格新高而 DIF 未新高）+ KDJ高位死叉 → 顶背离反转卖 5 星"""
+        """顶背离（价格新高而 DIF 未新高）+ KDJ高位死叉 → 顶背离反转卖 5 星主组合。
+
+        021CC T3 叠加不折叠：同窗双死叉 4★ 同批透出（周线 UP 不成立周线空头）。
+        """
         rows = _mk_rows(_top_divergence_closes())
         weekly = _mk_rows(_WEEKLY_UP)
         hits = detect_sell_signals(rows)
         assert {h['trigger_date'] for h in hits} == {rows[-1]['date']}
         res = detect_sell_resonances(hits, rows, weekly)
-        assert [r['key'] for r in res] == ['res_top_reverse']
+        assert [r['key'] for r in res] == ['res_top_reverse', 'res_double_dead']
         assert res[0]['stars'] == 5
+        assert res[1]['stars'] == 4
 
     def test_tier_top_reverse_wins_over_week_bear(self):
-        """取最高档：顶背离反转 > 周线空头 > 双死叉（先到先得，仅返回一档）"""
+        """021CC T3 叠加不折叠：档位序全返回——顶背离反转(主) > 周线空头 > 双死叉。"""
         rows = _mk_rows(_top_divergence_closes())
-        weekly = _mk_rows(_WEEKLY_DOWN)  # 周线同样空头 → 两档同时成立
+        weekly = _mk_rows(_WEEKLY_DOWN)  # 周线同样空头 → 三档同时成立
         hits = detect_sell_signals(rows)
         res = detect_sell_resonances(hits, rows, weekly)
-        assert [r['key'] for r in res] == ['res_top_reverse']
+        assert [r['key'] for r in res] == [
+            'res_top_reverse', 'res_week_bear', 'res_double_dead']
+        assert [r['stars'] for r in res] == [5, 5, 4]
 
     def test_volume_stall_annotation(self):
         """可选放量滞涨注记：末根放量收阴 → note 追加·放量滞涨"""
@@ -344,8 +350,11 @@ class TestScanSellChain:
         assert {h['signal'] for h in item['sell_matches']} == {
             'macd_dead_above', 'kdj_dead_high'}
         assert {h['trigger_date'] for h in item['sell_matches']} == {item['kline_upto']}
-        # 周线空头(5星) 取最高档（双死叉 4 星同成立但不返回）
-        assert [r['key'] for r in item['sell_resonances']] == ['res_week_bear']
+        # 021CC T3 叠加不折叠：主组合周线空头(5★)在前，双死叉 4★ 同批透出
+        assert [r['key'] for r in item['sell_resonances']] == [
+            'res_week_bear', 'res_double_dead']
+        assert item['sell_resonances'][0]['stars'] == 5
+        assert item['sell_resonances'][1]['stars'] == 4   # 同日双死叉
         assert item['kline_count'] == 46
 
     def test_scan_sell_stock_ids_filter(self, db):
@@ -388,7 +397,11 @@ class TestScanSellChain:
         item = result['results'][0]
         assert {h['signal'] for h in item['matches']} == {
             'macd_golden_below', 'kdj_golden_low'}
-        assert [r['key'] for r in item['resonances']] == ['res_week_daily']
+        # 021CC：主组合周线共振在前（档位序）+ 叠加不折叠（双金叉同批透出）；
+        # 常量量能触发健康修正−1（量能未确认）→ 周线共振 4★−1=3★
+        res_keys = [r['key'] for r in item['resonances']]
+        assert res_keys[0] == 'res_week_daily'
+        assert 'res_double_golden' in res_keys
         assert 'side' not in result  # 买侧响应不带卖侧标注（结构零变化）
         # 买侧形态在卖侧巡检下零命中（双侧互不污染）
         sell_result = scan_watchlist_sell_signals(stock_ids=[db])

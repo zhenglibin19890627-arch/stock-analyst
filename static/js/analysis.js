@@ -1531,6 +1531,28 @@
                             _tcEsc((tf.reasons || []).join('；')) + '</span>';
                     html += '</div>';
                 });
+                // 021CC 指标阶段行：罗盘管价格趋势、阶段管指标动量（互补并列）。
+                // 数据不足（K线<35根）时响应不带 phase 键，整行不渲染、不硬标；
+                // 注记截断至 20 字，经 _tcEsc 转义防标签吞字。
+                if (d.phase && d.phase.phase) {
+                    var pMeta = {
+                        bull:     { mark: '▲', label: '多头', color: '#e74c3c' },
+                        bear:     { mark: '▼', label: '空头', color: '#27ae60' },
+                        entangle: { mark: '◌', label: '纠缠', color: '#95a5a6' }
+                    }[d.phase.phase];
+                    if (pMeta) {
+                        var phaseNote = String(d.phase.note || '');
+                        if (phaseNote.length > 20) phaseNote = phaseNote.slice(0, 20) + '…';
+                        html += '<div style="display:flex;align-items:center;gap:10px;padding:6px 0;">' +
+                            '<span style="font-weight:600;min-width:86px;">指标阶段</span>' +
+                            '<span style="color:' + pMeta.color + ';font-weight:600;font-size:13px;cursor:help;" ' +
+                            'title="指标阶段：' + pMeta.label + '（MACD+KDJ 严格判定，指标动量状态非买卖信号）">' +
+                            pMeta.mark + ' ' + pMeta.label + '</span>' +
+                            (phaseNote ? '<span style="color:var(--text-2,#666);font-size:12.5px;">' +
+                                _tcEsc(phaseNote) + '</span>' : '') +
+                            '</div>';
+                    }
+                }
                 // 021BN：评级 × 罗盘调和提示（有矛盾信号时才显示）
                 var hint = _tcReconcileHint(rating, o, d.timeframes || {});
                 if (hint) {

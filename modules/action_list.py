@@ -12,6 +12,14 @@
   路3 alert_history 当日触发（未读）
   路4 （经路1 的 overview 行透出操盘手阶段/分歧，供卡片副表）
 
+021CC 增量（共振星级语义重构第一批，方案 docs/reports/021cc_indicator_phase_star_plan_20261010.md）：
+  - 持有条目阶段槽：持仓纪律/持有买点信号行 detail 增 phase（detect_indicator_phase
+    离线判定，raw_kline 最近 80 根，不足不带）、reason 前缀「指标阶段▲多头；」
+    （▲多头/▼空头/◌纠缠）
+  - 买点条目行动语义矩阵（时机×方向，021BP 相悖调和升级为规则表）：reason 追加
+    「。行动：X」（置于相悖调和文案之后），detail 增 action/direction_ok
+  - stats 增共振档位分布（5/4/3/无，买卖两侧各一份），供星级通胀分布监控
+
 排序约定（"今日应做"，021BT 起盘中触线置顶）：
   P0 盘中触线提醒（路0b，021BT：交易时段时效性；标注『盘中口径，以收盘确认为准』）
   > P1 持仓纪律·止损已触发（收盘口径纪律无条件最高）> P1 评级升降 > P2 卖出信号·持仓
@@ -51,6 +59,9 @@ _CONFLICT_RATINGS = ('建议减仓', '强烈建议卖出')
 # （"短线回调警示，评级未变"），评级仍是动作主指令。方向与 _CONFLICT_RATINGS
 # 相反，独立元组，勿复用。
 _SELL_CONFLICT_RATINGS = ('推荐买入', '强烈推荐买入')
+
+# 021CC 阶段槽标签：detect_indicator_phase 输出的 phase → 行动清单 reason 前缀用
+_PHASE_LABEL = {'bull': '▲多头', 'bear': '▼空头', 'entangle': '◌纠缠'}
 
 
 def get_action_list():
@@ -107,6 +118,10 @@ def get_action_list():
             for r in cursor.fetchall()
         }
 
+        # 021CC ①：持仓股指标阶段离线预计算（raw_kline 最近 80 根，纯读库+纯函数；
+        # 异常逐股降级空表并 warning——阶段是展示槽位，不得阻塞清单装配）
+        phase_map = _compute_phase_map(cursor, held_map)
+
         # 021BR t3 路0：持仓纪律扫描（止损已触发的持仓股——诊断缺陷 F 静默缺口；
         # 与操盘手矩阵同口径：有效止损 = max(聚合成本×0.92, 最新日报 price_advice
         # .stop_loss)，现价 = raw_kline 最新日K收盘，触发判定同一价格源）
@@ -137,6 +152,7 @@ def get_action_list():
         alerts_today=alerts_today, signal_result=signal_result,
         sell_result=sell_result, held_map=held_map,
         discipline_rows=discipline_rows,
+        phase_map=phase_map,  # 021CC：持仓股指标阶段（conn 块内离线预计算）
         live_trader_fallback=True,  # 021BS R2 N01：看板端点启用 trader 摘要 live 兜底
     )
 
@@ -223,9 +239,71 @@ def _scan_stop_discipline(cursor, held_map, price_map=None):
     return rows
 
 
+def _compute_phase_map(cursor, held_map, limit=80):
+    """021CC：held_map 持仓股 → {stock_id: detect_indicator_phase 输出}（只读离线）。
+
+    raw_kline 最近 limit（80）根倒序读取，转 screener 行格式后判定指标阶段
+    （▲多头/▼空头/◌纠缠）；K线不足 35 根（detect_indicator_phase 门槛）值为
+    None（数据不足不硬标）；单股异常降级跳过并 warning（阶段是展示槽位，
+    不阻塞清单装配）。
+    """
+    from modules.market_screener import _rows_to_screener_klines, detect_indicator_phase
+
+    phase_map = {}
+    for sid in (held_map or {}):
+        try:
+            cursor.execute(
+                'SELECT trade_date, open, close, high, low, volume '
+                'FROM raw_kline WHERE stock_id=? ORDER BY trade_date DESC LIMIT ?',
+                (sid, limit),
+            )
+            rows = _rows_to_screener_klines(reversed(cursor.fetchall()))
+            phase_map[sid] = detect_indicator_phase(rows)
+        except Exception as e:  # noqa: BLE001 —— 单股失败不阻塞其余持仓
+            logger.warning(f'[行动清单] 指标阶段计算跳过 stock_id={sid}: {e}')
+    return phase_map
+
+
+def _phase_reason_prefix(phase_slot):
+    """021CC 阶段槽 reason 前缀：「指标阶段▲多头；」；无阶段（不足/异常/空仓）→ ''。"""
+    label = _PHASE_LABEL.get(phase_slot.get('phase')) if isinstance(phase_slot, dict) else None
+    return f'指标阶段{label}；' if label else ''
+
+
+def _action_semantics(top_stars, direction_ok):
+    """021CC 行动语义矩阵（时机星 × 方向，方案 §3.6；021BP 相悖调和升级为规则表）。
+
+    5★✓ 正常买入候选 ｜ 5★✗ 仅短线反弹参考，严止损
+    4★✓ 可建底仓     ｜ 4★✗ 观察等确认
+    其余✓ 持有等信号 ｜ ✗ 回避
+    direction_ok 为 None（最新 ok 评级缺失，方向不可判）→ None：不产行动语义。
+    """
+    if direction_ok is None:
+        return None
+    if top_stars >= 5:
+        return '正常买入候选' if direction_ok else '仅短线反弹参考，严止损'
+    if top_stars == 4:
+        return '可建底仓' if direction_ok else '观察等确认'
+    return '持有等信号' if direction_ok else '回避'
+
+
+def _star_dist_key(top_stars):
+    """共振档位分布桶（021CC 分布监控口径）：'5'/'4'/'3'/'无'。
+
+    '3' 桶含 3★及以下的有共振命中（健康修正下限 2★ 计入本桶）；0 星=无共振。
+    """
+    if not top_stars:
+        return '无'
+    if top_stars >= 5:
+        return '5'
+    if top_stars == 4:
+        return '4'
+    return '3'
+
+
 def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
                       sell_result=None, held_map=None, discipline_rows=None,
-                      live_trader_fallback=False):
+                      phase_map=None, live_trader_fallback=False):
     """纯逻辑装配今日行动清单（不触库不触网，全部输入由调用方给定）。
 
     Args:
@@ -241,13 +319,16 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
             （holdings 账户无关聚合；None=全部视为空仓）
         discipline_rows: 021BR 持仓纪律扫描行（_scan_stop_discipline 输出；
             None=未扫描，不产行动项）
+        phase_map: 021CC {stock_id: detect_indicator_phase 输出}（持仓股离线
+            预计算，见 _compute_phase_map；None=未提供，持有条目不带阶段槽）
         live_trader_fallback: 021BS R2 N01——stored key_factors.trader 缺失
             （批次后刷新覆盖丢失形态）时 live 现算兜底（只读；会触库）。
             仅看板端点路径（get_action_list）启用；纯函数默认关闭，行为不变。
 
     Returns: {
         'date', 'items'（排序后行动项）, 'overview'（今日有报告股概览+操盘手摘要）,
-        'failed_stocks'（今日失败股显式列出）, 'stats'（十一项计数）
+        'failed_stocks'（今日失败股显式列出）, 'stats'（十一项计数 + 021CC 共振
+        档位分布×2：resonance_star_dist / sell_resonance_star_dist，键 '5'/'4'/'3'/'无'）
     }
     """
     latest_by_stock = {}
@@ -274,6 +355,10 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
         'resonance_hits': 0,
         'sell_hits': 0,
         'sell_resonance_hits': 0,
+        # 021CC 分布监控：共振档位分布（'5'/'4'/'3'（含健康修正降档）/'无'），
+        # 买卖两侧各一份——供行动清单与分布监控脚本对照星级通胀回归
+        'resonance_star_dist': {'5': 0, '4': 0, '3': 0, '无': 0},
+        'sell_resonance_star_dist': {'5': 0, '4': 0, '3': 0, '无': 0},
         'unread_alerts_today': 0,
     }
 
@@ -284,6 +369,8 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
         if s is None:
             continue
         stats['stop_discipline_hits'] += 1
+        # 021CC 阶段槽：持仓纪律行带指标阶段（数据不足/异常时前缀与槽位为空不硬标）
+        phase_slot = (phase_map or {}).get(d['stock_id'])
         stop_parts = []
         if d.get('discipline_stop') is not None:
             stop_parts.append(f"成本线 {d['discipline_stop']:.2f}")
@@ -305,6 +392,8 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
                 f"（{' / '.join(stop_parts)} 取高者）"
                 f"，持仓 {d['total_qty']:,} 股——纪律无条件执行，不等评级、不等反抽"
             )
+        # 021CC：阶段前缀置于 reason 首位（「指标阶段▲多头；止损纪律已触发：…」）
+        reason = _phase_reason_prefix(phase_slot) + reason
         items.append({
             'priority': 1,
             'priority_label': '持仓纪律',
@@ -320,6 +409,7 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
                 'total_qty': d['total_qty'],
                 'avg_cost': d['avg_cost'],
                 'price_source': d.get('price_source'),
+                'phase': phase_slot,
             },
         })
 
@@ -463,24 +553,37 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
             stats['signal_hits'] += 1
             if top_stars >= _TOP_RESONANCE_STARS:
                 stats['resonance_hits'] += 1
+            stats['resonance_star_dist'][_star_dist_key(top_stars)] += 1
             labels = '、'.join(h['label'] for h in hits_today)
             reason = f'今日出现买点信号：{labels}'
             if resonances:
                 res_str = '、'.join(f"{r['label']}（{r['stars']}星）" for r in resonances)
                 reason += f'；共振组合：{res_str}'
+            # 021CC 阶段槽：持有股的买点行带指标阶段（前缀置于 reason 首位）
+            held_qty = int(((held_map or {}).get(s['stock_id']) or {}).get('total_qty') or 0)
+            phase_slot = (phase_map or {}).get(s['stock_id']) if held_qty > 0 else None
+            reason = _phase_reason_prefix(phase_slot) + reason
             # 评级相悖调和（021BP 修订）：最新评级为减仓/卖出档时显式标注，
             # detail.rating_conflict 供前端徽标转琥珀色"反弹信号·与评级相悖"
             latest = latest_by_stock.get(s['stock_id'])
             conflict_rating = None
-            if latest and latest.get('status') == 'ok' and latest.get('rating') in _CONFLICT_RATINGS:
-                conflict_rating = latest.get('rating')
-                score = latest.get('total_score')
-                score_txt = f'（{score:.1f}分）' if isinstance(score, (int, float)) else ''
-                reason += (
-                    f'。当前综合评级「{conflict_rating}」{score_txt}：'
-                    '此为下跌趋势中的超跌反弹信号，未获趋势确认——'
-                    '仅作调仓窗口/短线波段参考，非趋势反转买入'
-                )
+            direction_ok = None
+            if latest and latest.get('status') == 'ok':
+                # 021CC ③ 方向槽：最新 ok 评级 ∉ 相悖档 → ✓；缺失（缺报/失败）不判
+                direction_ok = latest.get('rating') not in _CONFLICT_RATINGS
+                if not direction_ok:
+                    conflict_rating = latest.get('rating')
+                    score = latest.get('total_score')
+                    score_txt = f'（{score:.1f}分）' if isinstance(score, (int, float)) else ''
+                    reason += (
+                        f'。当前综合评级「{conflict_rating}」{score_txt}：'
+                        '此为下跌趋势中的超跌反弹信号，未获趋势确认——'
+                        '仅作调仓窗口/短线波段参考，非趋势反转买入'
+                    )
+            # 021CC ③ 行动语义矩阵（时机×方向）：置于既有相悖调和文案之后
+            action = _action_semantics(top_stars, direction_ok)
+            if action:
+                reason += f'。行动：{action}'
             items.append({
                 'priority': 2,
                 'priority_label': '买点信号',
@@ -500,6 +603,9 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
                     'top_stars': top_stars,
                     'kline_upto': kline_upto,
                     'rating_conflict': conflict_rating,
+                    'action': action,
+                    'direction_ok': direction_ok,
+                    'phase': phase_slot,
                 },
             })
 
@@ -521,6 +627,7 @@ def build_action_list(today, stocks, report_rows, alerts_today, signal_result,
             stats['sell_hits'] += 1
             if top_stars >= _TOP_RESONANCE_STARS:
                 stats['sell_resonance_hits'] += 1
+            stats['sell_resonance_star_dist'][_star_dist_key(top_stars)] += 1
 
             # 持仓标记（holdings 账户无关聚合；空仓者的卖点信号弱相关——排序垫底）
             held_info = (held_map or {}).get(s['stock_id']) or {}

@@ -123,6 +123,10 @@ mypy app.py config.py modules
 > ```bash
 > python scripts/data_source_health.py    # 加 --json 追加机器可读输出
 > ```
+> - `scripts/resonance_stats_021cc.py` — 共振档位分布监控（021CC，只读·零网络·零写库：对自选股库内 K 线离线复算，输出 5★/4★/3★/2★/无共振各档触发数 + 健康修正三来源分布 + 个股主组合星级，防星级通胀回归、供 021CD 校准；退出码 0=快照完成 2=库文件缺失）
+> ```bash
+> python scripts/resonance_stats_021cc.py    # 加 --json 追加机器可读输出
+> ```
 >
 > 021AE 起已删除：`test_engine_compare.py` / `tests/test_engine_compare.py`（新旧引擎对比脚本，随经典引擎一并退役）。
 
@@ -152,7 +156,7 @@ curl http://127.0.0.1:5000/api/health
 | `optimizer_engine.py` | M9 自动优化引擎（规则化方案；以 T+1 日准确率为代理，安全阀已知空转，021AI 起动态目标走 dynamic_optimizer）。 |
 | `dynamic_optimizer.py` | 021AI 动态窗口权重优化器：维度分重放+网格+前向验证+数据门槛（v5 纯净样本不足不改权）；入口 `scripts/run_dynamic_optimizer.py`。 |
 | `modules/daily_report/` | **每日报告生成包（021CA，2026-09-25 拆分）**：原 `daily_report.py`（1,786 行）按职责域拆为 8 子模块（`_env` 环境基座 → `_scheduler` 调度器（三窗资金流/A股收盘/港股16:10 批次+启动补跑+生命周期） → `_generator` 报告生成（R18 daemon 线程+join 超时模式原样） → `_progress` 进度追踪 → `_freshness` 数据完整度 → `_store` 保存与不变量（R9 锚点宿主） → `_summary` 汇总与查询 → `__main__` CLI），`__init__` 为 **facade 全量再导出 + PEP 562 `__getattr__` 动态转发运行期重赋值标量**（67 符号表面兼容，调用方零改动）。⚠️ 约定：①测试 monkeypatch 必须指向**实现/消费方子模块**；②CLI 用 `python -m modules.daily_report`。 |
-| `market_screener.py` | 021BI 全市场选股扫描器：两段漏斗（新浪快照粗筛 ~5553 只 → 腾讯K线 4 类金叉信号精筛 + 4 组买点共振组合：双金叉/周线共振/底部反转背离/零轴上二次金叉；2026-09-07 共振重设计，死叉/超买/超卖类已删——选股器只产买点候选）。数据源新浪/腾讯，与东财断连解耦；只产候选不自动入库，加自选 ≤20。端点 `POST /api/market/scan`、`/api/market/scan-signals`。 |
+| `market_screener.py` | 021BI 全市场选股扫描器：两段漏斗（新浪快照粗筛 ~5553 只 → 腾讯K线 4 类金叉信号精筛 + 4 组买点共振组合：双金叉/周线共振/底部反转背离/零轴上二次金叉；2026-09-07 共振重设计，死叉/超买/超卖类已删——选股器只产买点候选）。数据源新浪/腾讯，与东财断连解耦；只产候选不自动入库，加自选 ≤20。端点 `POST /api/market/scan`、`/api/market/scan-signals`。021CC（2026-10-10）共振星级语义重构：①周线共振降 4★（状态+事件合取触发频率高于其余 5★ 组合，矫正难度倒挂，档位随 021CD 校准复核）；②完结周守卫 `_completed_weekly`——周线 MACD 判定剔除在途未完结周 bar（防盘中重绘，买卖两侧同守卫）；③叠加不折叠——`detect_resonances`/`detect_sell_resonances` 按档位序全部返回（主组合在前），替代原「取最高档」折叠；④健康修正 `_buy_health_deductions`——买侧时机星只减不加（RSI>70 超买追高/近20日震荡骗线≥3次/量能未确认，各 −1、下限 2★，注记带原因）；⑤纯函数 `detect_indicator_phase`（指标阶段 ▲多头/▼空头/◌纠缠，严格版三条件判定，K线<35 根返回 None 不硬标；状态展示非信号，仅持仓页/行动清单/报告页三处展示，不进选股排序），分布监控 `scripts/resonance_stats_021cc.py`。 |
 | `index_collector.py` | 指数数据采集与评级。 |
 | `export_engine.py` | 报告导出（Excel .xlsx）。 |
 | `news_collector.py` | 新闻/消息面采集。 |
@@ -215,7 +219,7 @@ stock_analyst/
 ├── blueprints/             # API 路由蓝图（按业务域拆分；portfolio/ 021BO 起为包：facade + 7 个域子模块；analysis/ 021CA 起为包：facade bp + 5 个域子模块）
 ├── templates/              # Flask 页面模板（仅 index.html 骨架）
 ├── static/                 # 前端静态资源（css/ + js/ 八文件按业务域加载：core→watchlist→analysis→portfolio→backtest→alerts→market→boot，OPT-4；vendor/ 本地化三方库，OPT-7）
-├── scripts/                # 运维脚本（托盘 tray.py / 服务安装 / 看门狗 watchdog.py / check_redlines.py / cleanup_backups.py / US11 一致性验证 verify_us11_consistency.py / 数据源健康巡检 data_source_health.py）
+├── scripts/                # 运维脚本（托盘 tray.py / 服务安装 / 看门狗 watchdog.py / check_redlines.py / cleanup_backups.py / US11 一致性验证 verify_us11_consistency.py / 数据源健康巡检 data_source_health.py / 共振分布监控 resonance_stats_021cc.py）
 ├── tests/                  # pytest 单元/冒烟测试（隔离临时库，不触网；含级联完整性清单 test_cascade_integrity.py、健康度 test_health_sources.py）
 ├── docs/                   # 项目文档（需求/任务书/验收/评审/PM上下文/知识库，见 docs/PROJECT_INDEX.md）
 ├── reports/                # 每日分析报告（运行产物，不入库；验收报告见 docs/reports/）

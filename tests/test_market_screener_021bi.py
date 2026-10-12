@@ -124,10 +124,15 @@ class TestResonances:
         return closes
 
     def test_double_golden_same_day_upgrade(self):
-        """深V反弹：低位金叉+水下金叉同窗；若同日触发升 ⭐4，跨日同窗 ⭐3。"""
+        """深V反弹：低位金叉+水下金叉同窗；若同日触发升 ⭐4，跨日同窗 ⭐3。
+
+        021CC：末根量能确认（3000 ≥ 前5均量1.5倍）隔离健康修正，聚焦动态星本身。
+        """
         closes = self._deep_v()
-        hits = detect_signals(_mk_klines(closes), window=4)
-        res = detect_resonances(hits, _mk_klines(closes))
+        rows = _mk_klines(closes)
+        rows[-1]['volume'] = 3000.0
+        hits = detect_signals(rows, window=4)
+        res = detect_resonances(hits, rows)
         assert [r['key'] for r in res] == ['res_double_golden']
         top = res[0]
         assert top['kind'] == 'bull' and top['stars'] in (3, 4)
@@ -136,16 +141,26 @@ class TestResonances:
             assert '同日双金叉' in top['note']
 
     def test_week_daily_top_tier(self):
-        """周线MACD多头 + 日线金叉 → ⭐5 周线共振波段（最高档优先）。"""
+        """021CC D1：周线共振降 4★（档位序主组合在前）；叠加不折叠——
+        双金叉同批透出为第二组合。末根量能确认隔离健康修正。"""
         closes = self._deep_v()
-        hits = detect_signals(_mk_klines(closes), window=4)
+        rows = _mk_klines(closes)
+        rows[-1]['volume'] = 3000.0
+        hits = detect_signals(rows, window=4)
         weekly = _mk_klines([100 + i * 1.0 for i in range(40)])   # 周线稳步上行 → DIF>DEA
-        res = detect_resonances(hits, _mk_klines(closes), weekly)
-        assert [r['key'] for r in res] == ['res_week_daily']
-        assert res[0]['stars'] == 5
+        res = detect_resonances(hits, rows, weekly)
+        keys = [r['key'] for r in res]
+        assert keys[0] == 'res_week_daily'          # 主组合在前（档位序）
+        assert 'res_double_golden' in keys          # 叠加不折叠（021CC T3）
+        assert res[0]['stars'] == 4                 # D1：5★→4★
+        assert '021CC' in res[0]['note']            # 降档校准说明随注记透出
 
     def test_bottom_reverse_divergence(self):
-        """急跌→缓涨→阴跌创新低（DIF未新低=背离）+低位金叉+放量阳线 → ⭐5 底部反转。"""
+        """急跌→缓涨→阴跌创新低（DIF未新低=背离）+低位金叉+放量阳线 → 底部反转。
+
+        021CC：主组合在前 + 叠加不折叠；5★−1（近20日震荡骗线频繁——该形态
+        反复翻转天然触发，量能项因放量阳线天然不触发）→ 4★，注记带原因。
+        """
         closes = [100 - i * 1.0 for i in range(20)]        # 急跌：DIF 深渊
         closes += [80 + i * 0.3 for i in range(20)]        # 缓涨：DIF 修复
         closes += [86 - i * 0.35 for i in range(12)]       # 阴跌：DIF 回落但不创新低
@@ -157,21 +172,28 @@ class TestResonances:
         hits = detect_signals(rows, window=4)
         assert 'kdj_golden_low' in _signal_keys(hits)
         res = detect_resonances(hits, rows)
-        assert [r['key'] for r in res] == ['res_bottom_reverse']
-        assert res[0]['stars'] == 5
+        assert res[0]['key'] == 'res_bottom_reverse'       # 主组合在前（档位序）
+        assert 'res_double_golden' in [r['key'] for r in res]   # 叠加不折叠
+        assert res[0]['stars'] == 4                        # 5★ − 1 震荡骗线（下限 2★ 之上）
+        assert '健康修正-1' in res[0]['note']
 
     def test_zero_relay_second_golden(self):
-        """强趋势内两次"回调-修复"：近15日二次金叉且DIF>0 + KDJ中位金叉 → ⭐5。"""
+        """强趋势内两次"回调-修复"：近15日二次金叉且DIF>0 + KDJ中位金叉 → 零轴中继。
+
+        021CC：末根量能确认后健康修正剩震荡骗线一项 → 5★−1=4★，注记带原因。
+        """
         closes = [50 + i * 1.2 for i in range(45)]
         closes += [closes[-1] - 6.0 * (i + 1) for i in range(3)]   # 回调一（死叉）
         closes += [closes[-1] + 9.0 * (i + 1) for i in range(3)]   # 修复 → 金叉①
         closes += [closes[-1] - 6.0 * (i + 1) for i in range(3)]   # 回调二（再死叉）
         closes += [closes[-1] + 9.0 * (i + 1) for i in range(3)]   # 修复 → 金叉②
         rows = _mk_klines(closes)
+        rows[-1]['volume'] = 3000.0                        # 量能确认：隔离量能扣减
         hits = detect_signals(rows, window=3)
         res = detect_resonances(hits, rows)
         assert res and res[0]['key'] == 'res_zero_relay'
-        assert res[0]['stars'] == 5
+        assert res[0]['stars'] == 4                        # 5★ − 1 震荡骗线
+        assert '健康修正-1' in res[0]['note']
 
     def test_double_golden_not_low(self):
         """强趋势缺口金叉：非60日新低 → 不得误判为底部反转。"""
